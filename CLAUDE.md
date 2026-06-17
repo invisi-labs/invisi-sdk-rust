@@ -26,9 +26,9 @@
 ### 子项目②：Prover
 
 - **invisi-sdk-prover**（未建）：独立 crate，选型 spike 中。未来将：
-  - 选定本地 ZK proof 框架（Halo2 / Circom Witness / 其他）
-  - 实现 circuit 编译 + witness 生成 + proof 构造
-  - 导出 FFI 给 app 端调用（如 `privacy_prove_identity_opening`）
+  - 本地 ZK proof 框架 = **Barretenberg (bb) UltraHonk** —— 本地生成的 proof 必须与链上 `../invisi-protocol/contracts/src/verifiers/shielded_payment_verifier.sol`（bb UltraHonk）**bit 兼容**；故**非** Halo2 / Circom（那些证明格式与已部署 verifier 不兼容）
+  - spike：bb 经 FFI 绑定到 Rust 的可行性 + 与 verifier 的 bit 兼容验证 + 打包 `shielded_payment` 电路 artifact
+  - 实现 witness 生成 + proof 构造 + FFI 导出给 app
   - 仓库内 workspace 集成
   
 ## 关键设计

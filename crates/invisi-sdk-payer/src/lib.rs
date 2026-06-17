@@ -9,13 +9,30 @@ sol! {
     function payBlind(bytes proof, bytes32 paymentCommitment, bytes32 changeCommitment, uint256 inputAmount, uint256 treeId, bytes32 refundLink);
 }
 
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, FixedBytes, U256};
 use alloy_sol_types::SolCall;
 
 pub fn build_approve_calldata(spender: &[u8; 20], amount: &[u8; 32]) -> Vec<u8> {
     approveCall {
         spender: Address::from(*spender),
         amount: U256::from_be_bytes(*amount),
+    }
+    .abi_encode()
+}
+
+pub fn build_pay_open_calldata(
+    identity_commitment: &[u8; 32],
+    amount: &[u8; 32],
+    nonce: &[u8; 32],
+    tree_id: u64,
+    refund_link: &[u8; 32],
+) -> Vec<u8> {
+    payOpenCall {
+        identityCommitment: FixedBytes::from(*identity_commitment),
+        amount: U256::from_be_bytes(*amount),
+        nonce: FixedBytes::from(*nonce),
+        treeId: U256::from(tree_id),
+        refundLink: FixedBytes::from(*refund_link),
     }
     .abi_encode()
 }
@@ -37,6 +54,17 @@ mod tests {
             "00000000000000000000000000000000000000000000000000000000000003e8",
         ]);
         assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn pay_open_calldata_matches_cast() {
+        let identity = [0x11u8; 32];
+        let mut amount = [0u8; 32]; amount[30] = 0x03; amount[31] = 0xe8; // 1000
+        let nonce = [0x22u8; 32];
+        let refund = [0u8; 32];
+        let got = build_pay_open_calldata(&identity, &amount, &nonce, 1, &refund);
+        const GOLDEN: &str = "8cf55984111111111111111111111111111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000003e8222222222222222222222222222222222222222222222222222222222222222200000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000";
+        assert_eq!(got, decode_hex(GOLDEN));
     }
 
     // test helpers

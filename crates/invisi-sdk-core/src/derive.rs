@@ -49,11 +49,11 @@ pub fn compute_payment_commitment(
     identity_commitment: &[u8; 32],
     token: &[u8; 20],
     amount: &[u8; 32],
-    nonce: &[u8; 16],
+    nonce: &[u8; 32],
 ) -> [u8; 32] {
     let chain = chain_id_to_field(chain_id);
     let tok = pad_to_32(token);
-    let n = pad_to_32(nonce);
+    let n = *nonce;
     h(D_PAY, &[&chain, identity_commitment, &tok, amount, &n])
 }
 
@@ -66,11 +66,11 @@ pub fn compute_payment_nullifier(
     chain_id: u64,
     token: &[u8; 20],
     amount: &[u8; 32],
-    nonce: &[u8; 16],
+    nonce: &[u8; 32],
 ) -> Result<[u8; 32]> {
     let chain = chain_id_to_field(chain_id);
     let tok = pad_to_32(token);
-    let n = pad_to_32(nonce);
+    let n = *nonce;
     let out = h(D_NULL, &[&chain, nullifier_key, &tok, amount, &n]);
     if out == [0u8; 32] {
         return Err(Error::NullifierIsZero);

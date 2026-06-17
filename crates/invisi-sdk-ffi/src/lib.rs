@@ -169,7 +169,7 @@ pub unsafe extern "C" fn privacy_compute_payment_commitment(
             return false;
         }
     };
-    let nonce = match read_hex_fixed::<16>(nonce_hex) {
+    let nonce = match read_hex_fixed::<32>(nonce_hex) {
         Some(v) => v,
         None => {
             write_err(err_buf, err_cap, "INPUT_INVALID");
@@ -233,7 +233,7 @@ pub unsafe extern "C" fn privacy_compute_payment_nullifier(
             return false;
         }
     };
-    let nonce = match read_hex_fixed::<16>(nonce_hex) {
+    let nonce = match read_hex_fixed::<32>(nonce_hex) {
         Some(v) => v,
         None => {
             write_err(err_buf, err_cap, "INPUT_INVALID");
@@ -482,7 +482,7 @@ mod tests {
         let ident = cstr(&hex::encode([1u8; 32]));
         let tok = cstr(&hex::encode([2u8; 20]));
         let amt = cstr(&hex::encode([3u8; 32]));
-        let nonce = cstr(&hex::encode([4u8; 16]));
+        let nonce = cstr(&hex::encode([4u8; 32]));
         let mut out = vec![0u8; 128];
         let mut err = vec![0u8; 64];
         let ok = unsafe {
@@ -508,7 +508,7 @@ mod tests {
         let ident = cstr(&hex::encode([1u8; 32]));
         let tok = cstr(&hex::encode([2u8; 20]));
         let amt = cstr(&hex::encode([3u8; 32]));
-        let nonce = cstr(&hex::encode([4u8; 16]));
+        let nonce = cstr(&hex::encode([4u8; 32]));
         let mut out = vec![0u8; 128];
         let mut err = vec![0u8; 64];
         let ok = unsafe {
@@ -534,7 +534,7 @@ mod tests {
         let chain = cstr("1");
         let tok = cstr(&hex::encode([3u8; 20]));
         let amt = cstr(&hex::encode([4u8; 32]));
-        let nonce = cstr(&hex::encode([5u8; 16]));
+        let nonce = cstr(&hex::encode([5u8; 32]));
         let mut out = vec![0u8; 128];
         let mut err = vec![0u8; 64];
         let ok = unsafe {

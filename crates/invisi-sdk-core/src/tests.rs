@@ -106,7 +106,7 @@ fn payment_commitment_deterministic() {
     let id = [1u8; 32];
     let tok = [2u8; 20];
     let amt = [3u8; 32];
-    let n = [4u8; 16];
+    let n = [4u8; 32];
     assert_eq!(
         compute_payment_commitment(1, &id, &tok, &amt, &n),
         compute_payment_commitment(1, &id, &tok, &amt, &n),
@@ -119,8 +119,8 @@ fn payment_commitment_varies_with_nonce() {
     let tok = [2u8; 20];
     let amt = [3u8; 32];
     assert_ne!(
-        compute_payment_commitment(1, &id, &tok, &amt, &[4u8; 16]),
-        compute_payment_commitment(1, &id, &tok, &amt, &[5u8; 16]),
+        compute_payment_commitment(1, &id, &tok, &amt, &[4u8; 32]),
+        compute_payment_commitment(1, &id, &tok, &amt, &[5u8; 32]),
     );
 }
 
@@ -129,7 +129,7 @@ fn payment_commitment_varies_with_chain() {
     let id = [1u8; 32];
     let tok = [2u8; 20];
     let amt = [3u8; 32];
-    let n = [4u8; 16];
+    let n = [4u8; 32];
     assert_ne!(
         compute_payment_commitment(1, &id, &tok, &amt, &n),
         compute_payment_commitment(2, &id, &tok, &amt, &n),
@@ -141,7 +141,7 @@ fn payment_nullifier_normal_input_nonzero() {
     let nk = [1u8; 32];
     let tok = [2u8; 20];
     let amt = [3u8; 32];
-    let n = [4u8; 16];
+    let n = [4u8; 32];
     let r = compute_payment_nullifier(&nk, 1, &tok, &amt, &n).expect("non-zero");
     assert_ne!(r, [0u8; 32]);
 }
@@ -151,7 +151,7 @@ fn payment_nullifier_deterministic() {
     let nk = [1u8; 32];
     let tok = [2u8; 20];
     let amt = [3u8; 32];
-    let n = [4u8; 16];
+    let n = [4u8; 32];
     let r1 = compute_payment_nullifier(&nk, 1, &tok, &amt, &n).unwrap();
     let r2 = compute_payment_nullifier(&nk, 1, &tok, &amt, &n).unwrap();
     assert_eq!(r1, r2);
@@ -161,7 +161,7 @@ fn payment_nullifier_deterministic() {
 fn payment_nullifier_varies_with_nk() {
     let tok = [2u8; 20];
     let amt = [3u8; 32];
-    let n = [4u8; 16];
+    let n = [4u8; 32];
     let r1 = compute_payment_nullifier(&[1u8; 32], 1, &tok, &amt, &n).unwrap();
     let r2 = compute_payment_nullifier(&[2u8; 32], 1, &tok, &amt, &n).unwrap();
     assert_ne!(r1, r2);
@@ -183,6 +183,18 @@ fn error_codes_stable() {
 fn error_display_includes_context() {
     let e = Error::MasterKeyMissing("mnemonic-id-1".into());
     assert!(format!("{}", e).contains("mnemonic-id-1"));
+}
+
+#[test]
+fn generate_nonce_in_field_and_random() {
+    use crate::nonce::generate_nonce;
+    use crate::field::bytes_to_field;
+    let a = generate_nonce();
+    let b = generate_nonce();
+    assert_ne!(a, b, "两次随机 nonce 不应相同");
+    // 落在 field 内：解码再编码应等幂（已 < p）
+    let round = crate::field::field_to_bytes_be(bytes_to_field(&a));
+    assert_eq!(round, a, "nonce 应已是 field 内规范 32 字节");
 }
 
 use super::pool::*;
@@ -376,7 +388,7 @@ fn protocol_vector_payment_commitment() {
     let identity_commitment: [u8; 32] = unimplemented!("vector: identity_commitment");
     let token: [u8; 20] = unimplemented!("vector: token");
     let amount: [u8; 32] = unimplemented!("vector: amount");
-    let nonce: [u8; 16] = unimplemented!("vector: nonce");
+    let nonce: [u8; 32] = unimplemented!("vector: nonce");
     let expected: [u8; 32] = unimplemented!("vector: expected payment_commitment");
     assert_eq!(
         super::derive::compute_payment_commitment(chain_id, &identity_commitment, &token, &amount, &nonce),
@@ -391,7 +403,7 @@ fn protocol_vector_payment_nullifier() {
     let chain_id: u64 = unimplemented!("vector: chain_id");
     let token: [u8; 20] = unimplemented!("vector: token");
     let amount: [u8; 32] = unimplemented!("vector: amount");
-    let nonce: [u8; 16] = unimplemented!("vector: nonce");
+    let nonce: [u8; 32] = unimplemented!("vector: nonce");
     let expected: [u8; 32] = unimplemented!("vector: expected payment_nullifier");
     assert_eq!(
         super::derive::compute_payment_nullifier(&nullifier_key, chain_id, &token, &amount, &nonce).unwrap(),

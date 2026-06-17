@@ -32,6 +32,7 @@ pub mod derive;
 pub mod domain;
 pub mod error;
 pub mod field;
+pub mod nonce;
 pub mod pool;
 pub mod poseidon;
 pub mod poseidon_constants;

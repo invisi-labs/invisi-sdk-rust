@@ -9,7 +9,7 @@ sol! {
     function payBlind(bytes proof, bytes32 paymentCommitment, bytes32 changeCommitment, uint256 inputAmount, uint256 treeId, bytes32 refundLink);
 }
 
-use alloy_primitives::{Address, FixedBytes, U256};
+use alloy_primitives::{Address, Bytes, FixedBytes, U256};
 use alloy_sol_types::SolCall;
 
 pub fn build_approve_calldata(spender: &[u8; 20], amount: &[u8; 32]) -> Vec<u8> {
@@ -37,6 +37,25 @@ pub fn build_pay_open_calldata(
     .abi_encode()
 }
 
+pub fn build_pay_blind_calldata(
+    proof: &[u8],
+    payment_commitment: &[u8; 32],
+    change_commitment: &[u8; 32],
+    input_amount: &[u8; 32],
+    tree_id: u64,
+    refund_link: &[u8; 32],
+) -> Vec<u8> {
+    payBlindCall {
+        proof: Bytes::copy_from_slice(proof),
+        paymentCommitment: FixedBytes::from(*payment_commitment),
+        changeCommitment: FixedBytes::from(*change_commitment),
+        inputAmount: U256::from_be_bytes(*input_amount),
+        treeId: U256::from(tree_id),
+        refundLink: FixedBytes::from(*refund_link),
+    }
+    .abi_encode()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -54,6 +73,18 @@ mod tests {
             "00000000000000000000000000000000000000000000000000000000000003e8",
         ]);
         assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn pay_blind_calldata_matches_cast() {
+        let proof = vec![0xde, 0xad, 0xbe, 0xef];
+        let pc = [0x33u8; 32];
+        let cc = [0x44u8; 32];
+        let mut input = [0u8; 32]; input[30] = 0x07; input[31] = 0xd0; // 2000
+        let refund = [0u8; 32];
+        let got = build_pay_blind_calldata(&proof, &pc, &cc, &input, 1, &refund);
+        const GOLDEN: &str = "82d33b9b00000000000000000000000000000000000000000000000000000000000000c03333333333333333333333333333333333333333333333333333333333333333444444444444444444444444444444444444444444444444444444444444444400000000000000000000000000000000000000000000000000000000000007d0000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004deadbeef00000000000000000000000000000000000000000000000000000000";
+        assert_eq!(got, decode_hex(GOLDEN));
     }
 
     #[test]

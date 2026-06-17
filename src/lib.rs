@@ -33,8 +33,10 @@ pub mod derive;
 pub mod domain;
 pub mod error;
 pub mod ffi;
+pub mod field;
 pub mod pool;
 pub mod poseidon;
+pub mod poseidon_constants;
 
 #[cfg(test)]
 mod tests;

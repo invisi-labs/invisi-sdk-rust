@@ -399,6 +399,46 @@ fn protocol_vector_payment_nullifier() {
     );
 }
 
+// ==================== Nexus alignment vectors (HARD GATE) ====================
+//
+// 取自 invisi-nexus/pkg/kms/poseidon2_test.go (lines 11-37).
+// 三个 vector 与 Noir 电路 + @aztec/bb.js 对账过 — 任何一个不通过都意味本仓
+// Poseidon2 实现与协议不兼容, 必须立即修. 不要在没改 poseidon.rs 的情况下
+// 修改这些 expected 值.
+
+use ark_bn254::Fr;
+use super::poseidon::hash as raw_hash;
+
+fn fr_from_hex(s: &str) -> Fr {
+    use ark_ff::PrimeField;
+    let bytes = hex::decode(s).expect("hex");
+    Fr::from_be_bytes_mod_order(&bytes)
+}
+
+#[test]
+fn nexus_vector_hash2_one_two() {
+    let inputs = [Fr::from(1u64), Fr::from(2u64)];
+    let got = raw_hash(&inputs);
+    let want = fr_from_hex("038682aa1cb5ae4e0a3f13da432a95c77c5c111f6f030faf9cad641ce1ed7383");
+    assert_eq!(got, want, "hash(1,2) MUST match Aztec Poseidon2 / Noir circuit / bb.js");
+}
+
+#[test]
+fn nexus_vector_hash4_one_two_three_four() {
+    let inputs = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64), Fr::from(4u64)];
+    let got = raw_hash(&inputs);
+    let want = fr_from_hex("130bf204a32cac1f0ace56c78b731aa3809f06df2731ebcf6b3464a15788b1b9");
+    assert_eq!(got, want, "hash(1,2,3,4) MUST match Aztec Poseidon2");
+}
+
+#[test]
+fn nexus_vector_hash2_zero_zero() {
+    let inputs = [Fr::from(0u64), Fr::from(0u64)];
+    let got = raw_hash(&inputs);
+    let want = fr_from_hex("0b63a53787021a4a962a452c2921b3663aff1ffd8d5510540f8e659e782956f1");
+    assert_eq!(got, want, "hash(0,0) MUST match Aztec Poseidon2 (zero-zero edge case)");
+}
+
 // ==================== FFI smoke tests ====================
 //
 // Verify the C ABI exports work end-to-end when called from Rust with hex-encoded

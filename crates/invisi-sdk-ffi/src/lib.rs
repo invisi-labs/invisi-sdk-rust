@@ -768,4 +768,60 @@ mod tests {
         assert!(!ok2);
         assert_eq!(read_cstr_until_nul(&err), "DECRYPT_FAILED");
     }
+
+    #[test]
+    fn ffi_build_pay_open_calldata_smoke() {
+        let identity = CString::new(format!("{:064x}", 0xAAu64)).unwrap();
+        let amount = CString::new(format!("{:064x}", 1000u64)).unwrap();
+        let nonce = CString::new(format!("{:064x}", 0xBBu64)).unwrap();
+        let tree_id = CString::new("1").unwrap();
+        let refund = CString::new("0".repeat(64)).unwrap();
+        let mut out = [0u8; 2048];
+        let mut err = [0u8; 64];
+        let ok = unsafe {
+            super::privacy_build_pay_open_calldata(
+                identity.as_ptr(), amount.as_ptr(), nonce.as_ptr(),
+                tree_id.as_ptr(), refund.as_ptr(),
+                out.as_mut_ptr(), out.len(), err.as_mut_ptr(), err.len())
+        };
+        assert!(ok, "payOpen failed: {}", read_cstr_until_nul(&err));
+        let s = unsafe { std::ffi::CStr::from_ptr(out.as_ptr() as *const i8) }.to_str().unwrap();
+        assert!(s.starts_with("8cf55984"), "payOpen selector mismatch");
+        assert!(!s.is_empty(), "output hex should be non-empty");
+    }
+
+    #[test]
+    fn ffi_build_pay_blind_calldata_smoke() {
+        // Normal path: valid proof
+        let proof = CString::new("deadbeef").unwrap();
+        let pc = CString::new(format!("{:064x}", 0xCCu64)).unwrap();
+        let cc = CString::new(format!("{:064x}", 0xDDu64)).unwrap();
+        let input_amt = CString::new(format!("{:064x}", 2000u64)).unwrap();
+        let tree_id = CString::new("1").unwrap();
+        let refund = CString::new("0".repeat(64)).unwrap();
+        let mut out = [0u8; 2048];
+        let mut err = [0u8; 64];
+        let ok = unsafe {
+            super::privacy_build_pay_blind_calldata(
+                proof.as_ptr(), pc.as_ptr(), cc.as_ptr(),
+                input_amt.as_ptr(), tree_id.as_ptr(), refund.as_ptr(),
+                out.as_mut_ptr(), out.len(), err.as_mut_ptr(), err.len())
+        };
+        assert!(ok, "payBlind normal failed: {}", read_cstr_until_nul(&err));
+        let s = unsafe { std::ffi::CStr::from_ptr(out.as_ptr() as *const i8) }.to_str().unwrap();
+        assert!(s.starts_with("82d33b9b"), "payBlind selector mismatch");
+        assert!(!s.is_empty(), "output hex should be non-empty");
+
+        // Failure path: null proof pointer
+        let mut out_fail = [0u8; 2048];
+        let mut err_fail = [0u8; 64];
+        let ok_fail = unsafe {
+            super::privacy_build_pay_blind_calldata(
+                std::ptr::null(), pc.as_ptr(), cc.as_ptr(),
+                input_amt.as_ptr(), tree_id.as_ptr(), refund.as_ptr(),
+                out_fail.as_mut_ptr(), out_fail.len(), err_fail.as_mut_ptr(), err_fail.len())
+        };
+        assert!(!ok_fail, "payBlind with null proof should fail");
+        assert_eq!(read_cstr_until_nul(&err_fail), "INPUT_INVALID");
+    }
 }

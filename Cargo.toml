@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/invisi-sdk-core", "crates/invisi-sdk-ffi"]
+members = ["crates/invisi-sdk-core", "crates/invisi-sdk-ffi", "crates/invisi-sdk-payer"]
 
 [profile.release]
 opt-level = "z"

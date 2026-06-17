@@ -186,9 +186,11 @@ pub fn compute_change_commitment(
 
 ### 5.5 `generate_nonce` 导出 + nonce 表示
 
-- `generate_nonce() -> [u8; 32]`：BN254 标量域内随机 32 字节 field element（`< FIELD_MODULUS`），对齐 TS `generateNonce`。
+- `generate_nonce() -> [u8; 32]`：BN254 标量域内随机 32 字节 field element（`< FIELD_MODULUS`），对齐 TS `generateNonce`（`crypto.getRandomValues(32B) % FIELD_MODULUS`，大端 32 字节编码）。
 - **nonce 表示统一为 32 字节 field element**贯穿 calldata + derive。
-- ⚠️ **必须验证的对齐点**：合约 `payOpen` 内部会用 on-chain 的 `nonce`（bytes32）重算 `paymentCommitment`。因此「`build_pay_open_calldata` 传入的 nonce」与「`compute_payment_commitment` 用的 nonce」必须是**同一个 field element 编码**，否则合约重算的承诺不匹配 → 交易 revert。现有 `compute_payment_commitment` 的 nonce 形参（历史为 `[u8;16]`）需统一到 `[u8;32]` field 编码，并由对齐测试钉死。
+- **已对账 TS（`@invisi-labs/payer` `buildPayOpenCalldata`）**：TS 用**同一个** `nonce: bigint` 同时喂给 `computePaymentCommitment(..., nonce)` 和 calldata 的 `nonceHex = "0x"+nonce.toString(16).padStart(64,"0")`（即 bytes32）。证实 nonce 是 32 字节 field element、且派生与 calldata 必须用同一值。
+- ⚠️ **对齐硬约束**：合约 `payOpen` 内部会用 on-chain 的 `nonce`（bytes32）重算 `paymentCommitment`。因此「`build_pay_open_calldata` 传入的 nonce」与「`compute_payment_commitment` 用的 nonce」必须是**同一个 field element 编码**，否则合约重算的承诺不匹配 → 交易 revert。现有 `compute_payment_commitment` 的 nonce 形参（历史为 `[u8;16]`）需统一到 `[u8;32]` field 编码，并由对齐测试钉死。
+- nonce 可选来源：`propose` 模式 / mode=single 由服务端预分配；否则本地 `generate_nonce()`（与 TS `params.nonce ?? generateNonce()` 一致）。
 
 ---
 

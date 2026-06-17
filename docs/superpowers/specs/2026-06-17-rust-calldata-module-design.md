@@ -1,4 +1,4 @@
-# 设计：Rust SDK calldata 构建模块 + workspace 重构
+# 设计：Rust SDK 镜像 invisi-sdk-ts 结构 — workspace + payer(calldata) + ipp
 
 **日期：** 2026-06-17
 **状态：** 待 review
@@ -8,244 +8,209 @@
 
 | 仓库 / 文档 | 关系 |
 |---|---|
-| `../invisi-sdk-ts`（`@invisi-labs/core` + `@invisi-labs/payer`） | 命名 + 功能对齐的权威参照 |
+| `../invisi-sdk-ts`（`core` / `payer` / `ipp` / `node`） | **镜像对象** —— 结构 + 命名 + 功能对齐的权威参照 |
 | `../invisi-protocol/contracts/src/InvisiProtocol.sol` | `payOpen` / `payBlind` 合约签名（calldata 字节级真相源） |
 | `../invisi-protocol/circuits/shielded_payment/src/main.nr` | `change_commitment` 派生公式 |
-| `../invisi-nexus/tests/e2e/onchain/onchain-pay-open` | app 付款侧逻辑的 Go 参考实现 |
-| `../invisi-nexus/services/account-service/.../wallet_crypto.go` | masterKey 派生（app 侧职责，**本 SDK 不实现**） |
-| 后续 spec ②（prover） | 本 spec 的姊妹子项目，独立交付 |
+| `../invisi-nexus/tests/e2e/onchain/*` | app 支付侧逻辑的 Go 参考实现 |
+| `../invisi-nexus/.../account-service/wallet_crypto.go` | masterKey 派生（app 侧职责，**本 SDK 不实现**） |
+| 后续 spec ②（prover） | 姊妹子项目，独立交付 |
 
 ---
 
-## 1. 背景与目标
+## 1. 背景与设计原则
 
-app 端做隐私支付时，需要**在本地构建发往合约的 calldata**（用户已确认：merkle tree 不需要本地建，但 calldata 必须本地算）。当前 Rust SDK 只有密码学派生（Poseidon2 / commitment / nullifier / AEAD），**缺 EVM calldata 构建能力**。
+app 端做隐私支付需要在本地：**扫码解析(IPP)** → **派生/算承诺** → **构建 calldata**。Merkle tree 不需本地建（服务端给），ZK proof 见子项目②。
 
-通过对 `../invisi-nexus` e2e 闭环（`wallet_personal_payment_test.go` + `onchain-*` 工具）的分析，确认三条支付路径的 calldata 归属：
+**核心设计决策（brainstorm 定）：Rust SDK 镜像 `invisi-sdk-ts` 的 monorepo 结构** —— 一个 Cargo workspace、多 crate，crate 与 TS 包一一对应。这样跨语言维护时 TS 改哪个包就改 Rust 对应 crate，心智零成本。
 
-| 路径 | proof | merkle | calldata 谁构建 |
+**但不是"照搬全部实现再砍"**，原因：
+1. TS `payer`/`ipp` 大量依赖 viem / msgpack 等 JS 库，Rust 无对应物，**只能用 Rust 生态库重写，无法机械翻译**。
+2. 照搬未用代码 = 死代码、无测试、是负债。
+3. Rust core 因平台差异**合理地多出** TS core 没有的东西（`cipher`/`pool`/`ffi`，服务原生移动端）。两边永远不是字面 1:1。
+
+**因此策略 = 镜像「结构」，移植「需要的函数」到正确的 crate，不需要的不建死桩、文档标注。**
+
+**SDK 单一原则**：只接收参数 + 计算。无网络、无签名、无存储、无 masterKey 派生策略。
+
+---
+
+## 2. crate 结构（镜像 TS）
+
+```
+invisi-sdk-rust/                   # 仓库 = Cargo workspace（"同一套"）
+├── Cargo.toml                     # [workspace] virtual manifest
+└── crates/
+    ├── invisi-sdk-core/           # ← @invisi-labs/core
+    │     compute_*/derive_*/generate_nonce/poseidon
+    │     + Rust 特有：cipher(AEAD) / pool / ffi（平台差异，保留）
+    │     约束：轻量、纯算、可编 WASM、无重 eth 依赖
+    │     [lib] name = "invisi_sdk"（FFI 符号 + 链接产物名稳定，不变）
+    ├── invisi-sdk-payer/          # ← @invisi-labs/payer
+    │     build_{pay_open,pay_blind,approve}_calldata
+    │     依赖 core + alloy（Rust 版 viem，做 ABI 编码 + keccak）
+    ├── invisi-sdk-ipp/            # ← @invisi-labs/ipp（去掉网络 client）
+    │     types / codec / validate / caip2 / meta
+    │     依赖 rmp-serde(msgpack) + base64 + serde
+    └── invisi-sdk-prover/         # ← @invisi-labs/node（子项目②，本 spec 不实现）
+```
+
+### crate ↔ TS 映射 + 取舍
+
+| TS 包 | Rust crate | 本轮 | 说明 |
 |---|---|---|---|
-| **payOpen**（公开支付） | 无 | 无 | **客户端本地**（静态 ABI） |
-| **payBlind**（隐藏支付） | 本地生成（隐私要求） | 无（电路不需要） | **客户端本地**（动态 ABI，proof 作入参） |
-| **withdraw / settle**（提现/找零结算） | 服务端 | 服务端 | **服务端返回完整 calldata**（客户端只注入 nullifier） |
+| `@invisi-labs/core` | `invisi-sdk-core` | ✅ 重构+改名 | 现有 src/ 迁入；派生函数改名对齐 |
+| `@invisi-labs/payer` | `invisi-sdk-payer` | ✅ 新建 | 仅移植 3 个 calldata builder |
+| `@invisi-labs/ipp` | `invisi-sdk-ipp` | ✅ 新建 | 移植 codec/validate/caip2/types/meta，**不含 client(网络)** |
+| `@invisi-labs/node` | `invisi-sdk-prover` | ⏭️ 子项目② | 占位，先做选型 spike |
+| `@invisi-labs/receiver` | `invisi-sdk-receiver` | ⏭️ 留白 | 需要时再建（generateInvoice 等收款侧） |
+| `@invisi-labs/react` `vue` | — | ❌ 砍 | 纯 JS，无对应 |
+| `@invisi-labs/tree` | — | ❌ 砍 | merkle 服务端给，不需本地建 |
+| `@invisi-labs/contracts` `deployments` | — | ❌ 砍 | ABI/部署表，Rust 用到再说 |
+| payer 的 userOp / metaTx / credit / fromRequest | — | ⏭️ 留白 | 暂不需要，不建死桩 |
 
-> 提现 calldata 由 `protocol-service` 的 `GenerateSettlementProof` 直接返回（`ProofGroup.calldata`），客户端只签名广播。因此 **本 SDK 只负责 payOpen + payBlind + approve 三种 calldata**。
+### 命名对齐 + lib 名稳定
 
-本设计是**两个子项目中的第①个**（核心 crate，范围明确、可独立交付）。子项目②（ZK prover）单独立 spec。
+- crate 名直接对齐 TS（`core`/`payer`/`ipp`）；prover **故意不叫 `node`**（Node.js 运行时语义，搬到 Rust 误导）。
+- `[lib] name = "invisi_sdk"` 不变 → app 的 `use invisi_sdk::...`、native 链接产物 `libinvisi_sdk.a` 全稳定。
+- app 迁移：改 `apps/mobile/rust/Cargo.toml` 依赖行（package 名 + path 指向 `crates/invisi-sdk-core`）。
 
-### 目标
+### 函数命名对齐 `@invisi-labs/core`
 
-1. 把单 crate 仓库重构为 **Cargo workspace 多 crate**，与 `invisi-sdk-ts` monorepo 结构一致。
-2. 核心 crate 新增 `keccak256` + EVM ABI 编码器 + 三个 calldata builder + `compute_change_commitment` + `generate_nonce` 导出。
-3. 现有派生函数**改名对齐** `@invisi-labs/core`。
-4. calldata 输出与合约真实 ABI 编码**字节级对齐**（硬门测试）。
-
----
-
-## 2. 非目标（明确不做）
-
-遵循「SDK 单一原则：只接收参数 + 计算」。以下**不进本 SDK**：
-
-- **ZK prover**（Noir/bb proof 生成）→ 子项目②，独立 crate `invisi-sdk-prover`。
-- **merkle tree / proof path** → 服务端提供。
-- **withdraw / settle calldata** → 服务端返回。
-- **网络 / HTTP / IPP client** → app 层。
-- **交易签名 / 广播** → app 钱包层（Keyring / WalletConnect）。
-- **masterKey 派生与认证策略**（`keccak256(签名)`、认证签名 vs 隐私签名是否分离）→ app 侧实现细节。本 SDK 只接收 `masterKey: &[u8; 32]`。
-- **Keychain / Keystore 读写** → bridge 层。
-
----
-
-## 3. 架构：workspace 多 crate
-
-```
-invisi-sdk-rust/                       # 仓库 = Cargo workspace（"同一套"）
-├── Cargo.toml                         # [workspace] virtual manifest
-├── crates/
-│   ├── invisi-sdk-core/               # 核心：轻量、纯算、可编 WASM、无 bb
-│   │   ├── Cargo.toml                 # package = "invisi-sdk-core", [lib] name = "invisi_sdk"
-│   │   └── src/                       # 现有 src/ 整体迁入
-│   └── invisi-sdk-prover/             # 子项目②（本 spec 不实现，占位说明）
-└── docs/superpowers/specs/
-```
-
-### 命名对齐 `invisi-sdk-ts`
-
-| TS 包 | Rust crate | 说明 |
-|---|---|---|
-| `@invisi-labs/core` | `invisi-sdk-core` | 直接对齐 |
-| `@invisi-labs/node` | `invisi-sdk-prover` | **故意不照搬 `node`**——`node` 是 Node.js 运行时语义，搬到 Rust 会误导 |
-
-- **`[lib] name = "invisi_sdk"` 保持不变**：FFI `#[no_mangle]` 符号、staticlib/cdylib 产物名（`libinvisi_sdk.a`）稳定，app 的 iOS/Android native 链接配置不破，app 里 `use invisi_sdk::...` 不变。
-- app 迁移成本：仅改 `apps/mobile/rust/Cargo.toml` 一行：
-  ```diff
-  - invisi-sdk = { path = "../../../../invisi-sdk-rust" }
-  + invisi-sdk-core = { path = "../../../../invisi-sdk-rust/crates/invisi-sdk-core" }
-  ```
-
----
-
-## 4. 函数命名对齐
-
-现有 lib 内部函数只通过 FFI `privacy_*` 被 app 消费，改内部名不破跨语言契约。`_raw` 后缀已多余（整个 SDK 都非托管、都收 raw masterKey）。
-
-| TS `@invisi-labs/core` | 现 Rust | 对齐后 |
+| TS | 现 Rust | 对齐后 |
 |---|---|---|
 | `computeIdentityCommitment` | `identity_commitment` | `compute_identity_commitment` |
 | `computePaymentCommitment` | `payment_commitment` | `compute_payment_commitment` |
 | `computePaymentNullifier` | `payment_nullifier` | `compute_payment_nullifier` |
 | `computeChangeCommitment` | — | `compute_change_commitment`（新增） |
-| `deriveNullifierKey` | `nullifier_key_raw` | `derive_nullifier_key` |
+| `deriveNullifierKey` | `nullifier_key_raw` | `derive_nullifier_key`（去掉多余 `_raw`） |
 | `generateNonce` | （pool 内部） | `generate_nonce`（导出） |
 
-FFI 导出名**保持现状**（`privacy_compute_*` 已镜像 TS），新增项延续规则。
+FFI 导出名保持现状（`privacy_compute_*` 已镜像 TS），新增项延续 `privacy_build_*` / `privacy_decode_ipp_qr`。
 
 ---
 
-## 5. 模块设计
+## 3. 三条支付路径的 calldata/proof 归属
 
-### 5.1 `keccak256` 原语
+（经 `../invisi-nexus` e2e 闭环确认）
 
-- 新依赖 `tiny-keccak`（轻量、no_std 友好）。
-- 用途：ABI 函数选择器。
-- 不暴露 masterKey 专用 helper（masterKey 派生归 app）；如需要，app 可自行用通用 keccak256 组合。
+| 路径 | proof | merkle | calldata 谁构建 |
+|---|---|---|---|
+| **payOpen** | 无 | 无 | 客户端本地（payer crate，静态 ABI） |
+| **payBlind** | 本地生成（隐私，子项目②） | 无（电路不需要） | 客户端本地（payer crate，动态 `bytes proof` 入参） |
+| **withdraw/settle** | 服务端 | 服务端 | **服务端返回完整 calldata**，客户端只注入 nullifier |
 
-### 5.2 `abi.rs` — 极简 EVM ABI 编码器
+→ 本 SDK 只负责 payOpen + payBlind + approve 三种 calldata。
 
-实现 EVM ABI 规范的最小子集（只覆盖本 SDK 用到的类型）：
+---
 
-- **静态类型**（每个占 32 字节 word）：
-  - `bytes32` → 原样 32 字节
-  - `uint256` → 右对齐大端（输入 `&[u8; 32]` 或 `u64` 左填充）
-  - `address` → 20 字节右对齐（左填充 12 字节 0）
-- **动态类型**：
-  - `bytes`（proof 用）→ head 段写 offset，tail 段写 `length(32B) + 数据(32B 对齐右填充 0)`
-- **函数选择器**：`keccak256(signature)[0..4]`
+## 4. `invisi-sdk-payer` 模块设计
 
-编码器以「参数列表」为单位组装：先算静态 head 区总长，动态参数 head 放 offset、数据追加到 tail。
+### 4.1 ABI 编码：用 alloy（对齐 TS 用 viem）
 
-### 5.3 `calldata.rs` — 三个 builder + FFI 导出
+payer crate 依赖 `alloy-primitives`（keccak256 / Address / U256）+ `alloy-sol-types`（`sol!` 宏做 ABI 编码）。这是 Rust 生态的 viem 等价物，比手写 ABI 编码器更稳、更对齐 TS 的 `encodeFunctionData`。重依赖只落在 payer，**core 保持轻量、可 WASM 不受影响**。
+
+### 4.2 三个 builder
 
 合约签名（真相源 `InvisiProtocol.sol` + ERC20）：
 
 ```solidity
-approve(address spender, uint256 amount)                              // 0x095ea7b3
+approve(address spender, uint256 amount)                               // 0x095ea7b3
 payOpen(bytes32 identityCommitment, uint256 amount, bytes32 nonce,
         uint256 treeId, bytes32 refundLink)
 payBlind(bytes proof, bytes32 paymentCommitment, bytes32 changeCommitment,
          uint256 inputAmount, uint256 treeId, bytes32 refundLink)
 ```
 
-Rust API（返回 calldata 字节，`to` 地址由调用方决定）：
-
 ```rust
-pub fn build_approve_calldata(spender: &[u8; 20], amount: &[u8; 32]) -> Vec<u8>;
-
+pub fn build_approve_calldata(spender: &[u8;20], amount: &[u8;32]) -> Vec<u8>;
 pub fn build_pay_open_calldata(
-    identity_commitment: &[u8; 32],
-    amount: &[u8; 32],
-    nonce: &[u8; 32],          // bytes32 field element（见 §5.5 nonce 表示）
-    tree_id: u64,
-    refund_link: &[u8; 32],
-) -> Vec<u8>;
-
+    identity_commitment: &[u8;32], amount: &[u8;32],
+    nonce: &[u8;32], tree_id: u64, refund_link: &[u8;32]) -> Vec<u8>;
 pub fn build_pay_blind_calldata(
-    proof: &[u8],              // 调用方传入，本 SDK 不生成
-    payment_commitment: &[u8; 32],
-    change_commitment: &[u8; 32],
-    input_amount: &[u8; 32],
-    tree_id: u64,
-    refund_link: &[u8; 32],
-) -> Vec<u8>;
+    proof: &[u8],                      // 调用方传入，本 SDK 不生成
+    payment_commitment: &[u8;32], change_commitment: &[u8;32],
+    input_amount: &[u8;32], tree_id: u64, refund_link: &[u8;32]) -> Vec<u8>;
 ```
 
-FFI 导出（hex I/O，沿用现有约定）：
-`privacy_build_approve_calldata` / `privacy_build_pay_open_calldata` / `privacy_build_pay_blind_calldata`（app 侧 `privacyBuildPayOpenCalldata` 等）。
+FFI 导出（hex I/O）：`privacy_build_approve_calldata` / `privacy_build_pay_open_calldata` / `privacy_build_pay_blind_calldata`。
 
-### 5.4 `compute_change_commitment` 派生
+---
 
-对齐电路 `shielded_payment/main.nr:71-72`：
+## 5. `invisi-sdk-core` 新增派生
+
+### `compute_change_commitment`（对齐电路 `main.nr:71-72`）
 
 ```
 change_rcv        = Poseidon2(D_IDENT, change_nullifier_key, change_receiving_address)
 change_commitment = Poseidon2(D_PAY, chain_id, change_rcv, token, change_amount, change_nonce)
 ```
+复用 `compute_identity_commitment` + `compute_payment_commitment`。
 
-即复用已有 `compute_identity_commitment` + `compute_payment_commitment` 组合：
+### `generate_nonce` + nonce 表示
 
-```rust
-pub fn compute_change_commitment(
-    chain_id: u64,
-    change_nullifier_key: &[u8; 32],
-    change_receiving_address: &[u8; 20],
-    token: &[u8; 20],
-    change_amount: &[u8; 32],
-    change_nonce: &[u8; 32],
-) -> [u8; 32];
-```
-
-### 5.5 `generate_nonce` 导出 + nonce 表示
-
-- `generate_nonce() -> [u8; 32]`：BN254 标量域内随机 32 字节 field element（`< FIELD_MODULUS`），对齐 TS `generateNonce`（`crypto.getRandomValues(32B) % FIELD_MODULUS`，大端 32 字节编码）。
-- **nonce 表示统一为 32 字节 field element**贯穿 calldata + derive。
-- **已对账 TS（`@invisi-labs/payer` `buildPayOpenCalldata`）**：TS 用**同一个** `nonce: bigint` 同时喂给 `computePaymentCommitment(..., nonce)` 和 calldata 的 `nonceHex = "0x"+nonce.toString(16).padStart(64,"0")`（即 bytes32）。证实 nonce 是 32 字节 field element、且派生与 calldata 必须用同一值。
-- ⚠️ **对齐硬约束**：合约 `payOpen` 内部会用 on-chain 的 `nonce`（bytes32）重算 `paymentCommitment`。因此「`build_pay_open_calldata` 传入的 nonce」与「`compute_payment_commitment` 用的 nonce」必须是**同一个 field element 编码**，否则合约重算的承诺不匹配 → 交易 revert。现有 `compute_payment_commitment` 的 nonce 形参（历史为 `[u8;16]`）需统一到 `[u8;32]` field 编码，并由对齐测试钉死。
-- nonce 可选来源：`propose` 模式 / mode=single 由服务端预分配；否则本地 `generate_nonce()`（与 TS `params.nonce ?? generateNonce()` 一致）。
+- `generate_nonce() -> [u8;32]`：BN254 标量域随机 field element（`< FIELD_MODULUS`，大端 32 字节），对齐 TS `generateNonce`。
+- **已对账 TS `buildPayOpenCalldata`**：同一个 `nonce` 同时喂 `computePaymentCommitment` 和 calldata `nonceHex`(bytes32)。证实 nonce = 32 字节 field element 且派生/calldata 必须同值。
+- ⚠️ **对齐硬约束**：合约 `payOpen` 用 on-chain nonce 重算 `paymentCommitment`，两处 nonce 编码不一致 → revert。现有 `compute_payment_commitment` 的 nonce 形参（`[u8;16]`）需统一到 `[u8;32]` field 编码，由对齐测试钉死。
+- nonce 来源：propose / mode=single 服务端给；否则本地 `generate_nonce()`。
 
 ---
 
-## 6. 错误处理
+## 6. `invisi-sdk-ipp` 模块设计
 
-新增稳定错误码（FFI 契约，`&'static str`）：
+移植 `@invisi-labs/ipp` 的纯函数部分（**`client.ts` 网络部分不移植**，HTTP 归 app 层）：
 
-- `ABI_INPUT_INVALID`（输入长度/格式非法）
-- 复用现有 `INPUT_INVALID` / `BUFFER_TOO_SMALL`（FFI hex I/O）
+- **`types`**：`IPPRequest { v, network, meta?, payload }`、`IPPPayloadV1 { identityCommitment, tokenAddress, operator, treeId, paymentTypes, amount?, nonce?, paymentCommitment?, endpoint? }`。
+- **`codec`**：`encode_ipp_request` / `decode_ipp_request`。compact 格式 = `ipp{v}:` + base64url(MessagePack(request))（`rmp-serde` + `base64`）；JSON 格式 = serde_json。decode 自动检测（`{` → JSON，`ipp` → compact）。**这就是二维码内容。**
+- **`validate`**：三模式校验 —— ①a `nonce`+`paymentCommitment`（扫码即付）；①b/② 仅 `endpoint`（需调 propose）；`nonce`/`paymentCommitment` 必须同时有或同时无。
+- **`caip2`**：`chain_id_to_caip2` / `caip2_to_chain_id`（如 `eip155:84532`）。
+- **`meta`**：meta keys 常量。
 
-calldata builder 本身是纯函数、定长输入，正常路径不产生错误；FFI 层负责 hex 解析校验。
+FFI 导出：`privacy_decode_ipp_qr`（输入二维码字符串，输出解析字段 JSON 给 app 用）。
 
 ---
 
-## 7. 数据流（app 如何使用）
+## 7. 数据流（app 隐私支付，全本地部分）
 
-**payOpen（公开支付，纯本地）：**
 ```
-1. (mode=single) 从服务端拿 identity_commitment / nonce / tree_id
-2. build_approve_calldata(protocol, amount)        → approve calldata，to=token
-3. build_pay_open_calldata(...)                    → payOpen calldata，to=protocol
-4. app 钱包层签名 + 广播两笔
-```
-
-**payBlind（隐藏支付）：**
-```
-1. compute_change_commitment(...)                  → change_commitment（本地）
-2. [子项目② prover] 本地生成 proof bytes（payment_amount 不出设备）
-3. build_pay_blind_calldata(proof, ...)            → payBlind calldata
-4. build_approve_calldata + 签名广播
+扫码 → invisi-sdk-ipp::decode_ipp_request           → IPPRequest（identity/tree_id/nonce/...）
+     → invisi-sdk-ipp::validate                     → 判定扫码即付 / 需 propose
+[需 propose 时] app 调服务端拿 nonce+paymentCommitment（网络，非 SDK）
+[payOpen] payer::build_approve_calldata + build_pay_open_calldata
+[payBlind] core::compute_change_commitment
+         → [子项目② prover] 本地 proof（payment_amount 不出设备）
+         → payer::build_pay_blind_calldata
+→ app 钱包层签名 + 广播（非 SDK）
 ```
 
 ---
 
-## 8. 测试策略
+## 8. 非目标
 
-1. **单元测试**：ABI 编码各类型、选择器、动态 bytes 的 offset/padding、空 proof、roundtrip。
-2. **跨语言 calldata 对齐（硬门）**：与 Poseidon2 三向量同性质——用 `go-ethereum` 绑定或 viem `encodeFunctionData` 产出 expected calldata，对 `build_*_calldata` 做**字节级 `assert_eq`**。任何一个不过即代表与合约 ABI 不兼容，必须修编码器，不得改 expected。
-3. **nonce 一致性测试**：构造一组 (identity, amount, nonce)，验证「本地 `compute_payment_commitment`」== 「合约用同 nonce 重算的 paymentCommitment」（用合约/电路侧 fixture 对账）。
-4. **FFI 烟雾测试**：hex I/O roundtrip + 坏输入拒绝（沿用现有 `ffi` 测试风格）。
-
----
-
-## 9. 迁移影响
-
-- 本仓库：`src/` → `crates/invisi-sdk-core/src/`；根 `Cargo.toml` 变 `[workspace]`。
-- `../invisi-pay-app`：改 `apps/mobile/rust/Cargo.toml` 依赖一行（package 名 + path）。`use invisi_sdk::...` 与 native 链接不变。
-- 现有 56 个测试随 `src/` 一并迁移，应全绿。
+- **ZK prover** → 子项目② `invisi-sdk-prover`。
+- **IPPClient / 任何网络 HTTP** → app 层。
+- **merkle tree / withdraw calldata** → 服务端。
+- **签名 / 广播 / Keychain / masterKey 派生策略** → app 钱包层。本 SDK 只收 `masterKey: &[u8;32]`（与 TS `@invisi-labs/core` 一致 —— masterKey 纯入参，不签名不派生）。
+- **receiver / userOp / metaTx / credit / tree / react / vue / contracts** → 砍或留白。
 
 ---
 
-## 10. 后续（子项目②，独立 spec）
+## 9. 测试策略
 
-`invisi-sdk-prover` crate：
-- bb（Barretenberg）FFI 绑定到 Rust 的**可行性 spike**。
-- 本地生成的 proof 与 `shielded_payment_verifier.sol`（UltraHonk）**bit 兼容验证**。
-- 打包 `shielded_payment` 电路 artifact。
-- 风险与工作量集中在此，**先 spike 验证可行性再谈实现**。本子项目①不依赖②，可独立交付公开支付闭环。
+1. **单元**：core 派生、payer ABI 各类型/选择器/动态 bytes、ipp codec roundtrip + 三模式 validate + caip2。
+2. **跨语言 calldata 对齐（硬门）**：payer `build_*_calldata` 字节级 `assert_eq` 对账 go-ethereum/viem 产出，与 Poseidon2 向量同性质，不得改 expected。
+3. **IPP 互通**：用 TS `encodeIPPRequest` 产的 `ippN:` 串喂 Rust `decode_ipp_request`，字段一致；反向亦然。
+4. **nonce 一致性**：本地 `compute_payment_commitment` == 合约用同 nonce 重算的承诺（fixture 对账）。
+5. **FFI 烟雾**：hex/JSON I/O roundtrip + 坏输入拒绝。
+
+---
+
+## 10. 迁移影响
+
+- 本仓库：`src/` → `crates/invisi-sdk-core/src/`；根 `Cargo.toml` 变 `[workspace]`；新建 payer/ipp/prover crate。现有 56 测试随迁应全绿。
+- `../invisi-pay-app`：改 `apps/mobile/rust/Cargo.toml` 依赖（core 改 path+名；新增 payer/ipp）。`use invisi_sdk::...` 与 native 链接不变。
+
+---
+
+## 11. 后续（子项目②，独立 spec）
+
+`invisi-sdk-prover`：bb(Barretenberg) FFI 绑定可行性 spike → 本地 proof 与 `shielded_payment_verifier.sol`(UltraHonk) bit 兼容验证 → 打包电路 artifact。风险集中于此，先 spike 再实现。子项目①不依赖②。

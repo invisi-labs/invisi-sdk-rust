@@ -13,6 +13,24 @@
 | `../invisi-pay-app` | RN 客户端 — 消费本 SDK 通过 JSI/JNI bridge |
 | `../invisi-pay-docs` | 产品 + 技术文档 + SPEC + PLAN |
 
+## Workspace 结构
+
+本仓库组织为 Cargo workspace（`Cargo.toml` 声明 `[workspace]`），包含三个 crate：
+
+| Crate | 路径 | 类型 | 职责 |
+|---|---|---|---|
+| **invisi-sdk-core** | `crates/invisi-sdk-core/` | rlib | 密码学原语（poseidon2 / 派生函数 / nonce / cipher / pool）；**无 alloy**；可编译 WASM/iOS/Android |
+| **invisi-sdk-payer** | `crates/invisi-sdk-payer/` | rlib | 链上交互（calldata 构造）；依赖 core + alloy-core/alloy-primitives |
+| **invisi-sdk-ffi** | `crates/invisi-sdk-ffi/` | staticlib + cdylib | FFI C ABI 层；导出 `privacy_*` 符号；`pub use invisi_sdk_core::*` 重导出；链接端选用 `.a` 或 `.dylib` |
+
+### 子项目②：Prover
+
+- **invisi-sdk-prover**（未建）：独立 crate，选型 spike 中。未来将：
+  - 选定本地 ZK proof 框架（Halo2 / Circom Witness / 其他）
+  - 实现 circuit 编译 + witness 生成 + proof 构造
+  - 导出 FFI 给 app 端调用（如 `privacy_prove_identity_opening`）
+  - 仓库内 workspace 集成
+  
 ## 关键设计
 
 - **Poseidon2 实现**：Aztec Barretenberg BN254 t=4 (RF=8, RP=56, d=5)。与 `../invisi-nexus/pkg/kms/poseidon2.go` + `../invisi-protocol/circuits/*/src/main.nr` + `@aztec/bb.js poseidon2Hash` **bit-perfect**。3 个 alignment test vectors 是硬门。
@@ -20,6 +38,7 @@
 - **nullifier ≠ 0 不变式**：协议 1.3:17-23 — 零值是 batch 电路 padding 标记；产生零 → invoiceId 复用 → 必抛 `NullifierIsZero`。
 - **non-custodial**：本 SDK 不读 Keychain 不持久化 masterKey；所有需要 masterKey 的函数都接受 `&[u8; 32]` 由调用方传入。
 - **错误码稳定**：`Error::code()` 返回 `&'static str`（NULLIFIER_ZERO 等）是 FFI 跨语言契约，不可改。
+- **calldata 构造**：payer crate 的 `build_*_calldata` 与 Solidity 合约 ABI **字节级对齐**；foundry `cast` 验证通过。
 
 ## 工作流
 
@@ -54,5 +73,21 @@ mobile app 通过 path / git 依赖引用本 SDK。
 
 ## 与 invisi-pay-app 的边界
 
-- 本 SDK：**纯密码学 + 派生**。无 RN、无 JSI/JNI、无 platform-specific code（除 `ffi` 模块的 C ABI 给 RN bridge 用）。
-- mobile app：JSI/JNI bridge 在 `apps/mobile/rust/` + `apps/mobile/ios/` + `apps/mobile/android/`。bridge 层负责从 Keychain 读 masterKey 后调本 SDK 函数。
+### App 端迁移
+
+app 的 `apps/mobile/rust/Cargo.toml` 改：
+```diff
+- invisi-sdk = { path = "../../../../invisi-sdk-rust" }
++ invisi-sdk-ffi = { package = "invisi-sdk-ffi", path = "../../../../invisi-sdk-rust/crates/invisi-sdk-ffi" }
+```
+
+所有 Rust 端 `use invisi_sdk::*` 继续有效（core 函数通过 FFI crate 重导出）；C/Swift/Kotlin 链接 `libinvisi_sdk.a` 不变。
+
+### 职责边界
+
+- **本 SDK**（三 crate）：
+  - **core**：纯密码学 + 派生，无 alloy，可独立 WASM 编译
+  - **payer**：链上 calldata 构造，依赖 alloy 类型
+  - **ffi**：统一 C ABI 层，导出 `privacy_*` 符号
+  - 无 RN、无 JSI/JNI、无 platform-specific code（除 ffi 的 C ABI）
+- **mobile app**：JSI/JNI bridge 在 `apps/mobile/rust/` + `apps/mobile/ios/` + `apps/mobile/android/`。bridge 层负责从 Keychain/Keystore 读 masterKey 后调本 SDK 函数。

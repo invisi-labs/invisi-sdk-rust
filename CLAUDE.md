@@ -21,7 +21,7 @@
 |---|---|---|---|
 | **invisi-sdk-core** | `crates/invisi-sdk-core/` | rlib | 密码学原语（poseidon2 / 派生函数 / nonce / cipher / pool）；**无 alloy**；可编译 WASM/iOS/Android |
 | **invisi-sdk-payer** | `crates/invisi-sdk-payer/` | rlib | 链上交互（calldata 构造）；依赖 core + alloy-core/alloy-primitives |
-| **invisi-sdk-ffi** | `crates/invisi-sdk-ffi/` | staticlib + cdylib | FFI C ABI 层；导出 `privacy_*` 符号；`pub use invisi_sdk_core::*` 重导出；链接端选用 `.a` 或 `.dylib` |
+| **invisi-sdk-ffi** | `crates/invisi-sdk-ffi/` | staticlib + cdylib + **rlib** | FFI C ABI 层；导出 `privacy_*` 符号；`pub use invisi_sdk_core::*` 重导出；C 链接选 `.a`/`.dylib`，Rust crate 作 dep 引用要 rlib |
 
 ### 子项目②：Prover
 
@@ -78,10 +78,16 @@ mobile app 通过 path / git 依赖引用本 SDK。
 app 的 `apps/mobile/rust/Cargo.toml` 改：
 ```diff
 - invisi-sdk = { path = "../../../../invisi-sdk-rust" }
-+ invisi-sdk-ffi = { package = "invisi-sdk-ffi", path = "../../../../invisi-sdk-rust/crates/invisi-sdk-ffi" }
++ invisi-sdk-ffi = { path = "../../../../invisi-sdk-rust/crates/invisi-sdk-ffi" }
 ```
 
-所有 Rust 端 `use invisi_sdk::*` 继续有效（core 函数通过 FFI crate 重导出）；C/Swift/Kotlin 链接 `libinvisi_sdk.a` 不变。
+Rust import 路径仍是 `invisi_sdk`（**不是** `invisi_sdk_ffi`）— ffi crate `[lib].name = "invisi_sdk"` 覆盖 dep key。所有 `use invisi_sdk::*` 继续有效。C/Swift/Kotlin 链接 `libinvisi_sdk.a` 不变。
+
+### 集成 Gotchas（踩过的坑）
+
+1. **`[lib].name` 覆盖 dep key 作为 Rust crate 名**：dep 写 `invisi-sdk-ffi = { ... }`，但 Rust 必须 `use invisi_sdk::*`。
+2. **`crate-type` 必须含 `rlib` 才能被其他 Rust crate 作为 dep 引用**：只声明 `staticlib + cdylib` 的 crate 是 C 链接产物，rustc 无法 `extern crate`。本 SDK 的 ffi crate 同时输出三者。
+3. **FFI 符号透传 staticlib**：消费方在 lib.rs 加 `pub use invisi_sdk::*;` 防止 dead-code eliminator 丢弃。
 
 ### 职责边界
 

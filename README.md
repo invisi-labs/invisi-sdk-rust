@@ -14,7 +14,7 @@ InvisiPay 协议层 Rust SDK — 隐私支付的密码学原语 + 派生函数 +
 |---|---|---|---|---|
 | `invisi-sdk-core` | `crates/invisi-sdk-core/` | rlib | 轻量密码学 + 派生 + 随机数：`poseidon2` hash / `derive::{compute_identity_commitment, compute_payment_commitment, compute_payment_nullifier, derive_nullifier_key, compute_change_commitment}` / `nonce::generate_nonce` / `cipher::xchachapoly1305` / `pool` | 无 alloy；**可编译 WASM** |
 | `invisi-sdk-payer` | `crates/invisi-sdk-payer/` | rlib | 链上交互：`build_approve_calldata` / `build_pay_open_calldata` / `build_pay_blind_calldata` | alloy（自包含 sol!，不依赖 core） |
-| `invisi-sdk-ffi` | `crates/invisi-sdk-ffi/` | staticlib + cdylib | FFI C ABI 导出 — iOS Swift / Android JNI：`privacy_compute_*` + `privacy_build_*_calldata`；并 `pub use invisi_sdk_core::*` 重导出 | `invisi-sdk-core` + `invisi-sdk-payer` |
+| `invisi-sdk-ffi` | `crates/invisi-sdk-ffi/` | staticlib + cdylib + **rlib** | FFI C ABI 导出 — iOS Swift / Android JNI：`privacy_compute_*` + `privacy_build_*_calldata`；并 `pub use invisi_sdk_core::*` 重导出 | `invisi-sdk-core` + `invisi-sdk-payer` |
 
 ## 包含的能力
 
@@ -60,13 +60,19 @@ payer crate 的链上接口：
 
 ```toml
 [dependencies]
-invisi-sdk-ffi = { package = "invisi-sdk-ffi", path = "../../../../invisi-sdk-rust/crates/invisi-sdk-ffi" }
+invisi-sdk-ffi = { path = "../../../../invisi-sdk-rust/crates/invisi-sdk-ffi" }
 ```
 
-在 Rust 代码中：
+在 Rust 代码中（**注意**：Rust 路径名是 `invisi_sdk`，**不是** `invisi_sdk_ffi`，因为 ffi crate 的 `[lib].name = "invisi_sdk"` 覆盖了 dep key）：
 ```rust
 use invisi_sdk::derive::{compute_identity_commitment, compute_payment_commitment};
 use invisi_sdk::nonce::generate_nonce;
+```
+
+调用者要把 FFI 符号透传到自家 staticlib/cdylib 时，加一行 re-export 让 dead-code eliminator 保留它们：
+```rust
+// 在 mobile/rust/src/lib.rs 顶层
+pub use invisi_sdk::*;
 ```
 
 C/Swift/Kotlin 侧通过 FFI bridge 调用：
@@ -139,15 +145,14 @@ iOS / Android React Native 应用 [`invisi-pay-app`](https://github.com/invisi-l
 ```diff
 [dependencies]
 - invisi-sdk = { path = "../../../../invisi-sdk-rust" }
-+ invisi-sdk-ffi = { package = "invisi-sdk-ffi", path = "../../../../invisi-sdk-rust/crates/invisi-sdk-ffi" }
++ invisi-sdk-ffi = { path = "../../../../invisi-sdk-rust/crates/invisi-sdk-ffi" }
 ```
 
-**Step 2: 保持 Rust 代码不变**
+**Step 2: Rust import 路径不变（关键点：`[lib].name` 覆盖 dep key）**
 
-所有 `use invisi_sdk::*` 导入继续工作（因 `invisi-sdk-ffi` 声明 `pub use invisi_sdk_core::*`）：
+ffi crate 的 `[lib].name = "invisi_sdk"`，所以 Rust 用 `invisi_sdk` 路径（**不是** `invisi_sdk_ffi`）。`use invisi_sdk::*` 继续工作：
 
 ```rust
-// 继续用（不改）
 use invisi_sdk::derive::compute_identity_commitment;
 use invisi_sdk::nonce::generate_nonce;
 ```

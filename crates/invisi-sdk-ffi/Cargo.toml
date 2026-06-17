@@ -7,7 +7,10 @@ description = "InvisiPay SDK C ABI exports for iOS/Android bridges"
 
 [lib]
 name = "invisi_sdk"
-crate-type = ["staticlib", "cdylib"]
+# rlib: 允许其他 Rust crate（如 invisi-pay-app/apps/mobile/rust）作为依赖引用并
+#       re-export 内部 #[no_mangle] 符号，把 C ABI 透传到上层 staticlib/cdylib。
+# staticlib + cdylib: 独立 C 链接产物（iOS .a / Android .so）。
+crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]
 invisi-sdk-core = { path = "../invisi-sdk-core" }

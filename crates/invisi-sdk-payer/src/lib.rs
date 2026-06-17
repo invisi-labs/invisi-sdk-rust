@@ -8,3 +8,48 @@ sol! {
     function payOpen(bytes32 identityCommitment, uint256 amount, bytes32 nonce, uint256 treeId, bytes32 refundLink);
     function payBlind(bytes proof, bytes32 paymentCommitment, bytes32 changeCommitment, uint256 inputAmount, uint256 treeId, bytes32 refundLink);
 }
+
+use alloy_primitives::{Address, U256};
+use alloy_sol_types::SolCall;
+
+pub fn build_approve_calldata(spender: &[u8; 20], amount: &[u8; 32]) -> Vec<u8> {
+    approveCall {
+        spender: Address::from(*spender),
+        amount: U256::from_be_bytes(*amount),
+    }
+    .abi_encode()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn approve_calldata_matches_known_vector() {
+        // spender = 0x70997970C51812dc3A010C7d01b50e0d17dc79C8, amount = 1000 (0x3e8)
+        let spender = hex_lit::<20>("70997970c51812dc3a010c7d01b50e0d17dc79c8");
+        let mut amount = [0u8; 32];
+        amount[30] = 0x03; amount[31] = 0xe8;
+        let got = build_approve_calldata(&spender, &amount);
+        let expected = concat_hex(&[
+            "095ea7b3",
+            "00000000000000000000000070997970c51812dc3a010c7d01b50e0d17dc79c8",
+            "00000000000000000000000000000000000000000000000000000000000003e8",
+        ]);
+        assert_eq!(got, expected);
+    }
+
+    // test helpers
+    fn hex_lit<const N: usize>(s: &str) -> [u8; N] {
+        let v = decode_hex(s);
+        let mut o = [0u8; N];
+        o.copy_from_slice(&v);
+        o
+    }
+    fn concat_hex(parts: &[&str]) -> Vec<u8> {
+        parts.iter().flat_map(|p| decode_hex(p)).collect()
+    }
+    fn decode_hex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i+2], 16).unwrap()).collect()
+    }
+}

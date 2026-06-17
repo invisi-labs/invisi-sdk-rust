@@ -1,0 +1,410 @@
+//! C ABI exports for iOS Swift / Android JNI bridges.
+//!
+//! Naming convention: `privacy_<function_name>` — matches existing keyring exports.
+//! All hex I/O is null-terminated ASCII (no 0x prefix).
+//! Errors are written to err_buf as a null-terminated stable code string
+//! (see error::Error::code()).
+//!
+//! Returns `true` on success; on failure, err_buf contains the code and the
+//! function returns `false`. Output buffers are populated only on success.
+
+use std::ffi::{c_char, CStr};
+use std::slice;
+
+use serde::Serialize;
+
+use super::cipher::{decrypt_for_db_raw, encrypt_for_db_raw};
+use super::derive::{
+    identity_commitment, nullifier_key_raw, payment_commitment, payment_nullifier,
+};
+use super::pool::generate_receiver_pool_raw;
+
+// ===== helpers =====
+
+unsafe fn write_err(err_buf: *mut u8, err_cap: usize, code: &str) {
+    if err_buf.is_null() || err_cap == 0 {
+        return;
+    }
+    let bytes = code.as_bytes();
+    let n = bytes.len().min(err_cap.saturating_sub(1));
+    let dst = slice::from_raw_parts_mut(err_buf, n);
+    dst.copy_from_slice(&bytes[..n]);
+    *err_buf.add(n) = 0;
+}
+
+unsafe fn write_str(out_buf: *mut u8, out_cap: usize, s: &str) -> bool {
+    if out_buf.is_null() {
+        return false;
+    }
+    let needed = s.len() + 1; // +1 for null terminator
+    if needed > out_cap {
+        return false;
+    }
+    let dst = slice::from_raw_parts_mut(out_buf, s.len());
+    dst.copy_from_slice(s.as_bytes());
+    *out_buf.add(s.len()) = 0;
+    true
+}
+
+unsafe fn read_hex_fixed<const N: usize>(hex_ptr: *const c_char) -> Option<[u8; N]> {
+    if hex_ptr.is_null() {
+        return None;
+    }
+    let s = CStr::from_ptr(hex_ptr).to_str().ok()?;
+    let v = hex::decode(s).ok()?;
+    if v.len() != N {
+        return None;
+    }
+    let mut out = [0u8; N];
+    out.copy_from_slice(&v);
+    Some(out)
+}
+
+/// 接受十进制 (e.g. "1") 或 0x-prefixed 十六进制 (e.g. "0x1") chain_id.
+unsafe fn read_u64(hex_ptr: *const c_char) -> Option<u64> {
+    if hex_ptr.is_null() {
+        return None;
+    }
+    let s = CStr::from_ptr(hex_ptr).to_str().ok()?;
+    if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u64::from_str_radix(rest, 16).ok()
+    } else {
+        s.parse::<u64>().ok()
+    }
+}
+
+unsafe fn read_bytes_len(ptr: *const u8, len: usize) -> Option<Vec<u8>> {
+    if ptr.is_null() && len > 0 {
+        return None;
+    }
+    if len == 0 {
+        return Some(Vec::new());
+    }
+    Some(slice::from_raw_parts(ptr, len).to_vec())
+}
+
+// ===== exports =====
+
+#[no_mangle]
+pub unsafe extern "C" fn privacy_compute_identity_commitment(
+    master_key_hex: *const c_char,
+    invoice_id_hex: *const c_char,
+    recv_addr_hex: *const c_char,
+    out_buf: *mut u8,
+    out_cap: usize,
+    err_buf: *mut u8,
+    err_cap: usize,
+) -> bool {
+    let mk = match read_hex_fixed::<32>(master_key_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let inv = match read_hex_fixed::<16>(invoice_id_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let addr = match read_hex_fixed::<20>(recv_addr_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let nk = nullifier_key_raw(&mk, &inv);
+    let ident = identity_commitment(&nk, &addr);
+    let hex_out = hex::encode(ident);
+    if !write_str(out_buf, out_cap, &hex_out) {
+        write_err(err_buf, err_cap, "BUFFER_TOO_SMALL");
+        return false;
+    }
+    true
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn privacy_compute_payment_commitment(
+    chain_id_str: *const c_char,
+    identity_commitment_hex: *const c_char,
+    token_hex: *const c_char,
+    amount_hex: *const c_char,
+    nonce_hex: *const c_char,
+    out_buf: *mut u8,
+    out_cap: usize,
+    err_buf: *mut u8,
+    err_cap: usize,
+) -> bool {
+    let chain = match read_u64(chain_id_str) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let ident = match read_hex_fixed::<32>(identity_commitment_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let token = match read_hex_fixed::<20>(token_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let amount = match read_hex_fixed::<32>(amount_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let nonce = match read_hex_fixed::<16>(nonce_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let pc = payment_commitment(chain, &ident, &token, &amount, &nonce);
+    let hex_out = hex::encode(pc);
+    if !write_str(out_buf, out_cap, &hex_out) {
+        write_err(err_buf, err_cap, "BUFFER_TOO_SMALL");
+        return false;
+    }
+    true
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn privacy_compute_payment_nullifier(
+    master_key_hex: *const c_char,
+    invoice_id_hex: *const c_char,
+    chain_id_str: *const c_char,
+    token_hex: *const c_char,
+    amount_hex: *const c_char,
+    nonce_hex: *const c_char,
+    out_buf: *mut u8,
+    out_cap: usize,
+    err_buf: *mut u8,
+    err_cap: usize,
+) -> bool {
+    let mk = match read_hex_fixed::<32>(master_key_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let inv = match read_hex_fixed::<16>(invoice_id_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let chain = match read_u64(chain_id_str) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let token = match read_hex_fixed::<20>(token_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let amount = match read_hex_fixed::<32>(amount_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let nonce = match read_hex_fixed::<16>(nonce_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let nk = nullifier_key_raw(&mk, &inv);
+    match payment_nullifier(&nk, chain, &token, &amount, &nonce) {
+        Ok(pn) => {
+            let hex_out = hex::encode(pn);
+            if !write_str(out_buf, out_cap, &hex_out) {
+                write_err(err_buf, err_cap, "BUFFER_TOO_SMALL");
+                return false;
+            }
+            true
+        }
+        Err(e) => {
+            write_err(err_buf, err_cap, e.code());
+            false
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct PoolJson<'a> {
+    #[serde(rename = "poolId")]
+    pool_id: &'a str,
+    #[serde(rename = "identityCommitment")]
+    identity_commitment: String,
+    nonces: Vec<String>,
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn privacy_generate_receiver_pool(
+    master_key_hex: *const c_char,
+    invoice_id_hex: *const c_char,
+    recv_addr_hex: *const c_char,
+    count: u32,
+    out_buf: *mut u8,
+    out_cap: usize,
+    err_buf: *mut u8,
+    err_cap: usize,
+) -> bool {
+    let mk = match read_hex_fixed::<32>(master_key_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let inv = match read_hex_fixed::<16>(invoice_id_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let addr = match read_hex_fixed::<20>(recv_addr_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let pool = match generate_receiver_pool_raw(&mk, &inv, &addr, count) {
+        Ok(p) => p,
+        Err(e) => {
+            write_err(err_buf, err_cap, e.code());
+            return false;
+        }
+    };
+    let json_obj = PoolJson {
+        pool_id: &pool.pool_id,
+        identity_commitment: hex::encode(pool.identity_commitment),
+        nonces: pool.nonces.iter().map(hex::encode).collect(),
+    };
+    let json = match serde_json::to_string(&json_obj) {
+        Ok(s) => s,
+        Err(_) => {
+            write_err(err_buf, err_cap, "SERIALIZE_FAILED");
+            return false;
+        }
+    };
+    if !write_str(out_buf, out_cap, &json) {
+        write_err(err_buf, err_cap, "BUFFER_TOO_SMALL");
+        return false;
+    }
+    true
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn privacy_encrypt_for_db(
+    master_key_hex: *const c_char,
+    plaintext_ptr: *const u8,
+    plaintext_len: usize,
+    out_buf: *mut u8,
+    out_cap: usize,
+    err_buf: *mut u8,
+    err_cap: usize,
+) -> bool {
+    let mk = match read_hex_fixed::<32>(master_key_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let pt = match read_bytes_len(plaintext_ptr, plaintext_len) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let ct = match encrypt_for_db_raw(&mk, &pt) {
+        Ok(v) => v,
+        Err(e) => {
+            write_err(err_buf, err_cap, e.code());
+            return false;
+        }
+    };
+    let hex_out = hex::encode(ct);
+    if !write_str(out_buf, out_cap, &hex_out) {
+        write_err(err_buf, err_cap, "BUFFER_TOO_SMALL");
+        return false;
+    }
+    true
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn privacy_decrypt_from_db(
+    master_key_hex: *const c_char,
+    ciphertext_hex: *const c_char,
+    out_buf: *mut u8,
+    out_cap: usize,
+    err_buf: *mut u8,
+    err_cap: usize,
+) -> bool {
+    let mk = match read_hex_fixed::<32>(master_key_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    if ciphertext_hex.is_null() {
+        write_err(err_buf, err_cap, "INPUT_INVALID");
+        return false;
+    }
+    let ct_str = match CStr::from_ptr(ciphertext_hex).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let ct = match hex::decode(ct_str) {
+        Ok(v) => v,
+        Err(_) => {
+            write_err(err_buf, err_cap, "CIPHERTEXT_MALFORMED");
+            return false;
+        }
+    };
+    let pt = match decrypt_for_db_raw(&mk, &ct) {
+        Ok(v) => v,
+        Err(e) => {
+            write_err(err_buf, err_cap, e.code());
+            return false;
+        }
+    };
+    let hex_out = hex::encode(pt);
+    if !write_str(out_buf, out_cap, &hex_out) {
+        write_err(err_buf, err_cap, "BUFFER_TOO_SMALL");
+        return false;
+    }
+    true
+}

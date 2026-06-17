@@ -13,7 +13,7 @@ InvisiPay 协议层 Rust SDK — 隐私支付的密码学原语 + 派生函数 +
 | Crate | 位置 | 类型 | 职责 | 依赖 |
 |---|---|---|---|---|
 | `invisi-sdk-core` | `crates/invisi-sdk-core/` | rlib | 轻量密码学 + 派生 + 随机数：`poseidon2` hash / `derive::{compute_identity_commitment, compute_payment_commitment, compute_payment_nullifier, derive_nullifier_key, compute_change_commitment}` / `nonce::generate_nonce` / `cipher::xchachapoly1305` / `pool` | 无 alloy；**可编译 WASM** |
-| `invisi-sdk-payer` | `crates/invisi-sdk-payer/` | rlib | 链上交互：`build_approve_calldata` / `build_pay_open_calldata` / `build_pay_blind_calldata` | `invisi-sdk-core` + alloy |
+| `invisi-sdk-payer` | `crates/invisi-sdk-payer/` | rlib | 链上交互：`build_approve_calldata` / `build_pay_open_calldata` / `build_pay_blind_calldata` | alloy（自包含 sol!，不依赖 core） |
 | `invisi-sdk-ffi` | `crates/invisi-sdk-ffi/` | staticlib + cdylib | FFI C ABI 导出 — iOS Swift / Android JNI：`privacy_compute_*` + `privacy_build_*_calldata`；并 `pub use invisi_sdk_core::*` 重导出 | `invisi-sdk-core` + `invisi-sdk-payer` |
 
 ## 包含的能力
@@ -99,20 +99,25 @@ invisi-sdk-payer = { git = "https://github.com/invisi-lab/invisi-sdk-rust", tag 
 ### 例子
 
 ```rust
-use invisi_sdk::derive::{nullifier_key_raw, identity_commitment, payment_commitment};
+// 依赖 invisi-sdk-core（无 alloy，可 WASM）
+use invisi_sdk_core::derive::{derive_nullifier_key, compute_identity_commitment, compute_payment_commitment};
+use invisi_sdk_core::nonce::generate_nonce;
 
 let master_key: [u8; 32] = /* 从 OS 安全存储读取 */;
 let invoice_id: [u8; 16] = /* 服务端分配 */;
 let receiving_addr: [u8; 20] = /* EVM 地址 */;
 
-let nk = nullifier_key_raw(&master_key, &invoice_id);
-let identity = identity_commitment(&nk, &receiving_addr);
+let nk: [u8; 32] = derive_nullifier_key(&master_key, &invoice_id);
+let identity: [u8; 32] = compute_identity_commitment(&nk, &receiving_addr);
 
 // 付款方扫码后用 (identity, token, amount, nonce) 算 paymentCommitment 上链
 let token: [u8; 20] = /* USDT etc */;
 let amount: [u8; 32] = /* big-endian raw wei */;
-let nonce: [u8; 16] = /* 付款方随机 16 byte */;
-let pc = payment_commitment(1u64, &identity, &token, &amount, &nonce);
+let nonce: [u8; 32] = generate_nonce(); // 付款方随机 32 byte
+let pc: [u8; 32] = compute_payment_commitment(1u64, &identity, &token, &amount, &nonce);
+
+// 构造链上 calldata（需依赖 invisi-sdk-payer crate，见 [dependencies] invisi-sdk-payer）
+// use invisi_sdk_payer::build_pay_open_calldata;
 ```
 
 ## 测试
@@ -156,7 +161,7 @@ use invisi_sdk::nonce::generate_nonce;
 ### 本 SDK 架构
 
 - **invisi-sdk-core**：纯密码学，无 alloy，可独立编译 WASM、iOS、Android 库。
-- **invisi-sdk-payer**：链上交互（calldata 构造），依赖 core + alloy。
+- **invisi-sdk-payer**：链上交互（calldata 构造），依赖 alloy（自包含，不依赖 core）。
 - **invisi-sdk-ffi**：统一 FFI 入口，导出所有 C ABI，对 app 端透明。
 
 其中 **子项目②（prover）**：`invisi-sdk-prover` 为独立 crate（尚未实现），未来在 workspace 引入。

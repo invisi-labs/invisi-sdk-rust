@@ -15,7 +15,8 @@ use serde::Serialize;
 
 use invisi_sdk_core::cipher::{decrypt_for_db_raw, encrypt_for_db_raw};
 use invisi_sdk_core::derive::{
-    identity_commitment, nullifier_key_raw, payment_commitment, payment_nullifier,
+    compute_identity_commitment, compute_payment_commitment, compute_payment_nullifier,
+    derive_nullifier_key,
 };
 use invisi_sdk_core::pool::generate_receiver_pool_raw;
 
@@ -118,8 +119,8 @@ pub unsafe extern "C" fn privacy_compute_identity_commitment(
             return false;
         }
     };
-    let nk = nullifier_key_raw(&mk, &inv);
-    let ident = identity_commitment(&nk, &addr);
+    let nk = derive_nullifier_key(&mk, &inv);
+    let ident = compute_identity_commitment(&nk, &addr);
     let hex_out = hex::encode(ident);
     if !write_str(out_buf, out_cap, &hex_out) {
         write_err(err_buf, err_cap, "BUFFER_TOO_SMALL");
@@ -175,7 +176,7 @@ pub unsafe extern "C" fn privacy_compute_payment_commitment(
             return false;
         }
     };
-    let pc = payment_commitment(chain, &ident, &token, &amount, &nonce);
+    let pc = compute_payment_commitment(chain, &ident, &token, &amount, &nonce);
     let hex_out = hex::encode(pc);
     if !write_str(out_buf, out_cap, &hex_out) {
         write_err(err_buf, err_cap, "BUFFER_TOO_SMALL");
@@ -239,8 +240,8 @@ pub unsafe extern "C" fn privacy_compute_payment_nullifier(
             return false;
         }
     };
-    let nk = nullifier_key_raw(&mk, &inv);
-    match payment_nullifier(&nk, chain, &token, &amount, &nonce) {
+    let nk = derive_nullifier_key(&mk, &inv);
+    match compute_payment_nullifier(&nk, chain, &token, &amount, &nonce) {
         Ok(pn) => {
             let hex_out = hex::encode(pn);
             if !write_str(out_buf, out_cap, &hex_out) {

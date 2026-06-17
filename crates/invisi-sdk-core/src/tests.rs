@@ -59,22 +59,22 @@ use super::derive::*;
 fn nullifier_key_deterministic() {
     let mk = [42u8; 32];
     let inv = [7u8; 16];
-    assert_eq!(nullifier_key_raw(&mk, &inv), nullifier_key_raw(&mk, &inv));
+    assert_eq!(derive_nullifier_key(&mk, &inv), derive_nullifier_key(&mk, &inv));
 }
 
 #[test]
 fn nullifier_key_varies_with_master() {
     let inv = [7u8; 16];
-    let nk1 = nullifier_key_raw(&[1u8; 32], &inv);
-    let nk2 = nullifier_key_raw(&[2u8; 32], &inv);
+    let nk1 = derive_nullifier_key(&[1u8; 32], &inv);
+    let nk2 = derive_nullifier_key(&[2u8; 32], &inv);
     assert_ne!(nk1, nk2);
 }
 
 #[test]
 fn nullifier_key_varies_with_invoice() {
     let mk = [42u8; 32];
-    let nk1 = nullifier_key_raw(&mk, &[1u8; 16]);
-    let nk2 = nullifier_key_raw(&mk, &[2u8; 16]);
+    let nk1 = derive_nullifier_key(&mk, &[1u8; 16]);
+    let nk2 = derive_nullifier_key(&mk, &[2u8; 16]);
     assert_ne!(nk1, nk2);
 }
 
@@ -82,7 +82,7 @@ fn nullifier_key_varies_with_invoice() {
 fn identity_commitment_deterministic() {
     let nk = [1u8; 32];
     let addr = [2u8; 20];
-    assert_eq!(identity_commitment(&nk, &addr), identity_commitment(&nk, &addr));
+    assert_eq!(compute_identity_commitment(&nk, &addr), compute_identity_commitment(&nk, &addr));
 }
 
 #[test]
@@ -90,14 +90,14 @@ fn identity_commitment_varies_with_address() {
     let nk = [1u8; 32];
     let a1 = [1u8; 20];
     let a2 = [2u8; 20];
-    assert_ne!(identity_commitment(&nk, &a1), identity_commitment(&nk, &a2));
+    assert_ne!(compute_identity_commitment(&nk, &a1), compute_identity_commitment(&nk, &a2));
 }
 
 #[test]
 fn identity_commitment_varies_with_nk() {
     let addr = [1u8; 20];
-    let i1 = identity_commitment(&[1u8; 32], &addr);
-    let i2 = identity_commitment(&[2u8; 32], &addr);
+    let i1 = compute_identity_commitment(&[1u8; 32], &addr);
+    let i2 = compute_identity_commitment(&[2u8; 32], &addr);
     assert_ne!(i1, i2);
 }
 
@@ -108,8 +108,8 @@ fn payment_commitment_deterministic() {
     let amt = [3u8; 32];
     let n = [4u8; 16];
     assert_eq!(
-        payment_commitment(1, &id, &tok, &amt, &n),
-        payment_commitment(1, &id, &tok, &amt, &n),
+        compute_payment_commitment(1, &id, &tok, &amt, &n),
+        compute_payment_commitment(1, &id, &tok, &amt, &n),
     );
 }
 
@@ -119,8 +119,8 @@ fn payment_commitment_varies_with_nonce() {
     let tok = [2u8; 20];
     let amt = [3u8; 32];
     assert_ne!(
-        payment_commitment(1, &id, &tok, &amt, &[4u8; 16]),
-        payment_commitment(1, &id, &tok, &amt, &[5u8; 16]),
+        compute_payment_commitment(1, &id, &tok, &amt, &[4u8; 16]),
+        compute_payment_commitment(1, &id, &tok, &amt, &[5u8; 16]),
     );
 }
 
@@ -131,8 +131,8 @@ fn payment_commitment_varies_with_chain() {
     let amt = [3u8; 32];
     let n = [4u8; 16];
     assert_ne!(
-        payment_commitment(1, &id, &tok, &amt, &n),
-        payment_commitment(2, &id, &tok, &amt, &n),
+        compute_payment_commitment(1, &id, &tok, &amt, &n),
+        compute_payment_commitment(2, &id, &tok, &amt, &n),
     );
 }
 
@@ -142,7 +142,7 @@ fn payment_nullifier_normal_input_nonzero() {
     let tok = [2u8; 20];
     let amt = [3u8; 32];
     let n = [4u8; 16];
-    let r = payment_nullifier(&nk, 1, &tok, &amt, &n).expect("non-zero");
+    let r = compute_payment_nullifier(&nk, 1, &tok, &amt, &n).expect("non-zero");
     assert_ne!(r, [0u8; 32]);
 }
 
@@ -152,8 +152,8 @@ fn payment_nullifier_deterministic() {
     let tok = [2u8; 20];
     let amt = [3u8; 32];
     let n = [4u8; 16];
-    let r1 = payment_nullifier(&nk, 1, &tok, &amt, &n).unwrap();
-    let r2 = payment_nullifier(&nk, 1, &tok, &amt, &n).unwrap();
+    let r1 = compute_payment_nullifier(&nk, 1, &tok, &amt, &n).unwrap();
+    let r2 = compute_payment_nullifier(&nk, 1, &tok, &amt, &n).unwrap();
     assert_eq!(r1, r2);
 }
 
@@ -162,8 +162,8 @@ fn payment_nullifier_varies_with_nk() {
     let tok = [2u8; 20];
     let amt = [3u8; 32];
     let n = [4u8; 16];
-    let r1 = payment_nullifier(&[1u8; 32], 1, &tok, &amt, &n).unwrap();
-    let r2 = payment_nullifier(&[2u8; 32], 1, &tok, &amt, &n).unwrap();
+    let r1 = compute_payment_nullifier(&[1u8; 32], 1, &tok, &amt, &n).unwrap();
+    let r2 = compute_payment_nullifier(&[2u8; 32], 1, &tok, &amt, &n).unwrap();
     assert_ne!(r1, r2);
 }
 
@@ -306,11 +306,11 @@ fn db_enc_key_deterministic_per_master() {
 #[test]
 fn db_enc_key_isolated_from_payment_keys() {
     // Sanity: D_DERIVE key for db != D_NKEY for nullifier
-    use super::derive::nullifier_key_raw;
+    use super::derive::derive_nullifier_key;
     let mk = [42u8; 32];
     let inv = [1u8; 16];
     let db_key = db_enc_key_from_master(&mk);
-    let nk = nullifier_key_raw(&mk, &inv);
+    let nk = derive_nullifier_key(&mk, &inv);
     assert_ne!(db_key, nk, "domain separation must isolate D_DERIVE from D_NKEY");
 }
 
@@ -357,7 +357,7 @@ fn protocol_vector_nullifier_key() {
     let master_key: [u8; 32] = unimplemented!("vector: master_key");
     let invoice_id: [u8; 16] = unimplemented!("vector: invoice_id");
     let expected: [u8; 32] = unimplemented!("vector: expected nullifier_key");
-    assert_eq!(super::derive::nullifier_key_raw(&master_key, &invoice_id), expected);
+    assert_eq!(super::derive::derive_nullifier_key(&master_key, &invoice_id), expected);
 }
 
 #[test]
@@ -366,7 +366,7 @@ fn protocol_vector_identity_commitment() {
     let nullifier_key: [u8; 32] = unimplemented!("vector: nullifier_key");
     let receiving_address: [u8; 20] = unimplemented!("vector: receiving_address");
     let expected: [u8; 32] = unimplemented!("vector: expected identity_commitment");
-    assert_eq!(super::derive::identity_commitment(&nullifier_key, &receiving_address), expected);
+    assert_eq!(super::derive::compute_identity_commitment(&nullifier_key, &receiving_address), expected);
 }
 
 #[test]
@@ -379,7 +379,7 @@ fn protocol_vector_payment_commitment() {
     let nonce: [u8; 16] = unimplemented!("vector: nonce");
     let expected: [u8; 32] = unimplemented!("vector: expected payment_commitment");
     assert_eq!(
-        super::derive::payment_commitment(chain_id, &identity_commitment, &token, &amount, &nonce),
+        super::derive::compute_payment_commitment(chain_id, &identity_commitment, &token, &amount, &nonce),
         expected
     );
 }
@@ -394,7 +394,7 @@ fn protocol_vector_payment_nullifier() {
     let nonce: [u8; 16] = unimplemented!("vector: nonce");
     let expected: [u8; 32] = unimplemented!("vector: expected payment_nullifier");
     assert_eq!(
-        super::derive::payment_nullifier(&nullifier_key, chain_id, &token, &amount, &nonce).unwrap(),
+        super::derive::compute_payment_nullifier(&nullifier_key, chain_id, &token, &amount, &nonce).unwrap(),
         expected
     );
 }

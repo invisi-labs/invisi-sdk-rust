@@ -1,10 +1,10 @@
-//! 派生函数: nullifier_key / identity_commitment / payment_commitment / payment_nullifier
+//! 派生函数: derive_nullifier_key / compute_identity_commitment / compute_payment_commitment / compute_payment_nullifier
 //!
 //! 所有函数都是 "raw" 形式 — 输入 master_key 等明文字节, 不与 Keychain 交互.
 //! iOS/Android bridge 层负责从 Keychain/Keystore 读 masterKey 后传入.
 //!
-//! Tasks 5: nullifier_key_raw + identity_commitment
-//! Task 6: payment_commitment + payment_nullifier (含 ≠0 不变式)
+//! Tasks 5: derive_nullifier_key + compute_identity_commitment
+//! Task 6: compute_payment_commitment + compute_payment_nullifier (含 ≠0 不变式)
 
 use super::domain::{D_NKEY, D_IDENT, D_PAY, D_NULL};
 use super::error::{Error, Result};
@@ -23,13 +23,13 @@ fn pad_to_32(input: &[u8]) -> [u8; 32] {
 ///
 /// 与 protocol-docs/01-protocol/1.2-commitment.md:26-46 的哈希链对齐.
 /// 入参 master_key 由 bridge 层从 Keychain 读取后传入.
-pub fn nullifier_key_raw(master_key: &[u8; 32], invoice_id: &[u8; 16]) -> [u8; 32] {
+pub fn derive_nullifier_key(master_key: &[u8; 32], invoice_id: &[u8; 16]) -> [u8; 32] {
     let inv = pad_to_32(invoice_id);
     h(D_NKEY, &[master_key, &inv])
 }
 
 /// identityCommitment = Poseidon2(D_IDENT, nullifierKey, receivingAddress_field).
-pub fn identity_commitment(nullifier_key: &[u8; 32], receiving_address: &[u8; 20]) -> [u8; 32] {
+pub fn compute_identity_commitment(nullifier_key: &[u8; 32], receiving_address: &[u8; 20]) -> [u8; 32] {
     let addr = pad_to_32(receiving_address);
     h(D_IDENT, &[nullifier_key, &addr])
 }
@@ -44,7 +44,7 @@ fn chain_id_to_field(chain_id: u64) -> [u8; 32] {
 /// paymentCommitment = Poseidon2(D_PAY, chainId, identityCommitment, token, amount, nonce).
 ///
 /// 协议 1.2-commitment.md:42 定义. 付款方算并写入链上事件; 收款方从事件里取 nonce 反推.
-pub fn payment_commitment(
+pub fn compute_payment_commitment(
     chain_id: u64,
     identity_commitment: &[u8; 32],
     token: &[u8; 20],
@@ -61,7 +61,7 @@ pub fn payment_commitment(
 ///
 /// 协议 1.3-nullifier.md:8-30. **不变式 (1.3:17-23): 输出 ≠ 0** — 零值是 batch_settle 电路
 /// 里的 padding 槽位标记. 一旦碰撞出零, 协议视为 invoiceId 复用攻击, 必须立即报错.
-pub fn payment_nullifier(
+pub fn compute_payment_nullifier(
     nullifier_key: &[u8; 32],
     chain_id: u64,
     token: &[u8; 20],

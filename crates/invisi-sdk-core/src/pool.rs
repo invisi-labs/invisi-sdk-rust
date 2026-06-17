@@ -10,7 +10,7 @@
 use rand::RngCore;
 use uuid::Uuid;
 
-use super::derive::{nullifier_key_raw, identity_commitment};
+use super::derive::{derive_nullifier_key, compute_identity_commitment};
 use super::error::{Error, Result};
 
 /// 同 invoice / 同 receivingAddress 下的承诺池.
@@ -39,8 +39,8 @@ pub fn generate_receiver_pool_raw(
     }
 
     // 派生 identity_commitment (永远相同 per (mk, inv, addr)).
-    let nk = nullifier_key_raw(master_key, invoice_id);
-    let ident = identity_commitment(&nk, receiving_address);
+    let nk = derive_nullifier_key(master_key, invoice_id);
+    let ident = compute_identity_commitment(&nk, receiving_address);
 
     // CSPRNG 生成 count 个独立 16-byte nonce.
     let mut nonces = Vec::with_capacity(count as usize);

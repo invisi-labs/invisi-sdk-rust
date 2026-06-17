@@ -10,7 +10,7 @@
 //!
 //! - [`domain`] — 域分离常量
 //! - [`poseidon`] — Aztec BN254 t=4 Poseidon2 sponge
-//! - [`derive`] — nullifier_key / identity_commitment / payment_commitment / payment_nullifier
+//! - [`derive`] — derive_nullifier_key / compute_identity_commitment / compute_payment_commitment / compute_payment_nullifier
 //! - [`pool`] — ReceiverCommitment 批生成
 //! - [`cipher`] — XChaCha20Poly1305 AEAD 字段加密
 //! - [`error`] — 统一错误类型

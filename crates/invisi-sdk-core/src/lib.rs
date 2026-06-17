@@ -14,7 +14,6 @@
 //! - [`pool`] — ReceiverCommitment 批生成
 //! - [`cipher`] — XChaCha20Poly1305 AEAD 字段加密
 //! - [`error`] — 统一错误类型
-//! - [`ffi`] — C ABI exports (iOS Swift / Android JNI bridge)
 //!
 //! ## 与 nexus / Noir 兼容性
 //!
@@ -32,7 +31,6 @@ pub mod cipher;
 pub mod derive;
 pub mod domain;
 pub mod error;
-pub mod ffi;
 pub mod field;
 pub mod pool;
 pub mod poseidon;

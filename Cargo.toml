@@ -1,30 +1,6 @@
-[package]
-name = "invisi-sdk"
-version = "0.1.0"
-edition = "2021"
-authors = ["InvisiPay team"]
-license = "Apache-2.0"
-description = "Rust SDK for InvisiPay privacy payment protocol — Aztec BN254 t=4 Poseidon2, commitment derivation, AEAD field encryption"
-repository = "https://github.com/invisi-lab/invisi-sdk-rust"
-readme = "README.md"
-keywords = ["zk", "poseidon2", "bn254", "privacy", "noir"]
-categories = ["cryptography", "no-std"]
-
-[lib]
-name = "invisi_sdk"
-crate-type = ["rlib", "staticlib", "cdylib"]
-
-[dependencies]
-ark-bn254 = { version = "0.4", default-features = false, features = ["scalar_field"] }
-ark-ff = { version = "0.4", default-features = false }
-chacha20poly1305 = "0.10"
-rand = "0.8"
-sha2 = "0.10"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-thiserror = "1.0"
-uuid = { version = "1", features = ["v4"] }
-hex = "0.4"
+[workspace]
+resolver = "2"
+members = ["crates/invisi-sdk-core", "crates/invisi-sdk-ffi"]
 
 [profile.release]
 opt-level = "z"

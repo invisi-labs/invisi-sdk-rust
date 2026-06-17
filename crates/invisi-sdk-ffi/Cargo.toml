@@ -1,0 +1,16 @@
+[package]
+name = "invisi-sdk-ffi"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "InvisiPay SDK C ABI exports for iOS/Android bridges"
+
+[lib]
+name = "invisi_sdk"
+crate-type = ["staticlib", "cdylib"]
+
+[dependencies]
+invisi-sdk-core = { path = "../invisi-sdk-core" }
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

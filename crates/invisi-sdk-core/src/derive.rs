@@ -77,3 +77,18 @@ pub fn compute_payment_nullifier(
     }
     Ok(out)
 }
+
+/// changeCommitment（隐藏支付找零）。对齐电路 shielded_payment/main.nr:71-72：
+///   change_rcv        = Poseidon2(D_IDENT, change_nullifier_key, change_receiving_address)
+///   change_commitment = Poseidon2(D_PAY, chain_id, change_rcv, token, change_amount, change_nonce)
+pub fn compute_change_commitment(
+    chain_id: u64,
+    change_nullifier_key: &[u8; 32],
+    change_receiving_address: &[u8; 20],
+    token: &[u8; 20],
+    change_amount: &[u8; 32],
+    change_nonce: &[u8; 32],
+) -> [u8; 32] {
+    let rcv = compute_identity_commitment(change_nullifier_key, change_receiving_address);
+    compute_payment_commitment(chain_id, &rcv, token, change_amount, change_nonce)
+}

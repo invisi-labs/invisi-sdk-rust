@@ -167,6 +167,22 @@ fn payment_nullifier_varies_with_nk() {
     assert_ne!(r1, r2);
 }
 
+#[test]
+fn change_commitment_equals_identity_then_payment() {
+    use crate::derive::{compute_change_commitment, compute_identity_commitment, compute_payment_commitment};
+    let change_nk = [7u8; 32];
+    let change_addr = [9u8; 20];
+    let token = [3u8; 20];
+    let amount = [0u8; 32];
+    let nonce = [5u8; 32];
+    let chain_id = 84532u64;
+
+    let rcv = compute_identity_commitment(&change_nk, &change_addr);
+    let expected = compute_payment_commitment(chain_id, &rcv, &token, &amount, &nonce);
+    let got = compute_change_commitment(chain_id, &change_nk, &change_addr, &token, &amount, &nonce);
+    assert_eq!(got, expected);
+}
+
 use super::error::Error;
 
 #[test]

@@ -13,6 +13,8 @@ use std::slice;
 
 use serde::Serialize;
 
+use invisi_sdk_payer::{build_approve_calldata, build_pay_blind_calldata, build_pay_open_calldata};
+
 use invisi_sdk_core::cipher::{decrypt_for_db_raw, encrypt_for_db_raw};
 use invisi_sdk_core::derive::{
     compute_identity_commitment, compute_payment_commitment, compute_payment_nullifier,
@@ -412,6 +414,72 @@ pub unsafe extern "C" fn privacy_decrypt_from_db(
     true
 }
 
+// ===== calldata builders =====
+
+#[no_mangle]
+pub unsafe extern "C" fn privacy_build_approve_calldata(
+    spender_hex: *const c_char,
+    amount_hex: *const c_char,
+    out_buf: *mut u8, out_cap: usize,
+    err_buf: *mut u8, err_cap: usize,
+) -> bool {
+    let spender = match read_hex_fixed::<20>(spender_hex) {
+        Some(v) => v, None => { write_err(err_buf, err_cap, "INPUT_INVALID"); return false; }
+    };
+    let amount = match read_hex_fixed::<32>(amount_hex) {
+        Some(v) => v, None => { write_err(err_buf, err_cap, "INPUT_INVALID"); return false; }
+    };
+    let data = build_approve_calldata(&spender, &amount);
+    if !write_str(out_buf, out_cap, &hex::encode(data)) {
+        write_err(err_buf, err_cap, "BUFFER_TOO_SMALL"); return false;
+    }
+    true
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn privacy_build_pay_open_calldata(
+    identity_hex: *const c_char,
+    amount_hex: *const c_char,
+    nonce_hex: *const c_char,
+    tree_id_str: *const c_char,
+    refund_link_hex: *const c_char,
+    out_buf: *mut u8, out_cap: usize,
+    err_buf: *mut u8, err_cap: usize,
+) -> bool {
+    let identity = match read_hex_fixed::<32>(identity_hex) { Some(v)=>v, None=>{write_err(err_buf,err_cap,"INPUT_INVALID");return false;} };
+    let amount = match read_hex_fixed::<32>(amount_hex) { Some(v)=>v, None=>{write_err(err_buf,err_cap,"INPUT_INVALID");return false;} };
+    let nonce = match read_hex_fixed::<32>(nonce_hex) { Some(v)=>v, None=>{write_err(err_buf,err_cap,"INPUT_INVALID");return false;} };
+    let tree_id = match read_u64(tree_id_str) { Some(v)=>v, None=>{write_err(err_buf,err_cap,"INPUT_INVALID");return false;} };
+    let refund = match read_hex_fixed::<32>(refund_link_hex) { Some(v)=>v, None=>{write_err(err_buf,err_cap,"INPUT_INVALID");return false;} };
+    let data = build_pay_open_calldata(&identity, &amount, &nonce, tree_id, &refund);
+    if !write_str(out_buf, out_cap, &hex::encode(data)) { write_err(err_buf,err_cap,"BUFFER_TOO_SMALL"); return false; }
+    true
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn privacy_build_pay_blind_calldata(
+    proof_hex: *const c_char,
+    payment_commitment_hex: *const c_char,
+    change_commitment_hex: *const c_char,
+    input_amount_hex: *const c_char,
+    tree_id_str: *const c_char,
+    refund_link_hex: *const c_char,
+    out_buf: *mut u8, out_cap: usize,
+    err_buf: *mut u8, err_cap: usize,
+) -> bool {
+    let proof_s = if proof_hex.is_null() { write_err(err_buf,err_cap,"INPUT_INVALID"); return false; }
+                  else { match CStr::from_ptr(proof_hex).to_str() { Ok(s)=>s, Err(_)=>{write_err(err_buf,err_cap,"INPUT_INVALID");return false;} } };
+    let proof = match hex::decode(proof_s) { Ok(v)=>v, Err(_)=>{write_err(err_buf,err_cap,"INPUT_INVALID");return false;} };
+    let pc = match read_hex_fixed::<32>(payment_commitment_hex) { Some(v)=>v, None=>{write_err(err_buf,err_cap,"INPUT_INVALID");return false;} };
+    let cc = match read_hex_fixed::<32>(change_commitment_hex) { Some(v)=>v, None=>{write_err(err_buf,err_cap,"INPUT_INVALID");return false;} };
+    let input_amount = match read_hex_fixed::<32>(input_amount_hex) { Some(v)=>v, None=>{write_err(err_buf,err_cap,"INPUT_INVALID");return false;} };
+    let tree_id = match read_u64(tree_id_str) { Some(v)=>v, None=>{write_err(err_buf,err_cap,"INPUT_INVALID");return false;} };
+    let refund = match read_hex_fixed::<32>(refund_link_hex) { Some(v)=>v, None=>{write_err(err_buf,err_cap,"INPUT_INVALID");return false;} };
+    let data = build_pay_blind_calldata(&proof, &pc, &cc, &input_amount, tree_id, &refund);
+    if !write_str(out_buf, out_cap, &hex::encode(data)) { write_err(err_buf,err_cap,"BUFFER_TOO_SMALL"); return false; }
+    true
+}
+
 // ==================== FFI smoke tests ====================
 //
 // Verify the C ABI exports work end-to-end when called from Rust with hex-encoded
@@ -645,6 +713,23 @@ mod tests {
         let pt_hex = read_cstr_until_nul(&pt_buf);
         let recovered = hex::decode(pt_hex).unwrap();
         assert_eq!(recovered, plaintext);
+    }
+
+    #[test]
+    fn ffi_build_approve_calldata_smoke() {
+        let spender = std::ffi::CString::new("70997970c51812dc3a010c7d01b50e0d17dc79c8").unwrap();
+        let amount = std::ffi::CString::new(format!("{:064x}", 1000u64)).unwrap();
+        let mut out = [0u8; 512];
+        let mut err = [0u8; 64];
+        let ok = unsafe {
+            super::privacy_build_approve_calldata(
+                spender.as_ptr(), amount.as_ptr(),
+                out.as_mut_ptr(), out.len(), err.as_mut_ptr(), err.len())
+        };
+        assert!(ok);
+        let s = unsafe { std::ffi::CStr::from_ptr(out.as_ptr() as *const i8) }.to_str().unwrap();
+        assert!(s.starts_with("095ea7b3"));
+        assert_eq!(s.len(), 8 + 64 + 64);
     }
 
     #[test]

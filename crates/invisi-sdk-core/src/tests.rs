@@ -362,18 +362,16 @@ fn for_db_raw_isolation_across_masters() {
 //
 // These tests verify our hash derivations match the canonical values published by
 // the protocol team (see ../protocol-docs/01-protocol/1.2-commitment.md). All four
-// are #[ignore]'d until both prerequisites are met:
-//
-//   1. apps/mobile/rust/src/privacy_payment/poseidon.rs replaces the sha256 stub
-//      with the real invisi_protocol::poseidon2 implementation.
-//   2. Protocol team publishes a fixture file (TBD path, likely in invisi_protocol
-//      crate's tests/ directory or a separate "vectors" repo).
+// are #[ignore]'d until the protocol team publishes a fixture file (TBD path,
+// likely the invisi-protocol crate's `tests/` directory or a separate
+// "vectors" repo). Poseidon2 itself is already real (Aztec BN254 t=4) and
+// passes the 3 inline alignment vectors at the top of this file.
 //
 // To activate:
 //   - Replace the `unimplemented!()` calls with `hex!("...")` literals from the
 //     fixture file (add `hex-literal = "0.4"` to dev-dependencies).
 //   - Remove `#[ignore]` from each test.
-//   - Run `cargo test --lib privacy_payment::tests::protocol_vector_` to verify.
+//   - Run `cargo test protocol_vector_` to verify.
 //
 // If any vector fails, the bug is either (a) wrong byte ordering in our derive
 // helpers, (b) wrong field encoding (we use right-aligned zero-pad), or (c) Poseidon2

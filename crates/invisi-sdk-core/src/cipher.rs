@@ -9,8 +9,9 @@
 //! 加密格式 (40 字节起步):
 //!   ciphertext = nonce(24) || encrypted_payload || tag(16)
 //!
-//! Stub 阶段 Poseidon2 用 sha256, 因此 db_enc_key 输出位级不与协议未来值一致,
-//! 但语义 (域分离 + 确定性 + 与 nullifier_key 隔离) 完全正确.
+//! db_enc_key 由真 Aztec BN254 Poseidon2 派生 (`Poseidon2(D_DERIVE, masterKey, "db-enc")`),
+//! 与 nexus / Noir 电路 bit-perfect — 同一 masterKey 在所有平台得到相同 db_enc_key,
+//! 后续做云端 → 端侧迁移时密文可直接复用.
 
 use chacha20poly1305::{XChaCha20Poly1305, KeyInit, AeadCore, aead::{Aead, OsRng}};
 

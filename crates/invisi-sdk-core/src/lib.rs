@@ -8,12 +8,16 @@
 //!
 //! ## 模块结构
 //!
-//! - [`domain`] — 域分离常量
+//! - [`domain`] — 域分离常量 (D_NKEY / D_IDENT / D_PAY / D_NULL / D_DERIVE)
+//! - [`field`] — BN254 标量域 (Fr) 编码/解码 helpers
+//! - [`poseidon_constants`] — Poseidon2 round constants + 内部对角矩阵
 //! - [`poseidon`] — Aztec BN254 t=4 Poseidon2 sponge
-//! - [`derive`] — derive_nullifier_key / compute_identity_commitment / compute_payment_commitment / compute_payment_nullifier
+//! - [`derive`] — derive_nullifier_key / compute_identity_commitment /
+//!   compute_payment_commitment / compute_payment_nullifier / compute_change_commitment
+//! - [`nonce`] — BN254 field-element 随机 nonce 生成 (OsRng)
 //! - [`pool`] — ReceiverCommitment 批生成
-//! - [`cipher`] — XChaCha20Poly1305 AEAD 字段加密
-//! - [`error`] — 统一错误类型
+//! - [`cipher`] — XChaCha20Poly1305 AEAD 字段加密 + dbEncKey 派生
+//! - [`error`] — 统一错误类型 + 稳定 FFI 错误码
 //!
 //! ## 与 nexus / Noir 兼容性
 //!

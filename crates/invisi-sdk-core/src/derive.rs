@@ -1,10 +1,9 @@
-//! 派生函数: derive_nullifier_key / compute_identity_commitment / compute_payment_commitment / compute_payment_nullifier
+//! 派生函数 — 所有 commitment / nullifier 的同一来源 (single source of truth).
 //!
-//! 所有函数都是 "raw" 形式 — 输入 master_key 等明文字节, 不与 Keychain 交互.
+//! 所有函数都是 "raw" 形式: 输入 master_key 等明文字节, 不与 Keychain 交互.
 //! iOS/Android bridge 层负责从 Keychain/Keystore 读 masterKey 后传入.
 //!
-//! Tasks 5: derive_nullifier_key + compute_identity_commitment
-//! Task 6: compute_payment_commitment + compute_payment_nullifier (含 ≠0 不变式)
+//! 与协议哈希链对齐: `../protocol-docs/01-protocol/1.2-commitment.md`.
 
 use super::domain::{D_NKEY, D_IDENT, D_PAY, D_NULL};
 use super::error::{Error, Result};

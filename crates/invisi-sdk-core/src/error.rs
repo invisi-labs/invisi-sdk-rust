@@ -7,6 +7,10 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum Error {
+    /// NOTE: SDK 内部从不直接产生此变体 — masterKey 由 bridge 层从 Keychain/Keystore
+    /// 读取后传入, 缺失时 bridge 层直接 reject Promise with code MASTERKEY_MISSING.
+    /// 此变体保留为跨平台错误码契约的一部分 (`code()` 返回 "MASTERKEY_MISSING"),
+    /// 让 SDK / Rust bridge / Swift / Kotlin 共享同一字符串.
     #[error("masterkey not found for mnemonic {0}")]
     MasterKeyMissing(String),
 

@@ -90,6 +90,44 @@ unsafe fn read_bytes_len(ptr: *const u8, len: usize) -> Option<Vec<u8>> {
 
 // ===== exports =====
 
+/// Expose nullifier_key = Poseidon2(D_NKEY, master_key, invoice_id) as raw hex.
+/// Mobile B-side withdraw flow needs to inject this into each settlement
+/// witness leaf (`leaf.NullifierKey`) before calling GenerateSettlementProof.
+/// Computing it once here saves a round trip vs. exposing the FFI fields of
+/// privacy_compute_payment_nullifier (which already derives nk internally but
+/// only returns the final nullifier).
+#[no_mangle]
+pub unsafe extern "C" fn privacy_compute_nullifier_key(
+    master_key_hex: *const c_char,
+    invoice_id_hex: *const c_char,
+    out_buf: *mut u8,
+    out_cap: usize,
+    err_buf: *mut u8,
+    err_cap: usize,
+) -> bool {
+    let mk = match read_hex_fixed::<32>(master_key_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let inv = match read_hex_fixed::<16>(invoice_id_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let nk = derive_nullifier_key(&mk, &inv);
+    let hex_out = hex::encode(nk);
+    if !write_str(out_buf, out_cap, &hex_out) {
+        write_err(err_buf, err_cap, "BUFFER_TOO_SMALL");
+        return false;
+    }
+    true
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn privacy_compute_identity_commitment(
     master_key_hex: *const c_char,

@@ -13,6 +13,7 @@ fn domain_constants_match_protocol() {
     assert_eq!(D_PAY,    3);
     assert_eq!(D_NULL,   4);
     assert_eq!(D_DERIVE, 8);
+    assert_eq!(D_CHANGE_NKEY, 11);
 }
 
 use super::poseidon::*;
@@ -165,6 +166,83 @@ fn payment_nullifier_varies_with_nk() {
     let r1 = compute_payment_nullifier(&[1u8; 32], 1, &tok, &amt, &n).unwrap();
     let r2 = compute_payment_nullifier(&[2u8; 32], 1, &tok, &amt, &n).unwrap();
     assert_ne!(r1, r2);
+}
+
+#[test]
+fn change_nullifier_key_deterministic() {
+    let mk = [7u8; 32];
+    let pc = [9u8; 32];
+    let a = derive_change_nullifier_key(&mk, &pc);
+    let b = derive_change_nullifier_key(&mk, &pc);
+    assert_eq!(a, b, "same (masterKey, paymentCommitment) must yield same key");
+}
+
+#[test]
+fn change_nullifier_key_varies_with_salt() {
+    let mk = [7u8; 32];
+    assert_ne!(
+        derive_change_nullifier_key(&mk, &[1u8; 32]),
+        derive_change_nullifier_key(&mk, &[2u8; 32]),
+    );
+}
+
+// 跨语言向量对齐（HARD GATE）——期望值来自 invisi-sdk-go/core/testdata/vectors.json
+// 的 deriveChangeNullifierKey 组。输入以 Fr 十进制表示成 32 字节 BE。
+#[test]
+fn xlang_vector_change_nullifier_key() {
+    // payerMasterKey=100, paymentCommitment=200
+    let mk = u256_be(100);
+    let pc = u256_be(200);
+    let got = derive_change_nullifier_key(&mk, &pc);
+    assert_eq!(
+        hex::encode(got),
+        "09dfcd6f144e3bf69b27da5ef2bb87274f1082e035ddb91b37bfc6702825123a",
+    );
+    // payerMasterKey=0, paymentCommitment=0
+    let got0 = derive_change_nullifier_key(&[0u8; 32], &[0u8; 32]);
+    assert_eq!(
+        hex::encode(got0),
+        "1dc7e560033fee1662ff1d5dd0583625991982c5452fc2b0b2d97b3577657a47",
+    );
+}
+
+// changeCommitment 向量（compute_change_commitment 已存在，此测试锁定其对齐）：
+// chainId=1, changeNullifierKey=<第一条 deriveChangeNullifierKey 输出>, receivingAddress=2457,
+// token=2748, amount=250, nonce=7  →  0x2504563f7319b051d7c1d94aa976daa69082c3b66f43456b92530a35142d98c4
+#[test]
+fn xlang_vector_change_commitment() {
+    let cnk =
+        hex_to_32("09dfcd6f144e3bf69b27da5ef2bb87274f1082e035ddb91b37bfc6702825123a");
+    let got = compute_change_commitment(
+        1,
+        &cnk,
+        &u160_be(2457),
+        &u160_be(2748),
+        &u256_be(250),
+        &u256_be(7),
+    );
+    assert_eq!(
+        hex::encode(got),
+        "2504563f7319b051d7c1d94aa976daa69082c3b66f43456b92530a35142d98c4",
+    );
+}
+
+// —— 小工具（跨语言向量对齐测试专用）——
+fn u256_be(v: u64) -> [u8; 32] {
+    let mut o = [0u8; 32];
+    o[24..].copy_from_slice(&v.to_be_bytes());
+    o
+}
+fn u160_be(v: u64) -> [u8; 20] {
+    let mut o = [0u8; 20];
+    o[12..].copy_from_slice(&v.to_be_bytes());
+    o
+}
+fn hex_to_32(s: &str) -> [u8; 32] {
+    let b = hex::decode(s).unwrap();
+    let mut o = [0u8; 32];
+    o.copy_from_slice(&b);
+    o
 }
 
 #[test]

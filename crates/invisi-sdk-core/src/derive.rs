@@ -5,7 +5,7 @@
 //!
 //! 与协议哈希链对齐: `../protocol-docs/01-protocol/1.2-commitment.md`.
 
-use super::domain::{D_NKEY, D_IDENT, D_PAY, D_NULL};
+use super::domain::{D_NKEY, D_IDENT, D_PAY, D_NULL, D_CHANGE_NKEY};
 use super::error::{Error, Result};
 use super::poseidon::h;
 
@@ -90,4 +90,17 @@ pub fn compute_change_commitment(
 ) -> [u8; 32] {
     let rcv = compute_identity_commitment(change_nullifier_key, change_receiving_address);
     compute_payment_commitment(chain_id, &rcv, token, change_amount, change_nonce)
+}
+
+/// changeNullifierKey = Poseidon2(D_CHANGE_NKEY, masterKey, paymentCommitment).
+///
+/// 盲支付找零派生：付款方用本笔 paymentCommitment 作盐、复用 payment nonce，
+/// 使服务端（SPEC-190）可确定性重算并对账。与既有 derive_nullifier_key 同构，
+/// 仅换域为 D_CHANGE_NKEY、盐从 invoiceId 换为 32 字节 paymentCommitment
+/// （已是 field element，无需 pad_to_32）。
+pub fn derive_change_nullifier_key(
+    master_key: &[u8; 32],
+    payment_commitment: &[u8; 32],
+) -> [u8; 32] {
+    h(D_CHANGE_NKEY, &[master_key, payment_commitment])
 }

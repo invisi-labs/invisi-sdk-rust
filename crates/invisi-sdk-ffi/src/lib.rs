@@ -17,8 +17,8 @@ use invisi_sdk_payer::{build_approve_calldata, build_pay_blind_calldata, build_p
 
 use invisi_sdk_core::cipher::{decrypt_for_db_raw, encrypt_for_db_raw};
 use invisi_sdk_core::derive::{
-    compute_identity_commitment, compute_payment_commitment, compute_payment_nullifier,
-    derive_nullifier_key,
+    compute_change_commitment, compute_identity_commitment, compute_payment_commitment,
+    compute_payment_nullifier, derive_change_nullifier_key, derive_nullifier_key,
 };
 use invisi_sdk_core::pool::generate_receiver_pool_raw;
 
@@ -284,6 +284,207 @@ pub unsafe extern "C" fn privacy_compute_payment_nullifier(
     match compute_payment_nullifier(&nk, chain, &token, &amount, &nonce) {
         Ok(pn) => {
             let hex_out = hex::encode(pn);
+            if !write_str(out_buf, out_cap, &hex_out) {
+                write_err(err_buf, err_cap, "BUFFER_TOO_SMALL");
+                return false;
+            }
+            true
+        }
+        Err(e) => {
+            write_err(err_buf, err_cap, e.code());
+            false
+        }
+    }
+}
+
+// ===== blind-payment change-derivation exports =====
+//
+// Change-side counterparts of the payer's own privacy_* primitives above.
+// The payer derives a change nullifier key from their own master key plus the
+// payment commitment (the salt), then walks the same identity/payment
+// commitment hash chain as the receiver side to build the change commitment.
+// These take already-derived keys/fields rather than deriving a nullifier key
+// from (masterKey, invoiceId) internally, since the change path has no
+// invoiceId to anchor on.
+
+#[no_mangle]
+pub unsafe extern "C" fn privacy_derive_change_nullifier_key(
+    master_key_hex: *const c_char,
+    payment_commitment_hex: *const c_char,
+    out_buf: *mut u8,
+    out_cap: usize,
+    err_buf: *mut u8,
+    err_cap: usize,
+) -> bool {
+    let mk = match read_hex_fixed::<32>(master_key_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let pc = match read_hex_fixed::<32>(payment_commitment_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let cnk = derive_change_nullifier_key(&mk, &pc);
+    let hex_out = hex::encode(cnk);
+    if !write_str(out_buf, out_cap, &hex_out) {
+        write_err(err_buf, err_cap, "BUFFER_TOO_SMALL");
+        return false;
+    }
+    true
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn privacy_compute_change_commitment(
+    chain_id_str: *const c_char,
+    change_nullifier_key_hex: *const c_char,
+    receiving_address_hex: *const c_char,
+    token_hex: *const c_char,
+    amount_hex: *const c_char,
+    nonce_hex: *const c_char,
+    out_buf: *mut u8,
+    out_cap: usize,
+    err_buf: *mut u8,
+    err_cap: usize,
+) -> bool {
+    let chain = match read_u64(chain_id_str) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let cnk = match read_hex_fixed::<32>(change_nullifier_key_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let addr = match read_hex_fixed::<20>(receiving_address_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let token = match read_hex_fixed::<20>(token_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let amount = match read_hex_fixed::<32>(amount_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let nonce = match read_hex_fixed::<32>(nonce_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let cc = compute_change_commitment(chain, &cnk, &addr, &token, &amount, &nonce);
+    let hex_out = hex::encode(cc);
+    if !write_str(out_buf, out_cap, &hex_out) {
+        write_err(err_buf, err_cap, "BUFFER_TOO_SMALL");
+        return false;
+    }
+    true
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn privacy_compute_identity_commitment_from_key(
+    nullifier_key_hex: *const c_char,
+    receiving_address_hex: *const c_char,
+    out_buf: *mut u8,
+    out_cap: usize,
+    err_buf: *mut u8,
+    err_cap: usize,
+) -> bool {
+    let nk = match read_hex_fixed::<32>(nullifier_key_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let addr = match read_hex_fixed::<20>(receiving_address_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let ident = compute_identity_commitment(&nk, &addr);
+    let hex_out = hex::encode(ident);
+    if !write_str(out_buf, out_cap, &hex_out) {
+        write_err(err_buf, err_cap, "BUFFER_TOO_SMALL");
+        return false;
+    }
+    true
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn privacy_compute_payment_nullifier_from_key(
+    nullifier_key_hex: *const c_char,
+    chain_id_str: *const c_char,
+    token_hex: *const c_char,
+    amount_hex: *const c_char,
+    nonce_hex: *const c_char,
+    out_buf: *mut u8,
+    out_cap: usize,
+    err_buf: *mut u8,
+    err_cap: usize,
+) -> bool {
+    let nk = match read_hex_fixed::<32>(nullifier_key_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let chain = match read_u64(chain_id_str) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let token = match read_hex_fixed::<20>(token_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let amount = match read_hex_fixed::<32>(amount_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let nonce = match read_hex_fixed::<32>(nonce_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    match compute_payment_nullifier(&nk, chain, &token, &amount, &nonce) {
+        Ok(n) => {
+            let hex_out = hex::encode(n);
             if !write_str(out_buf, out_cap, &hex_out) {
                 write_err(err_buf, err_cap, "BUFFER_TOO_SMALL");
                 return false;
@@ -861,5 +1062,247 @@ mod tests {
         };
         assert!(!ok_fail, "payBlind with null proof should fail");
         assert_eq!(read_cstr_until_nul(&err_fail), "INPUT_INVALID");
+    }
+
+    #[test]
+    fn ffi_derive_change_nullifier_key_smoke() {
+        let mk = cstr(&hex::encode([1u8; 32]));
+        let pc = cstr(&hex::encode([2u8; 32]));
+        let mut out = vec![0u8; 128];
+        let mut err = vec![0u8; 64];
+        let ok = unsafe {
+            super::privacy_derive_change_nullifier_key(
+                mk.as_ptr(),
+                pc.as_ptr(),
+                out.as_mut_ptr(),
+                out.len(),
+                err.as_mut_ptr(),
+                err.len(),
+            )
+        };
+        assert!(ok, "got err: {}", read_cstr_until_nul(&err));
+        let hex_str = read_cstr_until_nul(&out);
+        assert_eq!(hex_str.len(), 64, "32-byte hash → 64 hex chars");
+        assert!(hex_str.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // Cross-language vector: payerMasterKey=100, paymentCommitment=200. Locked —
+    // matches invisi-sdk-core's xlang_vector_change_nullifier_key test.
+    #[test]
+    fn ffi_derive_change_nullifier_key_vector() {
+        let mk = cstr(&format!("{:064x}", 100u64));
+        let pc = cstr(&format!("{:064x}", 200u64));
+        let mut out = vec![0u8; 128];
+        let mut err = vec![0u8; 64];
+        let ok = unsafe {
+            super::privacy_derive_change_nullifier_key(
+                mk.as_ptr(),
+                pc.as_ptr(),
+                out.as_mut_ptr(),
+                out.len(),
+                err.as_mut_ptr(),
+                err.len(),
+            )
+        };
+        assert!(ok, "got err: {}", read_cstr_until_nul(&err));
+        assert_eq!(
+            read_cstr_until_nul(&out),
+            "09dfcd6f144e3bf69b27da5ef2bb87274f1082e035ddb91b37bfc6702825123a",
+        );
+    }
+
+    #[test]
+    fn ffi_derive_change_nullifier_key_rejects_bad_hex() {
+        let bad = cstr("not-hex");
+        let mut out = vec![0u8; 128];
+        let mut err = vec![0u8; 64];
+        let ok = unsafe {
+            super::privacy_derive_change_nullifier_key(
+                bad.as_ptr(),
+                bad.as_ptr(),
+                out.as_mut_ptr(),
+                out.len(),
+                err.as_mut_ptr(),
+                err.len(),
+            )
+        };
+        assert!(!ok);
+        assert_eq!(read_cstr_until_nul(&err), "INPUT_INVALID");
+    }
+
+    #[test]
+    fn ffi_change_commitment_smoke() {
+        let chain = cstr("1");
+        let cnk = cstr(&hex::encode([1u8; 32]));
+        let addr = cstr(&hex::encode([2u8; 20]));
+        let tok = cstr(&hex::encode([3u8; 20]));
+        let amt = cstr(&hex::encode([4u8; 32]));
+        let nonce = cstr(&hex::encode([5u8; 32]));
+        let mut out = vec![0u8; 128];
+        let mut err = vec![0u8; 64];
+        let ok = unsafe {
+            super::privacy_compute_change_commitment(
+                chain.as_ptr(),
+                cnk.as_ptr(),
+                addr.as_ptr(),
+                tok.as_ptr(),
+                amt.as_ptr(),
+                nonce.as_ptr(),
+                out.as_mut_ptr(),
+                out.len(),
+                err.as_mut_ptr(),
+                err.len(),
+            )
+        };
+        assert!(ok, "got err: {}", read_cstr_until_nul(&err));
+        assert_eq!(read_cstr_until_nul(&out).len(), 64);
+    }
+
+    // Cross-language vector: chainId=1, changeNullifierKey=<derive vector output>,
+    // receivingAddress=2457, token=2748, amount=250, nonce=7. Locked — matches
+    // invisi-sdk-core's xlang_vector_change_commitment test.
+    #[test]
+    fn ffi_change_commitment_vector() {
+        let chain = cstr("1");
+        let cnk = cstr("09dfcd6f144e3bf69b27da5ef2bb87274f1082e035ddb91b37bfc6702825123a");
+        let addr = cstr(&format!("{:040x}", 2457u64));
+        let tok = cstr(&format!("{:040x}", 2748u64));
+        let amt = cstr(&format!("{:064x}", 250u64));
+        let nonce = cstr(&format!("{:064x}", 7u64));
+        let mut out = vec![0u8; 128];
+        let mut err = vec![0u8; 64];
+        let ok = unsafe {
+            super::privacy_compute_change_commitment(
+                chain.as_ptr(),
+                cnk.as_ptr(),
+                addr.as_ptr(),
+                tok.as_ptr(),
+                amt.as_ptr(),
+                nonce.as_ptr(),
+                out.as_mut_ptr(),
+                out.len(),
+                err.as_mut_ptr(),
+                err.len(),
+            )
+        };
+        assert!(ok, "got err: {}", read_cstr_until_nul(&err));
+        assert_eq!(
+            read_cstr_until_nul(&out),
+            "2504563f7319b051d7c1d94aa976daa69082c3b66f43456b92530a35142d98c4",
+        );
+    }
+
+    #[test]
+    fn ffi_change_commitment_rejects_bad_hex() {
+        let bad = cstr("not-hex");
+        let mut out = vec![0u8; 128];
+        let mut err = vec![0u8; 64];
+        let ok = unsafe {
+            super::privacy_compute_change_commitment(
+                bad.as_ptr(),
+                bad.as_ptr(),
+                bad.as_ptr(),
+                bad.as_ptr(),
+                bad.as_ptr(),
+                bad.as_ptr(),
+                out.as_mut_ptr(),
+                out.len(),
+                err.as_mut_ptr(),
+                err.len(),
+            )
+        };
+        assert!(!ok);
+        assert_eq!(read_cstr_until_nul(&err), "INPUT_INVALID");
+    }
+
+    #[test]
+    fn ffi_identity_commitment_from_key_smoke() {
+        let nk = cstr(&hex::encode([1u8; 32]));
+        let addr = cstr(&hex::encode([2u8; 20]));
+        let mut out = vec![0u8; 128];
+        let mut err = vec![0u8; 64];
+        let ok = unsafe {
+            super::privacy_compute_identity_commitment_from_key(
+                nk.as_ptr(),
+                addr.as_ptr(),
+                out.as_mut_ptr(),
+                out.len(),
+                err.as_mut_ptr(),
+                err.len(),
+            )
+        };
+        assert!(ok, "got err: {}", read_cstr_until_nul(&err));
+        let hex_str = read_cstr_until_nul(&out);
+        assert_eq!(hex_str.len(), 64);
+        assert!(hex_str.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn ffi_identity_commitment_from_key_rejects_bad_hex() {
+        let bad = cstr("not-hex");
+        let mut out = vec![0u8; 128];
+        let mut err = vec![0u8; 64];
+        let ok = unsafe {
+            super::privacy_compute_identity_commitment_from_key(
+                bad.as_ptr(),
+                bad.as_ptr(),
+                out.as_mut_ptr(),
+                out.len(),
+                err.as_mut_ptr(),
+                err.len(),
+            )
+        };
+        assert!(!ok);
+        assert_eq!(read_cstr_until_nul(&err), "INPUT_INVALID");
+    }
+
+    #[test]
+    fn ffi_payment_nullifier_from_key_smoke() {
+        let nk = cstr(&hex::encode([1u8; 32]));
+        let chain = cstr("1");
+        let tok = cstr(&hex::encode([3u8; 20]));
+        let amt = cstr(&hex::encode([4u8; 32]));
+        let nonce = cstr(&hex::encode([5u8; 32]));
+        let mut out = vec![0u8; 128];
+        let mut err = vec![0u8; 64];
+        let ok = unsafe {
+            super::privacy_compute_payment_nullifier_from_key(
+                nk.as_ptr(),
+                chain.as_ptr(),
+                tok.as_ptr(),
+                amt.as_ptr(),
+                nonce.as_ptr(),
+                out.as_mut_ptr(),
+                out.len(),
+                err.as_mut_ptr(),
+                err.len(),
+            )
+        };
+        assert!(ok, "got err: {}", read_cstr_until_nul(&err));
+        let hex_str = read_cstr_until_nul(&out);
+        assert_eq!(hex_str.len(), 64);
+        assert_ne!(hex_str, "0".repeat(64), "nullifier must be non-zero");
+    }
+
+    #[test]
+    fn ffi_payment_nullifier_from_key_rejects_bad_hex() {
+        let bad = cstr("not-hex");
+        let mut out = vec![0u8; 128];
+        let mut err = vec![0u8; 64];
+        let ok = unsafe {
+            super::privacy_compute_payment_nullifier_from_key(
+                bad.as_ptr(),
+                bad.as_ptr(),
+                bad.as_ptr(),
+                bad.as_ptr(),
+                bad.as_ptr(),
+                out.as_mut_ptr(),
+                out.len(),
+                err.as_mut_ptr(),
+                err.len(),
+            )
+        };
+        assert!(!ok);
+        assert_eq!(read_cstr_until_nul(&err), "INPUT_INVALID");
     }
 }

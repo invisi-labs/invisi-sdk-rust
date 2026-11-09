@@ -124,3 +124,7 @@ Live examples require `--execute` before opening network/storage and print unsig
 for the host signer. See [examples](examples/README.md) and the
 [shared capability matrix](docs/sdk-parity.md) for scope, environment and reproduction.
 No release, push or App migration is performed by these commands.
+
+## Optional Provenance tracking
+
+The independent [Provenance module](PROVENANCE.md) keeps source recognition separate from protocol spendability. Successful private-input preflight returns a durable tracking ID; default recovery persists it before broadcast permission and uses automatic chain matching, with bounded tracking waits and primary reconciliation. Normal confirmation does not require another `submitProof`. Explicit `prepareDirect` / `PrepareDirect` / `prepare_direct` and manual submission remain available for an intentionally selected self-broadcast/reproof fallback; missing tracking never silently switches modes. App integration, raw openings, signing and nonce reservations remain host-owned. See the flat [Provenance examples](examples/07-provenance/README.md).

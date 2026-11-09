@@ -291,6 +291,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         B256::from(trust.scope.policy_id.to_be_bytes::<32>()),
     )?;
+    let evaluated =
+        source.evaluate_transaction(prepared["data"].clone(), std::slice::from_ref(&sidecar))?;
+    let tracking = invisi_sdk::provenance_tracking::preflight_tracking(
+        &evaluated,
+        "0",
+        &format!("0x{}", hex::encode(digest)),
+    )?;
     let data = hex::decode(text(&prepared["data"])?.trim_start_matches("0x"))?;
     // Fees are already frozen in this calldata; changed fee/data requires fresh main/source proofs.
     let quote = relay.quote(
@@ -304,7 +311,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if id.is_empty() || id.len() > 63 || !id.bytes().all(|b| (33..=126).contains(&b)) {
         return Err("Stable ASCII BROADCAST_ID required, maximum 63 bytes".into());
     }
-    let record = json!({"data":prepared["data"],"sidecar":sidecar,"broadcastId":id,"quote":quote.signed(),"operationDigest":format!("0x{}",hex::encode(digest))});
+    let record = json!({"data":prepared["data"],"sidecar":sidecar,"broadcastId":id,"quote":quote.signed(),"operationDigest":format!("0x{}",hex::encode(digest)),"trackingId":tracking.id});
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]

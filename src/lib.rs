@@ -9,3 +9,5 @@ pub use invisi_sdk_rpc::provenance_client;
 
 pub use invisi_sdk_rpc::provenance_recovery;
 pub use invisi_sdk_session::provenance_store;
+
+pub use invisi_sdk_rpc::provenance_tracking;

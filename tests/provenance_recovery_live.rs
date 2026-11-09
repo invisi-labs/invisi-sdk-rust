@@ -162,6 +162,29 @@ impl RecoveryHost for Host {
         serde_json::from_value(self.recovery["sidecar"].clone()).map_err(|e| e.to_string())
     }
 }
+struct TrackingOnly<'a>(&'a ProvenanceClient);
+impl RecoveryService for TrackingOnly<'_> {
+    fn evaluate(&self, data: &str, sidecars: &[ProofSidecar]) -> Result<Value, String> {
+        self.0.evaluate_transaction(json!(data), sidecars)
+    }
+    fn tracking(&self, id: &str) -> Result<Value, String> {
+        self.0.get_tracking(id)
+    }
+    fn submit(
+        &self,
+        _: &BTreeMap<String, String>,
+        _: &ProofBundle,
+        _: &str,
+    ) -> Result<Value, String> {
+        Err("tracked recovery must not submit proof".into())
+    }
+    fn job(&self, _: &str) -> Result<Value, String> {
+        Err("tracked recovery must not fetch proof job".into())
+    }
+    fn operation_recognition(&self, locator: &BTreeMap<String, String>) -> Result<Value, String> {
+        self.0.get_operation_recognition(json!(locator))
+    }
+}
 #[test]
 fn provenance_recovery_live() {
     if std::env::var("INVISI_PROVENANCE_RECOVERY_LIVE").as_deref() != Ok("1") {
@@ -303,13 +326,13 @@ fn provenance_recovery_live() {
     proof[last] ^= 1;
     bad.proof_bundle.proof = format!("0x{}", hex::encode(proof));
     assert!(coordinator
-        .prepare("bad-local", intent.clone(), bad, "rust-bad-local")
+        .prepare_direct("bad-local", intent.clone(), bad, "rust-bad-local")
         .is_err());
     assert!(store.load("bad-local").unwrap().is_none());
     let id = "rust-recovery-live";
     let base = format!("rust-recovery-{}", uuid::Uuid::new_v4());
     coordinator
-        .prepare(id, intent.clone(), sidecar, &base)
+        .prepare_direct(id, intent.clone(), sidecar, &base)
         .unwrap();
     let invalid = recovery["invalidJobId"].as_str().filter(|s| !s.is_empty());
     if let Some(job) = invalid {
@@ -350,7 +373,37 @@ fn provenance_recovery_live() {
     assert!(result.proof_valid);
     assert_eq!(result.intent, intent);
     assert!(result.checkpoint_sequence.is_some());
-    let report = json!({"sdk":"rust","manifestSha256":pin,"realPrimaryHTTP":true,"primaryCalls":host.calls.get(),"realNativeVerification":true,"nativeVerifications":host.native.get(),"encryptedRestart":true,"badLocalProofRejected":true,"reasonCode":result.reason_code,"invalidJobImported":invalid.is_some(),"jobStatus":result.proof_job_status,"state":result.state,"jobId":result.job_id,"checkpointSequence":result.checkpoint_sequence,"frozenTransactionHash":result.transaction_hash,"mocks":false});
+    let tracked_service = TrackingOnly(&client);
+    let automatic = RecoveryCoordinator {
+        store: &reopened,
+        trust: &trust,
+        service: &tracked_service,
+        host: &host,
+    };
+    let permit = automatic
+        .prepare(
+            "rust-tracked-live",
+            intent.clone(),
+            serde_json::from_value(recovery["sidecar"].clone()).unwrap(),
+            &format!("rust-tracked-{}", uuid::Uuid::new_v4()),
+        )
+        .unwrap();
+    assert_eq!(
+        permit.tracking_id.as_deref(),
+        Some(text(&recovery, "trackingId"))
+    );
+    let tracked_result = automatic
+        .run(
+            "rust-tracked-live",
+            false,
+            &stop,
+            Duration::from_millis(100),
+            300,
+        )
+        .unwrap();
+    assert_eq!(tracked_result.state, "recognized");
+    assert_eq!(tracked_result.intent, intent);
+    let report = json!({"sdk":"rust","manifestSha256":pin,"realPrimaryHTTP":true,"primaryCalls":host.calls.get(),"realNativeVerification":true,"nativeVerifications":host.native.get(),"encryptedRestart":true,"trackedRecovery":true,"trackingId":tracked_result.tracking_id,"badLocalProofRejected":true,"reasonCode":result.reason_code,"invalidJobImported":invalid.is_some(),"jobStatus":result.proof_job_status,"state":result.state,"jobId":result.job_id,"checkpointSequence":result.checkpoint_sequence,"frozenTransactionHash":result.transaction_hash,"mocks":false});
     std::fs::write(
         path.parent()
             .unwrap()

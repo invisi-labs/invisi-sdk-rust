@@ -31,7 +31,9 @@ struct LiveTrust {
     checked_at: String,
     root_id: String,
     commitment: String,
-    job_id: String,
+    #[serde(default, rename = "jobId")]
+    _job_id: Option<String>,
+    tracking_id: String,
 }
 fn bytes32(value: &str) -> [u8; 32] {
     assert!(value.starts_with("0x"));
@@ -210,15 +212,18 @@ fn provenance_live_service() {
         &trust,
     )
     .unwrap();
-    let job = c.get_proof_job(&f.job_id).unwrap();
-    identity(&job, &f);
-    assert_eq!(job["jobId"], f.job_id);
-    assert_eq!(job["status"], "valid");
+    let tracked = c.get_tracking(&f.tracking_id).unwrap();
+    identity(&tracked, &f);
+    assert_eq!(tracked["tracking"]["status"], "recognized");
     let waited = c
-        .wait_proof_job(&f.job_id, Duration::from_millis(10), Duration::from_secs(3))
+        .wait_tracking(
+            &f.tracking_id,
+            Duration::from_millis(1),
+            Duration::from_secs(3),
+        )
         .unwrap();
     identity(&waited, &f);
-    assert_eq!(waited["status"], "valid");
+    assert_eq!(waited["tracking"]["status"], "recognized");
     for kind in ["provider", "generation", "manifest", "key"] {
         let mut wrong = trust.clone();
         match kind {
@@ -231,7 +236,7 @@ fn provenance_live_service() {
         assert!(
             ProvenanceClient::new(&f.endpoint, wrong)
                 .unwrap()
-                .get_proof_job(&f.job_id)
+                .get_tracking(&f.tracking_id)
                 .is_err(),
             "wrong {kind} pin accepted actual response"
         );

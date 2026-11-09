@@ -1,4 +1,5 @@
 //! Encrypted recovery for public provenance evidence, separate from wallet inventory and signing.
+use crate::provenance_tracking::{preflight_tracking, tracking_from_result, STALE_TRACKING};
 use aes_gcm::{
     aead::{Aead, KeyInit, Payload},
     Aes256Gcm, Nonce,
@@ -38,6 +39,9 @@ pub struct FrozenProvenanceIntent {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RecoveryRecord {
+    pub delivery_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracking_id: Option<String>,
     pub format: String,
     pub revision: u64,
     pub id: String,
@@ -198,6 +202,8 @@ pub trait RecoveryHost {
     }
 }
 pub trait RecoveryService {
+    fn evaluate(&self, data: &str, sidecars: &[ProofSidecar]) -> Result<Value>;
+    fn tracking(&self, id: &str) -> Result<Value>;
     fn submit(
         &self,
         locator: &BTreeMap<String, String>,
@@ -208,6 +214,12 @@ pub trait RecoveryService {
     fn operation_recognition(&self, locator: &BTreeMap<String, String>) -> Result<Value>;
 }
 impl RecoveryService for crate::provenance_client::ProvenanceClient {
+    fn evaluate(&self, data: &str, sidecars: &[ProofSidecar]) -> Result<Value> {
+        self.evaluate_transaction(json!(data), sidecars)
+    }
+    fn tracking(&self, id: &str) -> Result<Value> {
+        self.get_tracking(id)
+    }
     fn submit(
         &self,
         locator: &BTreeMap<String, String>,
@@ -224,6 +236,9 @@ impl RecoveryService for crate::provenance_client::ProvenanceClient {
     }
 }
 pub fn recovery_submission_key(base: &str, sidecar: &ProofSidecar) -> Result<String> {
+    if base.starts_with("internal/") {
+        return Err("reserved idempotency key prefix".into());
+    }
     if base.is_empty() || base.len() > 63 || !base.bytes().all(|b| (33..=126).contains(&b)) {
         return Err("invalid recovery idempotency key".into());
     }
@@ -255,6 +270,14 @@ impl RecoveryCoordinator<'_> {
             || r.idempotency_key.len() > 63
         {
             return Err("invalid recovery record".into());
+        }
+        if !["tracked", "direct"].contains(&r.delivery_mode.as_str())
+            || (r.revision > 0
+                && r.delivery_mode == "tracked"
+                && r.tracking_id.is_none()
+                && r.state != "needs_reproof")
+        {
+            return Err("recovery tracking mode/identity missing".into());
         }
         recovery_submission_key(&r.idempotency_key, &r.sidecar)?;
         let i = &r.intent;
@@ -328,7 +351,28 @@ impl RecoveryCoordinator<'_> {
         sidecar: ProofSidecar,
         key: &str,
     ) -> Result<RecoveryRecord> {
-        let r = RecoveryRecord {
+        self.prepare_mode(id, intent, sidecar, key, "tracked")
+    }
+    pub fn prepare_direct(
+        &self,
+        id: &str,
+        intent: FrozenProvenanceIntent,
+        sidecar: ProofSidecar,
+        key: &str,
+    ) -> Result<RecoveryRecord> {
+        self.prepare_mode(id, intent, sidecar, key, "direct")
+    }
+    fn prepare_mode(
+        &self,
+        id: &str,
+        intent: FrozenProvenanceIntent,
+        sidecar: ProofSidecar,
+        key: &str,
+        mode: &str,
+    ) -> Result<RecoveryRecord> {
+        let mut r = RecoveryRecord {
+            delivery_mode: mode.into(),
+            tracking_id: None,
             format: "invisi-provenance-recovery-v1".into(),
             revision: 0,
             id: id.into(),
@@ -350,6 +394,19 @@ impl RecoveryCoordinator<'_> {
         self.validate(&r)?;
         if self.store.load(id)?.is_some() {
             return Err("recovery id already exists".into());
+        }
+        if mode == "tracked" {
+            let evaluated = self
+                .service
+                .evaluate(&r.intent.calldata, &[r.sidecar.clone()])?;
+            r.tracking_id = Some(
+                preflight_tracking(
+                    &evaluated,
+                    &r.intent.operation_index,
+                    &r.intent.operation_digest,
+                )?
+                .id,
+            );
         }
         self.save(r, 0)
     }
@@ -400,6 +457,7 @@ impl RecoveryCoordinator<'_> {
             || (reprove && r.state == "proof_rejected")
         {
             r.state = "needs_reproof".into();
+            r.tracking_id = None;
             r.job_id = None;
             r.locator = None;
             r.proof_valid = false;
@@ -416,8 +474,104 @@ impl RecoveryCoordinator<'_> {
             r.sidecar = self.host.local_reprove(&r, &fact.chain_generation, stop)?;
             cancelled(stop)?;
             r.chain_generation = fact.chain_generation.clone();
-            self.validate(&r)?;
+            let mut check = r.clone();
+            check.revision = 0;
+            self.validate(&check)?;
+            if r.delivery_mode == "tracked" {
+                let evaluated = self
+                    .service
+                    .evaluate(&r.intent.calldata, &[r.sidecar.clone()])?;
+                r.tracking_id = Some(
+                    preflight_tracking(
+                        &evaluated,
+                        &r.intent.operation_index,
+                        &r.intent.operation_digest,
+                    )?
+                    .id,
+                );
+            }
             r.state = "pending".into()
+        }
+        if fact.status == "confirmed" {
+            let locator = fact
+                .locator
+                .as_ref()
+                .ok_or("missing authenticated mined locator")?;
+            let tx = fact
+                .transaction_hash
+                .as_ref()
+                .ok_or("missing transaction hash")?;
+            if tx.len() != 66 || !tx.starts_with("0x") {
+                return Err("invalid transaction hash".into());
+            }
+            number(tx, 256)?;
+            if locator
+                .keys()
+                .any(|k| !["blockHash", "txHash", "operationIndex"].contains(&k.as_str()))
+                || locator.get("txHash") != Some(tx)
+                || number(
+                    locator
+                        .get("operationIndex")
+                        .ok_or("missing operation index")?,
+                    32,
+                )? != number(&r.intent.operation_index, 32)?
+            {
+                return Err("invalid authenticated locator".into());
+            }
+            let block = locator.get("blockHash").ok_or("missing block hash")?;
+            if block.len() != 66 || !block.starts_with("0x") {
+                return Err("invalid block hash".into());
+            }
+            number(block, 256)?;
+            r.transaction_hash = Some(tx.clone());
+            r.locator = Some(locator.clone());
+        }
+        if r.delivery_mode == "tracked" {
+            let id = r
+                .tracking_id
+                .as_deref()
+                .ok_or("recovery tracking id required")?;
+            let result = match self.service.tracking(id) {
+                Ok(value) => value,
+                Err(error) if error == STALE_TRACKING => {
+                    r.state = "needs_reproof".into();
+                    return self.save(r, old);
+                }
+                Err(error) => return Err(error),
+            };
+            let tracking = tracking_from_result(&result, Some(id))?;
+            if number(&tracking.operation_digest, 256)? != number(&r.intent.operation_digest, 256)?
+            {
+                return Err("tracking statement mismatch".into());
+            }
+            r.reason_code = tracking.reason_code.clone();
+            if ["expired", "superseded"].contains(&tracking.status.as_str()) {
+                r.state = format!("tracking_{}", tracking.status);
+                r.reason_code = tracking.reason_code;
+                return self.save(r, old);
+            }
+            if fact.status != "confirmed" || tracking.status == "pending_confirmation" {
+                r.state = "pending".into();
+                return self.save(r, old);
+            }
+            let matched = tracking.matched.ok_or("tracking locator required")?;
+            let locator = fact
+                .locator
+                .as_ref()
+                .ok_or("missing authenticated locator")?;
+            if Some(&matched.tx_hash) != fact.transaction_hash.as_ref()
+                || Some(&matched.block_hash) != locator.get("blockHash")
+                || Some(&matched.operation_index) != locator.get("operationIndex")
+            {
+                return Err("tracking matched another transaction".into());
+            }
+            if tracking.status == "pending_source" {
+                r.state = "pending_source".into();
+                r.source_state = Some("pending_source".into());
+                r.transaction_hash = fact.transaction_hash;
+                r.locator = fact.locator;
+                return self.save(r, old);
+            }
         }
         if fact.status != "confirmed" {
             return Ok(r);
@@ -449,7 +603,7 @@ impl RecoveryCoordinator<'_> {
         if ["recognized", "proof_rejected"].contains(&r.state.as_str()) {
             return Ok(r);
         }
-        if r.job_id.is_none() {
+        if r.delivery_mode == "direct" && r.job_id.is_none() {
             r = self.save(r, old)?;
             cancelled(stop)?;
             let response = self.service.submit(
@@ -469,7 +623,7 @@ impl RecoveryCoordinator<'_> {
             r = self.save(r, old)?;
         }
         cancelled(stop)?;
-        if !r.proof_valid {
+        if r.delivery_mode == "direct" && !r.proof_valid {
             let job = self
                 .service
                 .job(r.job_id.as_deref().ok_or("missing job")?)?;
@@ -490,7 +644,7 @@ impl RecoveryCoordinator<'_> {
             let old = r.revision;
             r = self.save(r, old)?;
         }
-        if r.proof_valid {
+        if r.proof_valid || r.delivery_mode == "tracked" {
             let recognition = self.service.operation_recognition(&locator)?;
             let state = recognition["recognitionState"]
                 .as_str()
@@ -685,6 +839,12 @@ mod tests {
         recognized: Cell<bool>,
     }
     impl RecoveryService for Service {
+        fn evaluate(&self, _: &str, _: &[ProofSidecar]) -> Result<Value> {
+            Err("direct fixture has no preflight".into())
+        }
+        fn tracking(&self, _: &str) -> Result<Value> {
+            Err("direct fixture has no tracking".into())
+        }
         fn submit(
             &self,
             _: &BTreeMap<String, String>,
@@ -802,7 +962,7 @@ mod tests {
             host: &host,
             service: &service,
         };
-        c.prepare("possible", intent, sidecars[0].clone(), "stable")
+        c.prepare_direct("possible", intent, sidecars[0].clone(), "stable")
             .unwrap();
         host.pending_first.set(true);
         service.recognized.set(true);
@@ -843,11 +1003,11 @@ mod tests {
                 .as_str()
                 .unwrap()
         );
-        c.prepare("max", intent.clone(), sidecars[0].clone(), &max)
+        c.prepare_direct("max", intent.clone(), sidecars[0].clone(), &max)
             .unwrap();
         for base in ["a".repeat(64), "a".repeat(128), "é".into(), " ".into()] {
             assert!(c
-                .prepare("blocked", intent.clone(), sidecars[0].clone(), &base)
+                .prepare_direct("blocked", intent.clone(), sidecars[0].clone(), &base)
                 .is_err());
             assert!(store.load("blocked").unwrap().is_none());
         }
@@ -863,7 +1023,7 @@ mod tests {
             service: &service,
         };
         let stop = AtomicBool::new(false);
-        c.prepare("pending", intent, sidecars[0].clone(), "stable")
+        c.prepare_direct("pending", intent, sidecars[0].clone(), "stable")
             .unwrap();
         service.recognition_outage.set(true);
         assert!(c.resume("pending", false, &stop).is_err());
@@ -904,7 +1064,7 @@ mod tests {
             service: &service,
         };
         let stop = AtomicBool::new(false);
-        c.prepare("invalid", intent.clone(), sidecars[0].clone(), "stable")
+        c.prepare_direct("invalid", intent.clone(), sidecars[0].clone(), "stable")
             .unwrap();
         *service.job_status.borrow_mut() = "invalid".into();
         assert_eq!(
@@ -922,7 +1082,7 @@ mod tests {
         assert_eq!(service.keys.borrow().len(), 2);
         assert_ne!(service.keys.borrow()[0], service.keys.borrow()[1]);
         for status in ["retryable_error", "stale_generation"] {
-            c.prepare(status, intent.clone(), sidecars[0].clone(), "stable")
+            c.prepare_direct(status, intent.clone(), sidecars[0].clone(), "stable")
                 .unwrap();
             *service.job_status.borrow_mut() = status.into();
             let result = c.resume(status, false, &stop).unwrap();
@@ -937,6 +1097,154 @@ mod tests {
             assert!(!result.proof_valid);
         }
     }
+    struct TrackedService<'a> {
+        inner: &'a Service,
+        tracking: Value,
+        evaluations: Cell<usize>,
+        queries: Cell<usize>,
+        missing: Cell<bool>,
+    }
+    impl RecoveryService for TrackedService<'_> {
+        fn evaluate(&self, data: &str, sidecars: &[ProofSidecar]) -> Result<Value> {
+            assert_eq!(data, self.inner.intent.calldata);
+            assert_eq!(sidecars.len(), 1);
+            self.evaluations.set(self.evaluations.get() + 1);
+            let mut result = json!({"broadcastDecision":"allow","operationDigest":self.inner.intent.operation_digest});
+            if !self.missing.get() {
+                result["tracking"] = self.tracking.clone()
+            }
+            Ok(result)
+        }
+        fn tracking(&self, id: &str) -> Result<Value> {
+            assert_eq!(id, self.tracking["id"].as_str().unwrap());
+            self.queries.set(self.queries.get() + 1);
+            Ok(json!({"tracking":self.tracking}))
+        }
+        fn submit(&self, _: &BTreeMap<String, String>, _: &ProofBundle, _: &str) -> Result<Value> {
+            panic!("tracked recovery must not submit")
+        }
+        fn job(&self, _: &str) -> Result<Value> {
+            panic!("tracked recovery must not fetch proof job")
+        }
+        fn operation_recognition(&self, locator: &BTreeMap<String, String>) -> Result<Value> {
+            self.inner.operation_recognition(locator)
+        }
+    }
+    #[test]
+    fn default_recovery_persists_preflight_tracking_without_direct_submission() {
+        let (intent, sidecars, trust, host, service) = fixture();
+        let store = EncryptedRecoveryStore::new(Arc::new(Memory::default()), [7; 32]);
+        service.recognized.set(true);
+        let tracking = json!({"id":"a".repeat(48),"status":"recognized","expiresAt":"1","operationDigest":format!("0x{:064x}",number(&intent.operation_digest,256).unwrap()),"matched":host.fact.borrow().locator});
+        let tracked = TrackedService {
+            inner: &service,
+            tracking,
+            evaluations: Cell::new(0),
+            queries: Cell::new(0),
+            missing: Cell::new(false),
+        };
+        let c = RecoveryCoordinator {
+            store: &store,
+            trust: &trust,
+            host: &host,
+            service: &tracked,
+        };
+        let prepared = c
+            .prepare("tracked", intent.clone(), sidecars[0].clone(), "stable")
+            .unwrap();
+        assert_eq!(prepared.delivery_mode, "tracked");
+        assert_eq!(
+            store.load("tracked").unwrap().unwrap().tracking_id,
+            Some("a".repeat(48))
+        );
+        let result = c
+            .run(
+                "tracked",
+                false,
+                &AtomicBool::new(false),
+                Duration::from_millis(1),
+                2,
+            )
+            .unwrap();
+        assert_eq!(result.state, "recognized");
+        assert_eq!(tracked.evaluations.get(), 1);
+        assert_eq!(tracked.queries.get(), 1);
+        assert_eq!(service.submits.get(), 0);
+        tracked.missing.set(true);
+        assert!(c
+            .prepare("missing", intent, sidecars[0].clone(), "stable")
+            .is_err());
+        assert!(store.load("missing").unwrap().is_none());
+    }
+    #[test]
+    fn terminal_tracking_cannot_return_recovery_permit() {
+        for status in ["expired", "superseded"] {
+            let (intent, sidecars, trust, host, service) = fixture();
+            let store = EncryptedRecoveryStore::new(Arc::new(Memory::default()), [7; 32]);
+            let tracked = TrackedService {
+                inner: &service,
+                tracking: json!({"id":"a".repeat(48),"status":status,"expiresAt":"1","operationDigest":format!("0x{:064x}",number(&intent.operation_digest,256).unwrap())}),
+                evaluations: Cell::new(0),
+                queries: Cell::new(0),
+                missing: Cell::new(false),
+            };
+            let c = RecoveryCoordinator {
+                store: &store,
+                trust: &trust,
+                host: &host,
+                service: &tracked,
+            };
+            assert!(c
+                .prepare("terminal", intent, sidecars[0].clone(), "stable")
+                .is_err());
+            assert!(store.load("terminal").unwrap().is_none());
+            assert_eq!(service.submits.get(), 0);
+        }
+    }
+    #[test]
+    fn reserved_idempotency_prefix_is_rejected_before_permit() {
+        let (intent, sidecars, trust, host, service) = fixture();
+        let store = EncryptedRecoveryStore::new(Arc::new(Memory::default()), [7; 32]);
+        let c = RecoveryCoordinator {
+            store: &store,
+            trust: &trust,
+            host: &host,
+            service: &service,
+        };
+        assert!(c
+            .prepare_direct("reserved", intent, sidecars[0].clone(), "internal/test")
+            .unwrap_err()
+            .contains("reserved"));
+        assert!(store.load("reserved").unwrap().is_none());
+    }
+    #[test]
+    fn reserved_idempotency_prefix_is_rejected_before_http() {
+        use std::io::Write;
+        use std::sync::atomic::AtomicUsize;
+        let (_, sidecars, trust, _, _) = fixture();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let task = std::thread::spawn(move || {
+            for _ in 0..40 {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    let _=stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        });
+        let client = crate::provenance_client::ProvenanceClient::new(&endpoint, trust).unwrap();
+        let error = client
+            .submit_proof(json!({}), &sidecars[0].proof_bundle, "internal/test")
+            .unwrap_err();
+        task.join().unwrap();
+        assert!(error.contains("reserved"), "{error}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
     #[test]
     fn encrypted_recovery_authentication_and_cas() {
         let (intent, sidecars, trust, host, service) = fixture();
@@ -949,7 +1257,7 @@ mod tests {
             host: &host,
         };
         let record = c
-            .prepare("one", intent, sidecars[0].clone(), "stable")
+            .prepare_direct("one", intent, sidecars[0].clone(), "stable")
             .unwrap();
         assert_eq!(record.state, "broadcast_possible");
         let key = "Invisi.Provenance.Recovery.v1:one";
@@ -982,7 +1290,7 @@ mod tests {
             service: &service,
             host: &host,
         };
-        c.prepare("send", intent.clone(), sidecars[0].clone(), "stable")
+        c.prepare_direct("send", intent.clone(), sidecars[0].clone(), "stable")
             .unwrap();
         c.mark_broadcast(
             "send",
@@ -1025,11 +1333,11 @@ mod tests {
         };
         kv.reject.store(true, Ordering::SeqCst);
         assert!(c
-            .prepare("blocked", intent.clone(), sidecars[0].clone(), "stable")
+            .prepare_direct("blocked", intent.clone(), sidecars[0].clone(), "stable")
             .is_err());
         assert!(store.load("blocked").unwrap().is_none());
         kv.reject.store(false, Ordering::SeqCst);
-        c.prepare("send", intent.clone(), sidecars[0].clone(), "stable")
+        c.prepare_direct("send", intent.clone(), sidecars[0].clone(), "stable")
             .unwrap();
         c.mark_broadcast(
             "send",
@@ -1070,7 +1378,7 @@ mod tests {
         let mut bad = intent;
         bad.operation_digest = "5".into();
         assert!(current
-            .prepare("bad", bad, sidecars[1].clone(), "stable")
+            .prepare_direct("bad", bad, sidecars[1].clone(), "stable")
             .is_err());
     }
 }

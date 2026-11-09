@@ -66,7 +66,7 @@ mod encrypted_adapter_tests {
             "../../invisi-sdk-rpc/testdata/provenance-recovery.json"
         ))
         .unwrap();
-        serde_json::from_value(json!({"format":"invisi-provenance-recovery-v1","revision":1,"id":"one","intent":fixture["intent"],"manifestSha256":fixture["manifestSha256"],"chainGeneration":"1","sidecar":fixture["sidecars"][0],"idempotencyKey":"stable","state":"broadcast_possible"})).unwrap()
+        serde_json::from_value(json!({"format":"invisi-provenance-recovery-v1","deliveryMode":"direct","revision":1,"id":"one","intent":fixture["intent"],"manifestSha256":fixture["manifestSha256"],"chainGeneration":"1","sidecar":fixture["sidecars"][0],"idempotencyKey":"stable","state":"broadcast_possible"})).unwrap()
     }
     #[test]
     fn existing_records_hold_only_authenticated_recovery_ciphertext() {

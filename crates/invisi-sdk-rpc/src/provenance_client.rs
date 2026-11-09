@@ -60,6 +60,7 @@ impl ProvenanceClient {
             "provenance_evaluateTransaction",
             "provenance_submitProof",
             "provenance_getProofJob",
+            "provenance_getTracking",
         ]
         .contains(&method)
             && [
@@ -209,6 +210,9 @@ impl ProvenanceClient {
         bundle: &ProofBundle,
         idempotency_key: &str,
     ) -> Result<Value, String> {
+        if idempotency_key.starts_with("internal/") {
+            return Err("reserved idempotency key prefix".into());
+        }
         if idempotency_key.is_empty() {
             return Err("idempotency key required".into());
         }
@@ -219,6 +223,43 @@ impl ProvenanceClient {
                 .map_err(|e| e.to_string())?);
         locator["idempotencyKey"] = json!(idempotency_key);
         self.call("provenance_submitProof", Some(self.query(locator)))
+    }
+    pub fn get_tracking(&self, id: &str) -> Result<Value, String> {
+        if id.len() != 48
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err("invalid tracking id".into());
+        }
+        let result = self.call(
+            "provenance_getTracking",
+            Some(self.query(json!({"trackingId":id}))),
+        )?;
+        crate::provenance_tracking::tracking_from_result(&result, Some(id))?;
+        Ok(result)
+    }
+    pub fn wait_tracking(
+        &self,
+        id: &str,
+        interval: Duration,
+        timeout: Duration,
+    ) -> Result<Value, String> {
+        if interval.is_zero() || interval > Duration::from_secs(60) || timeout.is_zero() {
+            return Err("tracking polling limits".into());
+        }
+        let deadline = Instant::now() + timeout;
+        loop {
+            let result = self.get_tracking(id)?;
+            let tracking = crate::provenance_tracking::tracking_from_result(&result, Some(id))?;
+            if ["recognized", "expired", "superseded"].contains(&tracking.status.as_str()) {
+                return Ok(result);
+            }
+            if Instant::now() >= deadline {
+                return Err("tracking wait timeout".into());
+            }
+            std::thread::sleep(interval.min(deadline.saturating_duration_since(Instant::now())));
+        }
     }
     pub fn get_proof_job(&self, job_id: &str) -> Result<Value, String> {
         self.call("provenance_getProofJob", Some(json!({"jobId":job_id})))
@@ -369,6 +410,17 @@ mod tests {
             let request = String::from_utf8_lossy(&buffer[..size]);
             assert!(request.starts_with("POST /v1/chains/1 HTTP/1.1"));
             assert!(!request.contains("witness"));
+            if result.get("tracking").is_some() {
+                let body = request.split("\r\n\r\n").nth(1).unwrap();
+                let query: Value = serde_json::from_str(body).unwrap();
+                assert_eq!(query["method"], "provenance_getTracking");
+                let policy =
+                    parse_integer(result["scope"]["policyId"].as_str().unwrap(), 256).unwrap();
+                assert_eq!(
+                    query["params"],
+                    json!([{"policyId":format!("0x{}",hex::encode(policy.to_be_bytes::<32>())),"trackingId":result["tracking"]["id"]}])
+                );
+            }
             if let Some(policy) = expected_policy {
                 let body = request.split("\r\n\r\n").nth(1).unwrap();
                 let query: Value = serde_json::from_str(body).unwrap();
@@ -421,6 +473,36 @@ mod tests {
                 assert_eq!(result.unwrap()["status"], status)
             } else {
                 assert!(result.unwrap_err().contains("status"));
+            }
+            task.join().unwrap();
+        }
+    }
+    #[test]
+    fn tracking_terminal_wire_is_scoped_and_rejects_stale_unknown() {
+        for status in [
+            "recognized",
+            "expired",
+            "superseded",
+            "stale_generation",
+            "unknown",
+        ] {
+            let mut context = trust();
+            context.scope.policy_id = U256::from(7);
+            let id = "a".repeat(48);
+            let mut tracking = json!({"id":id,"status":status,"expiresAt":"1","operationDigest":format!("0x{:064x}",9)});
+            if status == "recognized" {
+                tracking["matched"] = json!({"txHash":format!("0x{:064x}",1),"blockHash":format!("0x{:064x}",2),"operationIndex":"0"});
+            }
+            let (endpoint, task) = server_checked(
+                json!({"scope":{"chainId":"1","protocolAddress":"2","policyId":"7"},"chainGeneration":"4","providerId":"5","signingKeyId":"6","manifestSha256":"a".repeat(64),"tracking":tracking}),
+                None,
+            );
+            let c = ProvenanceClient::new(&endpoint, context).unwrap();
+            let result = c.wait_tracking(&id, Duration::from_millis(1), Duration::from_millis(20));
+            if ["unknown", "stale_generation"].contains(&status) {
+                assert!(result.is_err())
+            } else {
+                assert_eq!(result.unwrap()["tracking"]["status"], status)
             }
             task.join().unwrap();
         }

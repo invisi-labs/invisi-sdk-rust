@@ -7,3 +7,5 @@ pub mod rpc;
 pub mod provenance_client;
 
 pub mod provenance_recovery;
+
+pub mod provenance_tracking;

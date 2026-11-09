@@ -64,27 +64,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let source = ProvenanceClient::new(text(&config["endpoint"])?, trust)?;
     let locator = json!({"txHash":hash,"blockHash":receipt["blockHash"],"operationIndex":"0"});
-    let submitted = source.submit_proof(
-        locator.clone(),
-        &sidecar.proof_bundle,
-        &format!("{}-source", text(&record["broadcastId"])?),
-    )?;
-    let job = source.wait_proof_job(
-        text(&submitted["jobId"])?,
-        Duration::from_secs(1),
+    let tracked = source.wait_tracking(
+        text(&record["trackingId"])?,
+        Duration::from_secs(2),
         Duration::from_secs(120),
     )?;
-    if job["status"] != "valid" {
-        return Err("Proof not valid; retain original transaction/record for retry/reproof".into());
+    let tracking = invisi_sdk::provenance_tracking::tracking_from_result(
+        &tracked,
+        Some(text(&record["trackingId"])?),
+    )?;
+    let matched = tracking.matched.ok_or("Tracking locator missing")?;
+    if tracking.status != "recognized"
+        || matched.tx_hash != hash
+        || matched.block_hash != text(&receipt["blockHash"])?
+        || matched.operation_index != "0"
+        || n_digest(&tracking.operation_digest)? != number(&record["operationDigest"])?
+    {
+        return Err(
+            "Tracking not recognized or matched another operation; retain original record".into(),
+        );
     }
-    // A valid job is not publication. Query the frozen operation until the service confirms it.
-    for _ in 0..60 {
-        let operation = source.get_operation_recognition(locator.clone())?;
-        if operation["recognitionState"] == "recognized" {
-            println!("Source service confirms operation recognition");
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_secs(2));
+    let operation = source.get_operation_recognition(locator)?;
+    if operation["recognitionState"] != "recognized" {
+        return Err("Publication pending; retry the same tracking ID".into());
     }
-    Err("Publication pending; rerun with the same transaction and record".into())
+    println!("Source service confirms operation recognition");
+    Ok(())
+}
+fn n_digest(v: &str) -> Result<U256, Box<dyn std::error::Error>> {
+    Ok(parse_integer(v, 256)?)
 }

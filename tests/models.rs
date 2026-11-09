@@ -249,3 +249,36 @@ fn omitted_optional_policy_and_usage_normalize_to_zero() {
     assert_eq!(state.policy, CreditPolicy::default());
     assert_eq!(state.usage, CreditUsage::default());
 }
+
+#[test]
+fn note_hashes_bind_protocol_instance() {
+    let mut note = Note {
+        context: ProtocolContext {
+            chain_id: 31337,
+            protocol_address: n("0x1234"),
+        },
+        owner_address: n("0x1111"),
+        token_address: n("0x5678"),
+        amount: n("70"),
+        nonce: n("123"),
+        payload: vec![],
+    };
+    let first = note.commitment().unwrap();
+    let nullifier = note.nullifier().unwrap();
+    note.context.protocol_address = n("0x1235");
+    assert_ne!(first, note.commitment().unwrap());
+    assert_ne!(nullifier, note.nullifier().unwrap());
+    assert_ne!(
+        compute_note_nullifier(31337, n("0x1234"), note.nonce, first).unwrap(),
+        compute_note_nullifier(31337, n("0x1235"), note.nonce, first).unwrap()
+    );
+    assert!(compute_note_commitment(
+        31337,
+        U256::ZERO,
+        note.identity().unwrap(),
+        note.token_address,
+        note.amount
+    )
+    .is_err());
+    assert!(compute_note_nullifier(31337, U256::from(1) << 160, note.nonce, first).is_err());
+}

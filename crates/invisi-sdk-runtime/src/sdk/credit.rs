@@ -1392,7 +1392,9 @@ mod lifecycle_tests {
     fn constructed_create_draw_and_update_witnesses_match_independent_protocol() {
         for label in ["create_credit", "credit_draw_slots1", "credit_update"] {
             let (_, p) = prepared(label);
-            assert!(p.documented_gas_reference().unwrap().available());
+            let reference = serde_json::to_value(p.documented_gas_reference().unwrap()).unwrap();
+            assert_eq!(reference["available"], false);
+            assert_eq!(reference["reason"], "release-not-covered");
             let request = p.proving_request().unwrap();
             request
                 .witness

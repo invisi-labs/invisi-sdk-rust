@@ -100,13 +100,19 @@ impl Note {
         self.validate()?;
         compute_note_commitment(
             self.context.chain_id,
+            self.context.protocol_address,
             self.identity()?,
             self.token_address,
             self.amount,
         )
     }
     pub fn nullifier(&self) -> ModelResult<U256> {
-        compute_note_nullifier(self.context.chain_id, self.nonce, self.commitment()?)
+        compute_note_nullifier(
+            self.context.chain_id,
+            self.context.protocol_address,
+            self.nonce,
+            self.commitment()?,
+        )
     }
 }
 pub fn compute_note_identity(owner: U256, nonce: U256) -> ModelResult<U256> {
@@ -116,22 +122,43 @@ pub fn compute_note_identity(owner: U256, nonce: U256) -> ModelResult<U256> {
 }
 pub fn compute_note_commitment(
     chain_id: u64,
+    protocol_address: U256,
     identity: U256,
     token: U256,
     amount: U256,
 ) -> ModelResult<U256> {
+    positive_address(protocol_address, "protocol address")?;
     field(identity, "note identity")?;
     uint(token, 160, "token address")?;
     uint(amount, 128, "note amount")?;
     if amount == U256::ZERO {
         return Err(ModelError::Invalid("note amount"));
     }
-    hash_fields(&[U256::from(3), U256::from(chain_id), identity, token, amount])
+    hash_fields(&[
+        U256::from(3),
+        U256::from(chain_id),
+        protocol_address,
+        identity,
+        token,
+        amount,
+    ])
 }
-pub fn compute_note_nullifier(chain_id: u64, nonce: U256, commitment: U256) -> ModelResult<U256> {
+pub fn compute_note_nullifier(
+    chain_id: u64,
+    protocol_address: U256,
+    nonce: U256,
+    commitment: U256,
+) -> ModelResult<U256> {
+    positive_address(protocol_address, "protocol address")?;
     field(nonce, "note nonce")?;
     field(commitment, "note commitment")?;
-    hash_fields(&[U256::from(4), U256::from(chain_id), nonce, commitment])
+    hash_fields(&[
+        U256::from(4),
+        U256::from(chain_id),
+        protocol_address,
+        nonce,
+        commitment,
+    ])
 }
 
 pub mod decimal {

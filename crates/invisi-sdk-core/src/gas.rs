@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 const CATALOG: &str = include_str!("../assets/gas/documented-references.json");
 const RELEASE: &str = include_str!("../assets/gas/circuit-release.json");
 pub const DOCUMENTED_CATALOG_SHA256: &str =
-    "962c1bf16003156c4a6d4c177d10e3f4c975cd2200c6f96deea61d4382c06721";
+    "a74b8250ef45de20a3f3d54ca0b35fb54dff50db4c1066e9a76c5592124e8129";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum UnavailableReason {

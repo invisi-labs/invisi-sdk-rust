@@ -944,6 +944,7 @@ impl NoteOutput {
         }
         let commitment = field_word(model(crate::note::compute_note_commitment(
             context.chain_id,
+            context.protocol_address,
             identity,
             address_word(token),
             amount,
@@ -1850,6 +1851,7 @@ impl NoteOutput {
         if identity == U256::ZERO
             || field_word(model(crate::note::compute_note_commitment(
                 context.chain_id,
+                context.protocol_address,
                 identity,
                 address_word(token),
                 amount,

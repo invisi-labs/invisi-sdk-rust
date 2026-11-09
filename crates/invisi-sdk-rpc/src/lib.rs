@@ -3,3 +3,7 @@ pub use invisi_sdk_core::*;
 pub use invisi_sdk_protocol::protocol;
 pub mod broadcaster;
 pub mod rpc;
+
+pub mod provenance_client;
+
+pub mod provenance_recovery;

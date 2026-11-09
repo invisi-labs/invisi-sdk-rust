@@ -14,3 +14,6 @@ examples/local/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+
+# Authenticated local provenance artifacts (independent of main circuit assets)
+.cache/provenance/

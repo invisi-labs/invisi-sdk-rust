@@ -145,12 +145,21 @@ pub fn quote_digest(quote: &Quote, trust: &Trust) -> Result<B256> {
     Ok(keccak256(message))
 }
 pub fn verify_quote(signed: &SignedQuote, trust: &Trust, data: &[u8], now: u64) -> Result<()> {
+    verify_quote_with_hash(signed, trust, data, now, request_hash(data)?)
+}
+pub(crate) fn verify_quote_with_hash(
+    signed: &SignedQuote,
+    trust: &Trust,
+    data: &[u8],
+    now: u64,
+    expected_hash: B256,
+) -> Result<()> {
     let intent = decode_intent(data)?;
     let quote = &signed.quote;
     let amount = decimal(&json!(quote.fee_amount))?;
     let deadline = decimal(&json!(quote.deadline))?;
     let gas = decimal(&json!(quote.max_gas))?;
-    if quote.request_hash != request_hash(data)?
+    if quote.request_hash != expected_hash
         || quote.token != intent.token
         || quote.fee_recipient != intent.fee_recipient
         || amount != intent.fee_amount
@@ -358,3 +367,5 @@ fn check_status(status: Status, id: &str) -> Result<Status> {
     }
     Ok(status)
 }
+
+pub mod provenance;

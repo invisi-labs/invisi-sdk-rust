@@ -12,3 +12,5 @@ pub mod payment_request;
 pub mod poseidon;
 pub mod poseidon_constants;
 pub mod wallet;
+pub mod provenance;
+pub mod provenance_rotation;

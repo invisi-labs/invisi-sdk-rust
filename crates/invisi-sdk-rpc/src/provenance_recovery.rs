@@ -1,0 +1,1076 @@
+//! Encrypted recovery for public provenance evidence, separate from wallet inventory and signing.
+use aes_gcm::{
+    aead::{Aead, KeyInit, Payload},
+    Aes256Gcm, Nonce,
+};
+use alloy_primitives::{keccak256, U256};
+use invisi_sdk_core::provenance::{
+    input_digest, parse_integer, validate_proof_bundle, ProofBundle, ProofSidecar, TrustContext,
+};
+use rand::RngCore;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
+use zeroize::Zeroizing;
+type Result<T> = std::result::Result<T, String>;
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FrozenProvenanceIntent {
+    pub chain_id: String,
+    pub protocol_address: String,
+    pub policy_id: String,
+    pub token_address: String,
+    pub operation_index: String,
+    pub operation_digest: String,
+    pub input_nullifiers: Vec<String>,
+    pub calldata: String,
+    pub calldata_hash: String,
+    pub signed_request_hash: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RecoveryRecord {
+    pub format: String,
+    pub revision: u64,
+    pub id: String,
+    pub intent: FrozenProvenanceIntent,
+    pub manifest_sha256: String,
+    pub chain_generation: String,
+    pub sidecar: ProofSidecar,
+    pub idempotency_key: String,
+    pub state: String,
+    #[serde(default)]
+    pub transaction_hash: Option<String>,
+    #[serde(default)]
+    pub locator: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    pub job_id: Option<String>,
+    #[serde(default)]
+    pub proof_valid: bool,
+    #[serde(default)]
+    pub proof_job_status: Option<String>,
+    #[serde(default)]
+    pub source_state: Option<String>,
+    #[serde(default)]
+    pub reason_code: Option<String>,
+    #[serde(default)]
+    pub checkpoint_sequence: Option<String>,
+}
+#[derive(Clone)]
+pub struct RecoveryCiphertext {
+    pub revision: u64,
+    pub data: Vec<u8>,
+}
+/// Host KV adapters atomically fence revisions and persist only ciphertext in a separate purpose namespace.
+pub trait AtomicRecoveryRecords: Send + Sync {
+    fn read(&self, key: &str) -> Result<Option<RecoveryCiphertext>>;
+    fn compare_and_swap(&self, key: &str, old: u64, next: &RecoveryCiphertext) -> Result<bool>;
+}
+pub trait RecoveryAtomicStore: Send + Sync {
+    fn load(&self, id: &str) -> Result<Option<RecoveryRecord>>;
+    fn compare_and_swap(&self, id: &str, old: u64, next: &RecoveryRecord) -> Result<bool>;
+}
+pub struct EncryptedRecoveryStore {
+    records: Arc<dyn AtomicRecoveryRecords>,
+    key: Zeroizing<[u8; 32]>,
+}
+impl EncryptedRecoveryStore {
+    pub fn new(records: Arc<dyn AtomicRecoveryRecords>, key: [u8; 32]) -> Self {
+        Self {
+            records,
+            key: Zeroizing::new(key),
+        }
+    }
+    fn storage_key(id: &str) -> Result<String> {
+        if id.is_empty() || id.len() > 256 {
+            return Err("invalid recovery id".into());
+        }
+        Ok(format!("Invisi.Provenance.Recovery.v1:{id}"))
+    }
+    fn aad(key: &str, revision: u64) -> Vec<u8> {
+        format!("Invisi.Provenance.RecoveryRecord.v1\0{revision}\0{key}").into_bytes()
+    }
+}
+impl RecoveryAtomicStore for EncryptedRecoveryStore {
+    fn load(&self, id: &str) -> Result<Option<RecoveryRecord>> {
+        let key = Self::storage_key(id)?;
+        let Some(record) = self.records.read(&key)? else {
+            return Ok(None);
+        };
+        if record.revision > 9007199254740991
+            || record.revision == 0
+            || record.data.len() < 29
+            || record.data[0] != 1
+        {
+            return Err("invalid recovery ciphertext".into());
+        }
+        let cipher = Aes256Gcm::new_from_slice(&*self.key).map_err(|_| "invalid encryption key")?;
+        let plain = Zeroizing::new(
+            cipher
+                .decrypt(
+                    Nonce::from_slice(&record.data[1..13]),
+                    Payload {
+                        msg: &record.data[13..],
+                        aad: &Self::aad(&key, record.revision),
+                    },
+                )
+                .map_err(|_| "recovery authentication failed")?,
+        );
+        let out: RecoveryRecord = serde_json::from_slice(&plain).map_err(|e| e.to_string())?;
+        if out.revision != record.revision {
+            return Err("recovery revision mismatch".into());
+        }
+        Ok(Some(out))
+    }
+    fn compare_and_swap(&self, id: &str, old: u64, next: &RecoveryRecord) -> Result<bool> {
+        if next.locator.as_ref().is_some_and(|locator| {
+            locator
+                .keys()
+                .any(|key| !["blockHash", "txHash", "operationIndex"].contains(&key.as_str()))
+        }) {
+            return Err("unknown recovery locator field".into());
+        }
+        if old >= 9007199254740991 || old.checked_add(1) != Some(next.revision) {
+            return Err("invalid next recovery revision".into());
+        }
+        let key = Self::storage_key(id)?;
+        let plain = Zeroizing::new(serde_json::to_vec(next).map_err(|e| e.to_string())?);
+        let mut nonce = [0; 12];
+        rand::thread_rng().fill_bytes(&mut nonce);
+        let cipher = Aes256Gcm::new_from_slice(&*self.key).map_err(|_| "invalid encryption key")?;
+        let sealed = cipher
+            .encrypt(
+                Nonce::from_slice(&nonce),
+                Payload {
+                    msg: &plain,
+                    aad: &Self::aad(&key, next.revision),
+                },
+            )
+            .map_err(|_| "recovery encryption failed")?;
+        let mut data = vec![1];
+        data.extend(nonce);
+        data.extend(sealed);
+        self.records.compare_and_swap(
+            &key,
+            old,
+            &RecoveryCiphertext {
+                revision: next.revision,
+                data,
+            },
+        )
+    }
+}
+#[derive(Clone)]
+pub struct RecoveryReconciliation {
+    pub status: String,
+    pub calldata_hash: String,
+    pub signed_request_hash: String,
+    pub chain_generation: String,
+    pub transaction_hash: Option<String>,
+    pub locator: Option<BTreeMap<String, String>>,
+}
+/// These capabilities authenticate frozen public transactions and verify proofs locally; private openings stay in host-encrypted storage.
+pub trait RecoveryHost {
+    fn verify_frozen_statement(
+        &self,
+        intent: &FrozenProvenanceIntent,
+        sidecar: &ProofSidecar,
+    ) -> Result<()>;
+    fn reconcile_frozen_transaction(
+        &self,
+        record: &RecoveryRecord,
+    ) -> Result<RecoveryReconciliation>;
+    fn local_reprove(
+        &self,
+        _record: &RecoveryRecord,
+        _generation: &str,
+        _cancelled: &AtomicBool,
+    ) -> Result<ProofSidecar> {
+        Err("local reproof capability unavailable".into())
+    }
+}
+pub trait RecoveryService {
+    fn submit(
+        &self,
+        locator: &BTreeMap<String, String>,
+        bundle: &ProofBundle,
+        key: &str,
+    ) -> Result<Value>;
+    fn job(&self, id: &str) -> Result<Value>;
+    fn operation_recognition(&self, locator: &BTreeMap<String, String>) -> Result<Value>;
+}
+impl RecoveryService for crate::provenance_client::ProvenanceClient {
+    fn submit(
+        &self,
+        locator: &BTreeMap<String, String>,
+        bundle: &ProofBundle,
+        key: &str,
+    ) -> Result<Value> {
+        self.submit_proof(json!(locator), bundle, key)
+    }
+    fn job(&self, id: &str) -> Result<Value> {
+        self.get_proof_job(id)
+    }
+    fn operation_recognition(&self, locator: &BTreeMap<String, String>) -> Result<Value> {
+        self.get_operation_recognition(json!(locator))
+    }
+}
+pub fn recovery_submission_key(base: &str, sidecar: &ProofSidecar) -> Result<String> {
+    if base.is_empty() || base.len() > 63 || !base.bytes().all(|b| (33..=126).contains(&b)) {
+        return Err("invalid recovery idempotency key".into());
+    }
+    let value = serde_json::to_value(&sidecar.proof_bundle).map_err(|e| e.to_string())?;
+    let bytes = serde_json::to_vec(&value).map_err(|e| e.to_string())?;
+    Ok(format!("{}:{}", base, hex::encode(Sha256::digest(bytes))))
+}
+pub struct RecoveryCoordinator<'a> {
+    pub store: &'a dyn RecoveryAtomicStore,
+    pub trust: &'a TrustContext,
+    pub service: &'a dyn RecoveryService,
+    pub host: &'a dyn RecoveryHost,
+}
+fn number(v: &str, bits: usize) -> Result<U256> {
+    parse_integer(v, bits).map_err(|e| e.to_string())
+}
+fn cancelled(flag: &AtomicBool) -> Result<()> {
+    if flag.load(Ordering::SeqCst) {
+        Err("local recovery cancelled; broadcast remains active".into())
+    } else {
+        Ok(())
+    }
+}
+impl RecoveryCoordinator<'_> {
+    fn validate(&self, r: &RecoveryRecord) -> Result<()> {
+        if r.format != "invisi-provenance-recovery-v1"
+            || r.id.is_empty()
+            || r.idempotency_key.is_empty()
+            || r.idempotency_key.len() > 63
+        {
+            return Err("invalid recovery record".into());
+        }
+        recovery_submission_key(&r.idempotency_key, &r.sidecar)?;
+        let i = &r.intent;
+        let t = self.trust;
+        if number(&i.chain_id, 64)? != U256::from(t.scope.chain_id)
+            || number(&i.protocol_address, 160)? != t.scope.protocol_address
+            || number(&i.policy_id, 256)? != t.scope.policy_id
+            || r.manifest_sha256 != t.manifest_sha256
+        {
+            return Err("recovery scope mismatch".into());
+        }
+        let bytes = hex::decode(
+            i.calldata
+                .strip_prefix("0x")
+                .ok_or("invalid frozen calldata")?,
+        )
+        .map_err(|e| e.to_string())?;
+        if format!("{:#x}", keccak256(bytes)) != i.calldata_hash
+            || i.signed_request_hash.len() != 66
+            || !i.signed_request_hash.starts_with("0x")
+        {
+            return Err("frozen recovery intent mismatch".into());
+        }
+        number(&i.signed_request_hash, 256)?;
+        if number(&r.sidecar.operation_index, 32)? != number(&i.operation_index, 32)? {
+            return Err("recovery operation index mismatch".into());
+        }
+        let p = &r.sidecar.proof_bundle.public_inputs;
+        if p.len() != 13
+            || number(&p[2], 160)? != number(&i.token_address, 160)?
+            || ((number(&p[9], 128)? << 128) | number(&p[10], 128)?)
+                != number(&i.operation_digest, 256)?
+            || number(&p[8], 32)? != U256::from(i.input_nullifiers.len())
+        {
+            return Err("recovery statement mismatch".into());
+        }
+
+        let mut seen = std::collections::BTreeSet::new();
+        for n in &i.input_nullifiers {
+            if !seen.insert(number(n, 256)?) {
+                return Err("duplicate recovery nullifier".into());
+            }
+        }
+        let ns = i
+            .input_nullifiers
+            .iter()
+            .map(|n| number(n, 256))
+            .collect::<Result<Vec<_>>>()?;
+        if input_digest(&ns).map_err(|e| e.to_string())? != number(&p[11], 254)? {
+            return Err("recovery nullifiers digest mismatch".into());
+        }
+        let mut trust = self.trust.clone();
+        trust.chain_generation = number(&r.chain_generation, 64)?.to::<u64>();
+        validate_proof_bundle(&r.sidecar.proof_bundle, &trust).map_err(|e| e.to_string())?;
+        self.host.verify_frozen_statement(i, &r.sidecar)
+    }
+    fn save(&self, mut record: RecoveryRecord, old: u64) -> Result<RecoveryRecord> {
+        if old >= 9007199254740991 {
+            return Err("recovery revision exhausted".into());
+        }
+        record.revision = old.checked_add(1).ok_or("recovery revision exhausted")?;
+        if !self.store.compare_and_swap(&record.id, old, &record)? {
+            return Err("recovery CAS conflict".into());
+        }
+        Ok(record)
+    }
+    pub fn prepare(
+        &self,
+        id: &str,
+        intent: FrozenProvenanceIntent,
+        sidecar: ProofSidecar,
+        key: &str,
+    ) -> Result<RecoveryRecord> {
+        let r = RecoveryRecord {
+            format: "invisi-provenance-recovery-v1".into(),
+            revision: 0,
+            id: id.into(),
+            intent,
+            manifest_sha256: self.trust.manifest_sha256.clone(),
+            chain_generation: self.trust.chain_generation.to_string(),
+            sidecar,
+            idempotency_key: key.into(),
+            state: "broadcast_possible".into(),
+            transaction_hash: None,
+            locator: None,
+            job_id: None,
+            proof_valid: false,
+            proof_job_status: None,
+            source_state: None,
+            reason_code: None,
+            checkpoint_sequence: None,
+        };
+        self.validate(&r)?;
+        if self.store.load(id)?.is_some() {
+            return Err("recovery id already exists".into());
+        }
+        self.save(r, 0)
+    }
+    fn required(&self, id: &str) -> Result<RecoveryRecord> {
+        let r = self.store.load(id)?.ok_or("missing recovery record")?;
+        if r.id != id {
+            return Err("recovery id mismatch".into());
+        }
+        self.validate(&r)?;
+        Ok(r)
+    }
+    pub fn mark_broadcast(&self, id: &str, tx: &str) -> Result<RecoveryRecord> {
+        let mut r = self.required(id)?;
+        if tx.len() != 66 || !tx.starts_with("0x") {
+            return Err("invalid transaction hash".into());
+        }
+        number(tx, 256)?;
+        if r.transaction_hash.as_ref().is_some_and(|old| old != tx) {
+            return Err("frozen transaction hash mismatch".into());
+        }
+        r.transaction_hash = Some(tx.into());
+        if r.state == "broadcast_possible" {
+            r.state = "broadcast".into()
+        }
+        let old = r.revision;
+        self.save(r, old)
+    }
+    pub fn resume(&self, id: &str, reprove: bool, stop: &AtomicBool) -> Result<RecoveryRecord> {
+        cancelled(stop)?;
+        let mut r = self.required(id)?;
+        let fact = self.host.reconcile_frozen_transaction(&r)?;
+        cancelled(stop)?;
+        if fact.calldata_hash != r.intent.calldata_hash
+            || fact.signed_request_hash != r.intent.signed_request_hash
+            || (r.transaction_hash.is_some() && r.transaction_hash != fact.transaction_hash)
+        {
+            return Err("reconciled frozen transaction mismatch".into());
+        }
+        if !["unseen", "pending", "confirmed", "reorged"].contains(&fact.status.as_str()) {
+            return Err("invalid reconciliation status".into());
+        }
+        number(&fact.chain_generation, 64)?;
+        let old = r.revision;
+        if r.chain_generation != fact.chain_generation
+            || number(&fact.chain_generation, 64)? != U256::from(self.trust.chain_generation)
+            || fact.status == "reorged"
+            || r.state == "needs_reproof"
+            || (reprove && r.state == "proof_rejected")
+        {
+            r.state = "needs_reproof".into();
+            r.job_id = None;
+            r.locator = None;
+            r.proof_valid = false;
+            r.proof_job_status = None;
+            r.reason_code = None;
+            r.source_state = None;
+            r.checkpoint_sequence = None;
+            if !reprove
+                || fact.status != "confirmed"
+                || number(&fact.chain_generation, 64)? != U256::from(self.trust.chain_generation)
+            {
+                return self.save(r, old);
+            }
+            r.sidecar = self.host.local_reprove(&r, &fact.chain_generation, stop)?;
+            cancelled(stop)?;
+            r.chain_generation = fact.chain_generation.clone();
+            self.validate(&r)?;
+            r.state = "pending".into()
+        }
+        if fact.status != "confirmed" {
+            return Ok(r);
+        }
+        let locator = fact.locator.ok_or("missing authenticated mined locator")?;
+        if locator.is_empty() || fact.transaction_hash.is_none() {
+            return Err("missing authenticated mined locator".into());
+        }
+        if locator
+            .keys()
+            .any(|k| !["blockHash", "txHash", "operationIndex"].contains(&k.as_str()))
+            || locator.get("txHash") != fact.transaction_hash.as_ref()
+            || number(
+                locator
+                    .get("operationIndex")
+                    .ok_or("missing operation index")?,
+                32,
+            )? != number(&r.intent.operation_index, 32)?
+        {
+            return Err("invalid authenticated locator".into());
+        }
+        let block = locator.get("blockHash").ok_or("missing block hash")?;
+        if block.len() != 66 || !block.starts_with("0x") {
+            return Err("invalid authenticated block hash".into());
+        }
+        number(block, 256)?;
+        r.locator = Some(locator.clone());
+        r.transaction_hash = fact.transaction_hash;
+        if ["recognized", "proof_rejected"].contains(&r.state.as_str()) {
+            return Ok(r);
+        }
+        if r.job_id.is_none() {
+            r = self.save(r, old)?;
+            cancelled(stop)?;
+            let response = self.service.submit(
+                &locator,
+                &r.sidecar.proof_bundle,
+                &recovery_submission_key(&r.idempotency_key, &r.sidecar)?,
+            )?;
+            r.job_id = Some(
+                response["jobId"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .ok_or("missing recovery job id")?
+                    .into(),
+            );
+            r.state = "pending".into();
+            let old = r.revision;
+            r = self.save(r, old)?;
+        }
+        cancelled(stop)?;
+        if !r.proof_valid {
+            let job = self
+                .service
+                .job(r.job_id.as_deref().ok_or("missing job")?)?;
+            let status = job["status"].as_str().ok_or("missing proof job status")?;
+            r.proof_job_status = Some(status.into());
+            r.reason_code = job["reasonCode"].as_str().map(str::to_owned);
+            match status {
+                "invalid" => r.state = "proof_rejected".into(),
+                "valid" => {
+                    r.proof_valid = true;
+                    r.state = "pending_source".into()
+                }
+                "stale_generation" => r.state = "needs_reproof".into(),
+                "queued" | "verifying" | "retryable_error" => r.state = "pending".into(),
+                _ => return Err("unsupported proof job status".into()),
+            }
+
+            let old = r.revision;
+            r = self.save(r, old)?;
+        }
+        if r.proof_valid {
+            let recognition = self.service.operation_recognition(&locator)?;
+            let state = recognition["recognitionState"]
+                .as_str()
+                .ok_or("missing operation recognition state")?;
+            let operation = &recognition["operation"];
+            if operation["canonical"] != true || operation["success"] != true {
+                return Err("missing canonical recognized operation".into());
+            }
+            for key in ["blockHash", "txHash", "operationIndex"] {
+                if operation[key].as_str() != locator.get(key).map(String::as_str) {
+                    return Err("recognition locator mismatch".into());
+                }
+            }
+            for (key, expected) in [
+                ("chainId", &r.intent.chain_id),
+                ("protocolAddress", &r.intent.protocol_address),
+                ("tokenAddress", &r.intent.token_address),
+                ("operationDigest", &r.intent.operation_digest),
+            ] {
+                if number(
+                    operation[key]
+                        .as_str()
+                        .ok_or("missing recognition statement")?,
+                    256,
+                )? != number(expected, 256)?
+                {
+                    return Err("recognition statement mismatch".into());
+                }
+            }
+            let nullifiers = operation["noteNullifiers"]
+                .as_array()
+                .ok_or("missing recognition nullifiers")?;
+            if nullifiers.len() != r.intent.input_nullifiers.len() {
+                return Err("recognition nullifiers mismatch".into());
+            }
+            for (actual, expected) in nullifiers.iter().zip(&r.intent.input_nullifiers) {
+                if number(actual.as_str().ok_or("invalid nullifier")?, 256)?
+                    != number(expected, 256)?
+                {
+                    return Err("recognition nullifiers mismatch".into());
+                }
+            }
+            r.source_state = Some(state.into());
+            r.reason_code = recognition["recognition"]["reasonCode"]
+                .as_str()
+                .map(str::to_owned);
+            r.checkpoint_sequence = recognition["recognition"]["checkpointSequence"]
+                .as_str()
+                .map(str::to_owned);
+            if state == "recognized"
+                && r.checkpoint_sequence.as_ref().map_or(true, |seq| {
+                    number(seq, 64).map_or(true, |n| n == U256::ZERO)
+                })
+            {
+                return Err("missing recognition checkpoint".into());
+            }
+            r.state = match state {
+                "recognized" => "recognized",
+                "source_rejected" => "source_rejected",
+                _ => "pending_source",
+            }
+            .into();
+        }
+        let old = r.revision;
+        self.save(r, old)
+    }
+    pub fn run(
+        &self,
+        id: &str,
+        reprove: bool,
+        stop: &AtomicBool,
+        poll: Duration,
+        max_polls: usize,
+    ) -> Result<RecoveryRecord> {
+        if poll.is_zero() || max_polls == 0 {
+            return Err("invalid polling limits".into());
+        }
+        for _ in 0..max_polls {
+            let r = self.resume(id, reprove, stop)?;
+            if ![
+                "broadcast_possible",
+                "broadcast",
+                "pending",
+                "pending_source",
+            ]
+            .contains(&r.state.as_str())
+            {
+                return Ok(r);
+            }
+            let start = std::time::Instant::now();
+            while start.elapsed() < poll {
+                cancelled(stop)?;
+                std::thread::sleep(Duration::from_millis(20).min(poll - start.elapsed().min(poll)));
+            }
+        }
+        Err("recovery polling limit reached; resume remains available".into())
+    }
+}
+
+/// Local membership filtering is independent of protocol spendability and makes no per-note requests.
+pub fn filter_recognized_commitments(
+    scope: &invisi_sdk_core::provenance::Scope,
+    tree: &invisi_sdk_core::provenance::RecognizedTree,
+    commitments: &[U256],
+) -> Result<Vec<U256>> {
+    let mut out = Vec::new();
+    for commitment in commitments {
+        if tree
+            .membership_for_commitment(scope, *commitment)
+            .map_err(|e| e.to_string())?
+            .is_some()
+        {
+            out.push(*commitment)
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        cell::{Cell, RefCell},
+        sync::Mutex,
+    };
+    #[derive(Default)]
+    struct Memory {
+        values: Mutex<BTreeMap<String, RecoveryCiphertext>>,
+        reject: AtomicBool,
+    }
+    impl AtomicRecoveryRecords for Memory {
+        fn read(&self, key: &str) -> Result<Option<RecoveryCiphertext>> {
+            Ok(self.values.lock().unwrap().get(key).cloned())
+        }
+        fn compare_and_swap(&self, key: &str, old: u64, next: &RecoveryCiphertext) -> Result<bool> {
+            let mut values = self.values.lock().unwrap();
+            if self.reject.load(Ordering::SeqCst)
+                || values.get(key).map_or(0, |v| v.revision) != old
+            {
+                return Ok(false);
+            }
+            values.insert(key.into(), next.clone());
+            Ok(true)
+        }
+    }
+    struct Host {
+        pending_first: Cell<bool>,
+        intent: FrozenProvenanceIntent,
+        fact: RefCell<RecoveryReconciliation>,
+        next: RefCell<ProofSidecar>,
+        reconciles: Cell<usize>,
+    }
+    impl RecoveryHost for Host {
+        fn verify_frozen_statement(
+            &self,
+            intent: &FrozenProvenanceIntent,
+            _: &ProofSidecar,
+        ) -> Result<()> {
+            if intent != &self.intent {
+                return Err("host statement mismatch".into());
+            }
+            Ok(())
+        }
+        fn reconcile_frozen_transaction(
+            &self,
+            _: &RecoveryRecord,
+        ) -> Result<RecoveryReconciliation> {
+            self.reconciles.set(self.reconciles.get() + 1);
+            let mut fact = self.fact.borrow().clone();
+            if self.pending_first.replace(false) {
+                fact.status = "pending".into();
+            }
+            Ok(fact)
+        }
+        fn local_reprove(
+            &self,
+            _: &RecoveryRecord,
+            _: &str,
+            _: &AtomicBool,
+        ) -> Result<ProofSidecar> {
+            Ok(self.next.borrow().clone())
+        }
+    }
+    struct Service {
+        job_status: RefCell<String>,
+        recognition_outage: Cell<bool>,
+        source_rejected: Cell<bool>,
+        intent: FrozenProvenanceIntent,
+        interrupt: Cell<bool>,
+        submits: Cell<usize>,
+        keys: RefCell<Vec<String>>,
+        recognized: Cell<bool>,
+    }
+    impl RecoveryService for Service {
+        fn submit(
+            &self,
+            _: &BTreeMap<String, String>,
+            _: &ProofBundle,
+            key: &str,
+        ) -> Result<Value> {
+            self.submits.set(self.submits.get() + 1);
+            self.keys.borrow_mut().push(key.into());
+            if self.interrupt.replace(false) {
+                return Err("network interrupted after accepted".into());
+            }
+            Ok(json!({"jobId":"job1"}))
+        }
+        fn job(&self, _: &str) -> Result<Value> {
+            Ok(json!({"status":self.job_status.borrow().clone()}))
+        }
+        fn operation_recognition(&self, locator: &BTreeMap<String, String>) -> Result<Value> {
+            if self.recognition_outage.replace(false) {
+                return Err("provider outage".into());
+            }
+            let mut operation = serde_json::to_value(&self.intent).unwrap();
+            for (k, v) in locator {
+                operation[k] = json!(v)
+            }
+            operation["noteNullifiers"] = json!(self.intent.input_nullifiers);
+            operation["canonical"] = json!(true);
+            operation["success"] = json!(true);
+            Ok(
+                json!({"operation":operation,"recognitionState":if self.source_rejected.get(){"source_rejected"}else if self.recognized.get(){"recognized"}else{"pending_source"},"recognition":{"reasonCode":"DEPENDENCIES_PENDING","checkpointSequence":"3"}}),
+            )
+        }
+    }
+    fn fixture() -> (
+        FrozenProvenanceIntent,
+        Vec<ProofSidecar>,
+        TrustContext,
+        Host,
+        Service,
+    ) {
+        let v: Value =
+            serde_json::from_str(include_str!("../testdata/provenance-recovery.json")).unwrap();
+        let intent: FrozenProvenanceIntent = serde_json::from_value(v["intent"].clone()).unwrap();
+        let sidecars: Vec<ProofSidecar> = serde_json::from_value(v["sidecars"].clone()).unwrap();
+        let public: [u8; 32] =
+            hex::decode(v["publicKey"].as_str().unwrap().trim_start_matches("0x"))
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let trust = TrustContext {
+            scope: invisi_sdk_core::provenance::Scope {
+                chain_id: number(&intent.chain_id, 64).unwrap().to(),
+                protocol_address: number(&intent.protocol_address, 160).unwrap(),
+                policy_id: number(&intent.policy_id, 256).unwrap(),
+            },
+            chain_generation: 1,
+            provider_id: number(v["providerId"].as_str().unwrap(), 256).unwrap(),
+            signing_keys: BTreeMap::from([(
+                number(v["signingKeyId"].as_str().unwrap(), 256).unwrap(),
+                public,
+            )]),
+            signing_key_validity: BTreeMap::new(),
+            manifest_sha256: v["manifestSha256"].as_str().unwrap().into(),
+        };
+        let tx = format!("0x{}", "ab".repeat(32));
+        let host = Host {
+            pending_first: Cell::new(false),
+            intent: intent.clone(),
+            fact: RefCell::new(RecoveryReconciliation {
+                status: "confirmed".into(),
+                calldata_hash: intent.calldata_hash.clone(),
+                signed_request_hash: intent.signed_request_hash.clone(),
+                chain_generation: "1".into(),
+                transaction_hash: Some(tx.clone()),
+                locator: Some(BTreeMap::from([
+                    ("txHash".into(), tx),
+                    ("blockHash".into(), format!("0x{}", "cd".repeat(32))),
+                    ("operationIndex".into(), "0".into()),
+                ])),
+            }),
+            next: RefCell::new(sidecars[1].clone()),
+            reconciles: Cell::new(0),
+        };
+        let service = Service {
+            job_status: RefCell::new("valid".into()),
+            recognition_outage: Cell::new(false),
+            source_rejected: Cell::new(false),
+            intent: intent.clone(),
+            interrupt: Cell::new(false),
+            submits: Cell::new(0),
+            keys: RefCell::new(vec![]),
+            recognized: Cell::new(false),
+        };
+        (intent, sidecars, trust, host, service)
+    }
+    #[test]
+    fn canonical_submission_keys_match_shared_vectors() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../testdata/provenance-recovery.json")).unwrap();
+        let (_, sidecars, _, _, _) = self::fixture();
+        for (i, sidecar) in sidecars.iter().enumerate() {
+            assert_eq!(
+                recovery_submission_key("stable", sidecar).unwrap(),
+                fixture["submissionKeys"][i].as_str().unwrap()
+            );
+        }
+    }
+    #[test]
+    fn waits_after_permit_crash_without_mark_broadcast() {
+        let (intent, sidecars, trust, host, service) = fixture();
+        let kv = Arc::new(Memory::default());
+        let store = EncryptedRecoveryStore::new(kv, [7; 32]);
+        let c = RecoveryCoordinator {
+            store: &store,
+            trust: &trust,
+            host: &host,
+            service: &service,
+        };
+        c.prepare("possible", intent, sidecars[0].clone(), "stable")
+            .unwrap();
+        host.pending_first.set(true);
+        service.recognized.set(true);
+        let result = c
+            .run(
+                "possible",
+                false,
+                &AtomicBool::new(false),
+                Duration::from_millis(1),
+                2,
+            )
+            .unwrap();
+        assert_eq!(result.state, "recognized");
+        assert_eq!(host.reconciles.get(), 2);
+        assert_eq!(service.submits.get(), 1);
+        assert_eq!(result.transaction_hash, host.fact.borrow().transaction_hash);
+    }
+    #[test]
+    fn idempotency_boundary_is_checked_before_broadcast_permit() {
+        let (intent, sidecars, trust, host, service) = fixture();
+        let store = EncryptedRecoveryStore::new(Arc::new(Memory::default()), [7; 32]);
+        let c = RecoveryCoordinator {
+            store: &store,
+            trust: &trust,
+            host: &host,
+            service: &service,
+        };
+        let max = "a".repeat(63);
+        assert_eq!(
+            recovery_submission_key(&max, &sidecars[0]).unwrap().len(),
+            128
+        );
+        let vector: Value =
+            serde_json::from_str(include_str!("../testdata/provenance-recovery.json")).unwrap();
+        assert_eq!(
+            recovery_submission_key(&max, &sidecars[0]).unwrap(),
+            vector["idempotencyLimits"]["maxBaseSubmissionKey"]
+                .as_str()
+                .unwrap()
+        );
+        c.prepare("max", intent.clone(), sidecars[0].clone(), &max)
+            .unwrap();
+        for base in ["a".repeat(64), "a".repeat(128), "é".into(), " ".into()] {
+            assert!(c
+                .prepare("blocked", intent.clone(), sidecars[0].clone(), &base)
+                .is_err());
+            assert!(store.load("blocked").unwrap().is_none());
+        }
+    }
+    #[test]
+    fn proof_valid_source_outage_and_changed_source_decision_resume() {
+        let (intent, sidecars, trust, host, service) = fixture();
+        let store = EncryptedRecoveryStore::new(Arc::new(Memory::default()), [7; 32]);
+        let c = RecoveryCoordinator {
+            store: &store,
+            trust: &trust,
+            host: &host,
+            service: &service,
+        };
+        let stop = AtomicBool::new(false);
+        c.prepare("pending", intent, sidecars[0].clone(), "stable")
+            .unwrap();
+        service.recognition_outage.set(true);
+        assert!(c.resume("pending", false, &stop).is_err());
+        let saved = store.load("pending").unwrap().unwrap();
+        assert!(saved.proof_valid);
+        assert_eq!(saved.state, "pending_source");
+        service.source_rejected.set(true);
+        assert_eq!(
+            c.resume("pending", false, &stop).unwrap().state,
+            "source_rejected"
+        );
+        service.source_rejected.set(false);
+        service.recognized.set(true);
+        assert_eq!(
+            c.resume("pending", false, &stop).unwrap().state,
+            "recognized"
+        );
+        assert_eq!(service.submits.get(), 1);
+    }
+    #[test]
+    fn same_generation_replacement_bundle_gets_new_key() {
+        let (_, mut sidecars, _, _, _) = fixture();
+        let old = recovery_submission_key("stable", &sidecars[0]).unwrap();
+        sidecars[0].proof_bundle.proof = "0x02".into();
+        assert_ne!(
+            old,
+            recovery_submission_key("stable", &sidecars[0]).unwrap()
+        );
+    }
+    #[test]
+    fn actual_job_wire_states_invalid_retryable_and_stale() {
+        let (intent, sidecars, trust, host, service) = fixture();
+        let store = EncryptedRecoveryStore::new(Arc::new(Memory::default()), [7; 32]);
+        let c = RecoveryCoordinator {
+            store: &store,
+            trust: &trust,
+            host: &host,
+            service: &service,
+        };
+        let stop = AtomicBool::new(false);
+        c.prepare("invalid", intent.clone(), sidecars[0].clone(), "stable")
+            .unwrap();
+        *service.job_status.borrow_mut() = "invalid".into();
+        assert_eq!(
+            c.resume("invalid", false, &stop).unwrap().state,
+            "proof_rejected"
+        );
+        let mut replacement = sidecars[0].clone();
+        replacement.proof_bundle.proof = "0x02".into();
+        *host.next.borrow_mut() = replacement;
+        *service.job_status.borrow_mut() = "valid".into();
+        service.recognized.set(true);
+        let fixed = c.resume("invalid", true, &stop).unwrap();
+        assert_eq!(fixed.state, "recognized");
+        assert_eq!(fixed.intent, intent);
+        assert_eq!(service.keys.borrow().len(), 2);
+        assert_ne!(service.keys.borrow()[0], service.keys.borrow()[1]);
+        for status in ["retryable_error", "stale_generation"] {
+            c.prepare(status, intent.clone(), sidecars[0].clone(), "stable")
+                .unwrap();
+            *service.job_status.borrow_mut() = status.into();
+            let result = c.resume(status, false, &stop).unwrap();
+            assert_eq!(
+                result.state,
+                if status == "retryable_error" {
+                    "pending"
+                } else {
+                    "needs_reproof"
+                }
+            );
+            assert!(!result.proof_valid);
+        }
+    }
+    #[test]
+    fn encrypted_recovery_authentication_and_cas() {
+        let (intent, sidecars, trust, host, service) = fixture();
+        let kv = Arc::new(Memory::default());
+        let store = EncryptedRecoveryStore::new(kv.clone(), [7; 32]);
+        let c = RecoveryCoordinator {
+            store: &store,
+            trust: &trust,
+            service: &service,
+            host: &host,
+        };
+        let record = c
+            .prepare("one", intent, sidecars[0].clone(), "stable")
+            .unwrap();
+        assert_eq!(record.state, "broadcast_possible");
+        let key = "Invisi.Provenance.Recovery.v1:one";
+        let cipher = kv.values.lock().unwrap()[key].clone();
+        assert!(!cipher.data.windows(6).any(|v| v == b"0x1234"));
+        assert_eq!(
+            store.load("one").unwrap().unwrap().intent.calldata,
+            "0x1234"
+        );
+        assert!(!store.compare_and_swap("one", 0, &record).unwrap());
+        let wrong = EncryptedRecoveryStore::new(kv.clone(), [8; 32]);
+        assert!(wrong.load("one").is_err());
+        kv.values
+            .lock()
+            .unwrap()
+            .insert("Invisi.Provenance.Recovery.v1:two".into(), cipher.clone());
+        assert!(store.load("two").is_err());
+        kv.values.lock().unwrap().get_mut(key).unwrap().revision = 2;
+        assert!(store.load("one").is_err());
+    }
+    #[test]
+    fn restart_preserves_idempotency_and_waits_for_operation_recognition() {
+        let (intent, sidecars, trust, host, service) = fixture();
+        let kv = Arc::new(Memory::default());
+        let store = EncryptedRecoveryStore::new(kv, [7; 32]);
+        let stop = AtomicBool::new(false);
+        let c = RecoveryCoordinator {
+            store: &store,
+            trust: &trust,
+            service: &service,
+            host: &host,
+        };
+        c.prepare("send", intent.clone(), sidecars[0].clone(), "stable")
+            .unwrap();
+        c.mark_broadcast(
+            "send",
+            host.fact.borrow().transaction_hash.as_deref().unwrap(),
+        )
+        .unwrap();
+        service.interrupt.set(true);
+        assert!(c.resume("send", false, &stop).is_err());
+        let restart = RecoveryCoordinator {
+            store: &store,
+            trust: &trust,
+            service: &service,
+            host: &host,
+        };
+        let pending = restart.resume("send", false, &stop).unwrap();
+        assert_eq!(pending.state, "pending_source");
+        assert!(pending.proof_valid);
+        let expected = recovery_submission_key("stable", &sidecars[0]).unwrap();
+        assert_eq!(*service.keys.borrow(), vec![expected.clone(), expected]);
+        service.recognized.set(true);
+        let recognized = restart
+            .run("send", false, &stop, Duration::from_millis(1), 2)
+            .unwrap();
+        assert_eq!(recognized.state, "recognized");
+        assert_eq!(recognized.checkpoint_sequence.as_deref(), Some("3"));
+        assert_eq!(recognized.intent, intent);
+        assert_eq!(service.submits.get(), 2);
+    }
+    #[test]
+    fn cancellation_generation_reconciliation_and_statement_fences() {
+        let (intent, sidecars, trust, host, service) = fixture();
+        let kv = Arc::new(Memory::default());
+        let store = EncryptedRecoveryStore::new(kv.clone(), [7; 32]);
+        let stop = AtomicBool::new(false);
+        let c = RecoveryCoordinator {
+            store: &store,
+            trust: &trust,
+            service: &service,
+            host: &host,
+        };
+        kv.reject.store(true, Ordering::SeqCst);
+        assert!(c
+            .prepare("blocked", intent.clone(), sidecars[0].clone(), "stable")
+            .is_err());
+        assert!(store.load("blocked").unwrap().is_none());
+        kv.reject.store(false, Ordering::SeqCst);
+        c.prepare("send", intent.clone(), sidecars[0].clone(), "stable")
+            .unwrap();
+        c.mark_broadcast(
+            "send",
+            host.fact.borrow().transaction_hash.as_deref().unwrap(),
+        )
+        .unwrap();
+        stop.store(true, Ordering::SeqCst);
+        assert!(c.resume("send", false, &stop).is_err());
+        assert_eq!(store.load("send").unwrap().unwrap().state, "broadcast");
+        assert_eq!(service.submits.get(), 0);
+        stop.store(false, Ordering::SeqCst);
+        host.fact.borrow_mut().chain_generation = "2".into();
+        let old = c.resume("send", false, &stop).unwrap();
+        assert_eq!(old.state, "needs_reproof");
+        assert_eq!(host.reconciles.get(), 1);
+        assert_eq!(service.submits.get(), 0);
+        let mut next_trust = trust.clone();
+        next_trust.chain_generation = 2;
+        let current = RecoveryCoordinator {
+            store: &store,
+            trust: &next_trust,
+            service: &service,
+            host: &host,
+        };
+        host.next.borrow_mut().proof_bundle.public_inputs[2] = format!("0x{:064x}", 3);
+        assert!(current.resume("send", true, &stop).is_err());
+        assert_eq!(store.load("send").unwrap().unwrap().chain_generation, "1");
+        assert_eq!(service.submits.get(), 0);
+        *host.next.borrow_mut() = sidecars[1].clone();
+        service.recognized.set(true);
+        let reproved = current.resume("send", true, &stop).unwrap();
+        assert_eq!(reproved.state, "recognized");
+        assert_eq!(reproved.intent, intent);
+        assert_eq!(
+            *service.keys.borrow(),
+            vec![recovery_submission_key("stable", &sidecars[1]).unwrap()]
+        );
+        let mut bad = intent;
+        bad.operation_digest = "5".into();
+        assert!(current
+            .prepare("bad", bad, sidecars[1].clone(), "stable")
+            .is_err());
+    }
+}

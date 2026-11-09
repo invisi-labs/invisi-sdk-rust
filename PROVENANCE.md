@@ -28,7 +28,7 @@ Policy-enabled broadcaster quotes bind the original public request hash and requ
 
 `invisi_sdk::provenance_client::ProvenanceClient` supplies scoped machine JSON-RPC methods, `sync_recognized_tree` with an explicit leaf budget, and bounded job waiting. It never changes Note spending state.
 
-`invisi_sdk::broadcaster::provenance::ProvenanceBroadcasterClient` is the explicit required-policy quote/submission flow; `verify_provenance_quote` checks outer metadata and the policy-bound EIP-712 signature. Existing legacy broadcaster structs and signing APIs remain intact and reject unexpected provenance metadata.
+`invisi_sdk::broadcaster::provenance::ProvenanceBroadcasterClient` is the explicit required-policy quote/submission flow; `verify_provenance_quote` checks outer metadata and the policy-bound EIP-712 signature. Policy-disabled broadcaster structs and signing APIs remain intact and reject unexpected provenance metadata.
 
 Golden vector and transport tests: `cargo test -p invisi-sdk-core provenance`, `cargo test -p invisi-sdk-rpc provenance_client`, and `cargo test --test provenance_broadcaster`.
 
@@ -59,3 +59,7 @@ A generation change or reorg returns `needs_reproof` after host reconciliation. 
 Recovery state-machine tests use explicitly marked synthetic proof bytes and real signed root certificates; they validate recovery/encryption behavior and do not claim another native-prover or App integration test.
 
 Rust: `provenance_store::SessionRecoveryRecords::new(existingAtomicRecords)` adapts existing session `AtomicRecords` (including optional `SQLiteRecords`) to `provenance_recovery::EncryptedRecoveryStore::new(Arc::new(adapter), key32)`. Construct `RecoveryCoordinator` with explicit store/trust/service/host references; a successful `prepare` is the broadcast permit. `AtomicBool` cancellation and optional local reproof remain host-controlled; this does not add a Rust proving backend.
+
+## Flat examples
+
+See [`examples/07-provenance`](examples/07-provenance/README.md) for local proof generation, public sidecars, verified Broadcaster quote/explicit submission and confirmed source publication.

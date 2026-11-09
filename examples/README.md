@@ -10,7 +10,7 @@ cargo run -p invisi-sdk-examples --bin transfer -- --execute
 cargo run -p invisi-sdk-examples --features sqlite --bin restore-session -- --execute
 ```
 
-`note-output` constructs an encrypted Note offline using public receiving material only. Every other binary returns before reading environment configuration, opening files or databases, contacting RPC, or accessing keys unless `--execute` is present. The transaction examples export **unsigned** EVM transactions. Your host reviews, signs and submits them; the examples never broadcast automatically.
+`note-output` constructs an encrypted Note offline using public receiving material only. Every other binary returns before reading environment configuration, opening files or databases, contacting RPC, or accessing keys unless `--execute` is present. The transaction examples export **unsigned** EVM transactions. Your host reviews, signs and submits them; the Note/Credit examples never broadcast automatically. The separate Provenance walkthrough adds an explicit `--submit` switch for Broadcaster submission.
 
 ## Files
 
@@ -162,3 +162,7 @@ cargo run -p invisi-sdk-examples --bin note-output
 ```
 
 Run the other binaries without `--execute` to inspect their guard behavior without configuring services.
+
+## Provenance
+
+[`07-provenance`](07-provenance/README.md) shows local recognized-tree replay, real source proving, policy-bound Broadcaster quote/optional submission, and confirmed-transaction source-proof submission/publication waiting. These examples add an explicit `--submit` switch; the existing examples still only export unsigned transactions.

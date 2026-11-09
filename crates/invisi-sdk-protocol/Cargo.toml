@@ -1,0 +1,15 @@
+[package]
+name = "invisi-sdk-protocol"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Invisi SDK protocol capabilities"
+
+[dependencies]
+invisi-sdk-core = { path = "../invisi-sdk-core" }
+alloy-primitives = { version = "0.8", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1.0"
+hex = "0.4"
+alloy-sol-types = { version = "0.8", features = ["json"] }

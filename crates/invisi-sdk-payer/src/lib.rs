@@ -1,5 +1,5 @@
-//! payer 侧 calldata 构建 — 对齐 @invisi-labs/payer build*Calldata。
-//! ABI 编码用 alloy（Rust 版 viem）。
+//! Payer calldata builders matching @invisi-labs/payer build*Calldata.
+//! ABI encoding uses alloy.
 
 use alloy_sol_types::sol;
 
@@ -65,7 +65,8 @@ mod tests {
         // spender = 0x70997970C51812dc3A010C7d01b50e0d17dc79C8, amount = 1000 (0x3e8)
         let spender = hex_lit::<20>("70997970c51812dc3a010c7d01b50e0d17dc79c8");
         let mut amount = [0u8; 32];
-        amount[30] = 0x03; amount[31] = 0xe8;
+        amount[30] = 0x03;
+        amount[31] = 0xe8;
         let got = build_approve_calldata(&spender, &amount);
         let expected = concat_hex(&[
             "095ea7b3",
@@ -80,7 +81,9 @@ mod tests {
         let proof = vec![0xde, 0xad, 0xbe, 0xef];
         let pc = [0x33u8; 32];
         let cc = [0x44u8; 32];
-        let mut input = [0u8; 32]; input[30] = 0x07; input[31] = 0xd0; // 2000
+        let mut input = [0u8; 32];
+        input[30] = 0x07;
+        input[31] = 0xd0; // 2000
         let refund = [0u8; 32];
         let got = build_pay_blind_calldata(&proof, &pc, &cc, &input, 1, &refund);
         const GOLDEN: &str = "82d33b9b00000000000000000000000000000000000000000000000000000000000000c03333333333333333333333333333333333333333333333333333333333333333444444444444444444444444444444444444444444444444444444444444444400000000000000000000000000000000000000000000000000000000000007d0000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004deadbeef00000000000000000000000000000000000000000000000000000000";
@@ -90,7 +93,9 @@ mod tests {
     #[test]
     fn pay_open_calldata_matches_cast() {
         let identity = [0x11u8; 32];
-        let mut amount = [0u8; 32]; amount[30] = 0x03; amount[31] = 0xe8; // 1000
+        let mut amount = [0u8; 32];
+        amount[30] = 0x03;
+        amount[31] = 0xe8; // 1000
         let nonce = [0x22u8; 32];
         let refund = [0u8; 32];
         let got = build_pay_open_calldata(&identity, &amount, &nonce, 1, &refund);
@@ -109,6 +114,9 @@ mod tests {
         parts.iter().flat_map(|p| decode_hex(p)).collect()
     }
     fn decode_hex(s: &str) -> Vec<u8> {
-        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i+2], 16).unwrap()).collect()
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
     }
 }

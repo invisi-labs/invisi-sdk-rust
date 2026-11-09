@@ -1,0 +1,26 @@
+{
+  "source": "Pinned decaf377-fmd 2.1.1 cross-runtime profile; public test keys.",
+  "vectors": [
+    {
+      "detectionKey": "4153dac2cc7dbd69ecba7b920ca0f29e8faa63f4aea7e250af92f7a3d2611d02",
+      "clueKey": "22cc5388aa3fc0fe62176e39b58c006162a79bd1013f2549cbd42f9b328bdc0c",
+      "seedHex": "0831b120a40ef390c0de14494847794548410b640dae6656753e28d68a52d7c0",
+      "clue": "c4fb2894eed26f15c3655e34ab124f1c0f8147d8ea545c8485f3598fffa2f50c31e3abdb4015aed7e71042430a34cae76764ca663082e17183c2bda16a95550218dfb9ad",
+      "otherDetectionKey": "5c1eb95b12d439988f503bfbba9e980a63181e51f8c06cdea3fc1477a6131301"
+    },
+    {
+      "detectionKey": "5c1eb95b12d439988f503bfbba9e980a63181e51f8c06cdea3fc1477a6131301",
+      "clueKey": "b8d6c9bb34753e58422cb550a35b2b88ba434a30a6a7b8de8b3e3fc21be9b502",
+      "seedHex": "30a503f592c260ad7c9be977c2668994d7c5d53111829113a72b40e74543133a",
+      "clue": "5edb3b99cbba0c61d20e5f0c60515a7289b1d468202f7399990b50b1547beb0b7ab94f209bc1c4a5ba39261df32f22f197cf43b677e89d06055e642ee0c55d031824017f",
+      "otherDetectionKey": "c99530e4c6c3e8fe3817effd167c1b7d37e470f346c6d3a3e3b06659bbad9d03"
+    },
+    {
+      "detectionKey": "c99530e4c6c3e8fe3817effd167c1b7d37e470f346c6d3a3e3b06659bbad9d03",
+      "clueKey": "c2d13222795173d7bc90013b5c407ac9cb9fd26bbf5369fbc093b5380af42d0e",
+      "seedHex": "ef089561546001554f7cda1215a714a775a4ceb70fbed75a74bd3774ba215e10",
+      "clue": "967965e588e474705e3351fff2e65a29629bc0616ae5e1881aaab50d1817ed01e98e2d96107889cc2bb9884dc51df34afa7724d5149b76a076ebdeccf68b190018d34576",
+      "otherDetectionKey": "6079cafbbaeed2db321ee3d1c80dc6648cef4b0cd2e13382687020abd9f46803"
+    }
+  ]
+}

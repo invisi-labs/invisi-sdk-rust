@@ -1,0 +1,20 @@
+[package]
+name = "invisi-sdk-rpc"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Invisi SDK rpc capabilities"
+
+[dependencies]
+invisi-sdk-core = { path = "../invisi-sdk-core" }
+invisi-sdk-protocol = { path = "../invisi-sdk-protocol" }
+alloy-primitives = { version = "0.8", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1.0"
+hex = "0.4"
+alloy-sol-types = { version = "0.8", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+k256 = { version = "0.13", features = ["ecdh", "ecdsa"] }
+sha2 = "0.10"
+decaf377-fmd = "=2.1.1"

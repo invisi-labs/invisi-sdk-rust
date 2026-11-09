@@ -1,7 +1,16 @@
 target/
-Cargo.lock
 **/*.rs.bk
 .DS_Store
 .idea/
 .vscode/
 *.swp
+
+# Local host configuration and wallet databases.
+.env
+.env.*
+!.env.example
+.local/
+examples/local/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm

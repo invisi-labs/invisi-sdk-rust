@@ -8,21 +8,23 @@
 //! Returns `true` on success; on failure, err_buf contains the code and the
 //! function returns `false`. Output buffers are populated only on success.
 
-use std::ffi::{c_char, CStr};
+use std::ffi::{c_char, CStr, CString};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::slice;
+use zeroize::{Zeroize, Zeroizing};
 
 use serde::Serialize;
 
 use invisi_sdk_payer::{build_approve_calldata, build_pay_blind_calldata, build_pay_open_calldata};
 
-use invisi_sdk_core::cipher::{decrypt_for_db_raw, encrypt_for_db_raw};
-use invisi_sdk_core::derive::{
+use invisi_core::cipher::{decrypt_for_db_raw, encrypt_for_db_raw};
+use invisi_core::derive::{
     compute_change_commitment, compute_identity_commitment, compute_payment_commitment,
     compute_payment_nullifier, derive_change_nullifier_key, derive_nullifier_key,
 };
-use invisi_sdk_core::pool::generate_receiver_pool_raw;
+use invisi_core::pool::generate_receiver_pool_raw;
 
-pub use invisi_sdk_core::{cipher, derive, domain, error, field, pool, poseidon, poseidon_constants};
+pub use invisi_core::{cipher, derive, domain, error, field, pool, poseidon, poseidon_constants};
 
 // ===== helpers =====
 
@@ -65,7 +67,7 @@ unsafe fn read_hex_fixed<const N: usize>(hex_ptr: *const c_char) -> Option<[u8; 
     Some(out)
 }
 
-/// 接受十进制 (e.g. "1") 或 0x-prefixed 十六进制 (e.g. "0x1") chain_id.
+/// Accept a decimal (e.g. "1") or 0x-prefixed hexadecimal (e.g. "0x1") chain ID.
 unsafe fn read_u64(hex_ptr: *const c_char) -> Option<u64> {
     if hex_ptr.is_null() {
         return None;
@@ -659,18 +661,29 @@ pub unsafe extern "C" fn privacy_decrypt_from_db(
 pub unsafe extern "C" fn privacy_build_approve_calldata(
     spender_hex: *const c_char,
     amount_hex: *const c_char,
-    out_buf: *mut u8, out_cap: usize,
-    err_buf: *mut u8, err_cap: usize,
+    out_buf: *mut u8,
+    out_cap: usize,
+    err_buf: *mut u8,
+    err_cap: usize,
 ) -> bool {
     let spender = match read_hex_fixed::<20>(spender_hex) {
-        Some(v) => v, None => { write_err(err_buf, err_cap, "INPUT_INVALID"); return false; }
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
     };
     let amount = match read_hex_fixed::<32>(amount_hex) {
-        Some(v) => v, None => { write_err(err_buf, err_cap, "INPUT_INVALID"); return false; }
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
     };
     let data = build_approve_calldata(&spender, &amount);
     if !write_str(out_buf, out_cap, &hex::encode(data)) {
-        write_err(err_buf, err_cap, "BUFFER_TOO_SMALL"); return false;
+        write_err(err_buf, err_cap, "BUFFER_TOO_SMALL");
+        return false;
     }
     true
 }
@@ -682,16 +695,51 @@ pub unsafe extern "C" fn privacy_build_pay_open_calldata(
     nonce_hex: *const c_char,
     tree_id_str: *const c_char,
     refund_link_hex: *const c_char,
-    out_buf: *mut u8, out_cap: usize,
-    err_buf: *mut u8, err_cap: usize,
+    out_buf: *mut u8,
+    out_cap: usize,
+    err_buf: *mut u8,
+    err_cap: usize,
 ) -> bool {
-    let identity = match read_hex_fixed::<32>(identity_hex) { Some(v)=>v, None=>{write_err(err_buf,err_cap,"INPUT_INVALID");return false;} };
-    let amount = match read_hex_fixed::<32>(amount_hex) { Some(v)=>v, None=>{write_err(err_buf,err_cap,"INPUT_INVALID");return false;} };
-    let nonce = match read_hex_fixed::<32>(nonce_hex) { Some(v)=>v, None=>{write_err(err_buf,err_cap,"INPUT_INVALID");return false;} };
-    let tree_id = match read_u64(tree_id_str) { Some(v)=>v, None=>{write_err(err_buf,err_cap,"INPUT_INVALID");return false;} };
-    let refund = match read_hex_fixed::<32>(refund_link_hex) { Some(v)=>v, None=>{write_err(err_buf,err_cap,"INPUT_INVALID");return false;} };
+    let identity = match read_hex_fixed::<32>(identity_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let amount = match read_hex_fixed::<32>(amount_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let nonce = match read_hex_fixed::<32>(nonce_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let tree_id = match read_u64(tree_id_str) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let refund = match read_hex_fixed::<32>(refund_link_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
     let data = build_pay_open_calldata(&identity, &amount, &nonce, tree_id, &refund);
-    if !write_str(out_buf, out_cap, &hex::encode(data)) { write_err(err_buf,err_cap,"BUFFER_TOO_SMALL"); return false; }
+    if !write_str(out_buf, out_cap, &hex::encode(data)) {
+        write_err(err_buf, err_cap, "BUFFER_TOO_SMALL");
+        return false;
+    }
     true
 }
 
@@ -703,19 +751,70 @@ pub unsafe extern "C" fn privacy_build_pay_blind_calldata(
     input_amount_hex: *const c_char,
     tree_id_str: *const c_char,
     refund_link_hex: *const c_char,
-    out_buf: *mut u8, out_cap: usize,
-    err_buf: *mut u8, err_cap: usize,
+    out_buf: *mut u8,
+    out_cap: usize,
+    err_buf: *mut u8,
+    err_cap: usize,
 ) -> bool {
-    let proof_s = if proof_hex.is_null() { write_err(err_buf,err_cap,"INPUT_INVALID"); return false; }
-                  else { match CStr::from_ptr(proof_hex).to_str() { Ok(s)=>s, Err(_)=>{write_err(err_buf,err_cap,"INPUT_INVALID");return false;} } };
-    let proof = match hex::decode(proof_s) { Ok(v)=>v, Err(_)=>{write_err(err_buf,err_cap,"INPUT_INVALID");return false;} };
-    let pc = match read_hex_fixed::<32>(payment_commitment_hex) { Some(v)=>v, None=>{write_err(err_buf,err_cap,"INPUT_INVALID");return false;} };
-    let cc = match read_hex_fixed::<32>(change_commitment_hex) { Some(v)=>v, None=>{write_err(err_buf,err_cap,"INPUT_INVALID");return false;} };
-    let input_amount = match read_hex_fixed::<32>(input_amount_hex) { Some(v)=>v, None=>{write_err(err_buf,err_cap,"INPUT_INVALID");return false;} };
-    let tree_id = match read_u64(tree_id_str) { Some(v)=>v, None=>{write_err(err_buf,err_cap,"INPUT_INVALID");return false;} };
-    let refund = match read_hex_fixed::<32>(refund_link_hex) { Some(v)=>v, None=>{write_err(err_buf,err_cap,"INPUT_INVALID");return false;} };
+    let proof_s = if proof_hex.is_null() {
+        write_err(err_buf, err_cap, "INPUT_INVALID");
+        return false;
+    } else {
+        match CStr::from_ptr(proof_hex).to_str() {
+            Ok(s) => s,
+            Err(_) => {
+                write_err(err_buf, err_cap, "INPUT_INVALID");
+                return false;
+            }
+        }
+    };
+    let proof = match hex::decode(proof_s) {
+        Ok(v) => v,
+        Err(_) => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let pc = match read_hex_fixed::<32>(payment_commitment_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let cc = match read_hex_fixed::<32>(change_commitment_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let input_amount = match read_hex_fixed::<32>(input_amount_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let tree_id = match read_u64(tree_id_str) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
+    let refund = match read_hex_fixed::<32>(refund_link_hex) {
+        Some(v) => v,
+        None => {
+            write_err(err_buf, err_cap, "INPUT_INVALID");
+            return false;
+        }
+    };
     let data = build_pay_blind_calldata(&proof, &pc, &cc, &input_amount, tree_id, &refund);
-    if !write_str(out_buf, out_cap, &hex::encode(data)) { write_err(err_buf,err_cap,"BUFFER_TOO_SMALL"); return false; }
+    if !write_str(out_buf, out_cap, &hex::encode(data)) {
+        write_err(err_buf, err_cap, "BUFFER_TOO_SMALL");
+        return false;
+    }
     true
 }
 
@@ -962,11 +1061,18 @@ mod tests {
         let mut err = [0u8; 64];
         let ok = unsafe {
             super::privacy_build_approve_calldata(
-                spender.as_ptr(), amount.as_ptr(),
-                out.as_mut_ptr(), out.len(), err.as_mut_ptr(), err.len())
+                spender.as_ptr(),
+                amount.as_ptr(),
+                out.as_mut_ptr(),
+                out.len(),
+                err.as_mut_ptr(),
+                err.len(),
+            )
         };
         assert!(ok);
-        let s = unsafe { std::ffi::CStr::from_ptr(out.as_ptr() as *const i8) }.to_str().unwrap();
+        let s = unsafe { std::ffi::CStr::from_ptr(out.as_ptr() as *const i8) }
+            .to_str()
+            .unwrap();
         assert!(s.starts_with("095ea7b3"));
         assert_eq!(s.len(), 8 + 64 + 64);
     }
@@ -1019,12 +1125,21 @@ mod tests {
         let mut err = [0u8; 64];
         let ok = unsafe {
             super::privacy_build_pay_open_calldata(
-                identity.as_ptr(), amount.as_ptr(), nonce.as_ptr(),
-                tree_id.as_ptr(), refund.as_ptr(),
-                out.as_mut_ptr(), out.len(), err.as_mut_ptr(), err.len())
+                identity.as_ptr(),
+                amount.as_ptr(),
+                nonce.as_ptr(),
+                tree_id.as_ptr(),
+                refund.as_ptr(),
+                out.as_mut_ptr(),
+                out.len(),
+                err.as_mut_ptr(),
+                err.len(),
+            )
         };
         assert!(ok, "payOpen failed: {}", read_cstr_until_nul(&err));
-        let s = unsafe { std::ffi::CStr::from_ptr(out.as_ptr() as *const i8) }.to_str().unwrap();
+        let s = unsafe { std::ffi::CStr::from_ptr(out.as_ptr() as *const i8) }
+            .to_str()
+            .unwrap();
         assert!(s.starts_with("8cf55984"), "payOpen selector mismatch");
         assert!(!s.is_empty(), "output hex should be non-empty");
     }
@@ -1042,12 +1157,22 @@ mod tests {
         let mut err = [0u8; 64];
         let ok = unsafe {
             super::privacy_build_pay_blind_calldata(
-                proof.as_ptr(), pc.as_ptr(), cc.as_ptr(),
-                input_amt.as_ptr(), tree_id.as_ptr(), refund.as_ptr(),
-                out.as_mut_ptr(), out.len(), err.as_mut_ptr(), err.len())
+                proof.as_ptr(),
+                pc.as_ptr(),
+                cc.as_ptr(),
+                input_amt.as_ptr(),
+                tree_id.as_ptr(),
+                refund.as_ptr(),
+                out.as_mut_ptr(),
+                out.len(),
+                err.as_mut_ptr(),
+                err.len(),
+            )
         };
         assert!(ok, "payBlind normal failed: {}", read_cstr_until_nul(&err));
-        let s = unsafe { std::ffi::CStr::from_ptr(out.as_ptr() as *const i8) }.to_str().unwrap();
+        let s = unsafe { std::ffi::CStr::from_ptr(out.as_ptr() as *const i8) }
+            .to_str()
+            .unwrap();
         assert!(s.starts_with("82d33b9b"), "payBlind selector mismatch");
         assert!(!s.is_empty(), "output hex should be non-empty");
 
@@ -1056,9 +1181,17 @@ mod tests {
         let mut err_fail = [0u8; 64];
         let ok_fail = unsafe {
             super::privacy_build_pay_blind_calldata(
-                std::ptr::null(), pc.as_ptr(), cc.as_ptr(),
-                input_amt.as_ptr(), tree_id.as_ptr(), refund.as_ptr(),
-                out_fail.as_mut_ptr(), out_fail.len(), err_fail.as_mut_ptr(), err_fail.len())
+                std::ptr::null(),
+                pc.as_ptr(),
+                cc.as_ptr(),
+                input_amt.as_ptr(),
+                tree_id.as_ptr(),
+                refund.as_ptr(),
+                out_fail.as_mut_ptr(),
+                out_fail.len(),
+                err_fail.as_mut_ptr(),
+                err_fail.len(),
+            )
         };
         assert!(!ok_fail, "payBlind with null proof should fail");
         assert_eq!(read_cstr_until_nul(&err_fail), "INPUT_INVALID");
@@ -1304,5 +1437,63 @@ mod tests {
         };
         assert!(!ok);
         assert_eq!(read_cstr_until_nul(&err), "INPUT_INVALID");
+    }
+}
+
+const MAX_REQUEST_BYTES: usize = invisi_core::wallet::MAX_WALLET_BATCH_JSON_BYTES;
+
+fn response(key: &[u8], request: &[u8]) -> Result<serde_json::Value, String> {
+    let input: serde_json::Value =
+        serde_json::from_slice(request).map_err(|_| "WALLET_INVALID_JSON".to_owned())?;
+    let requests = input.as_array().ok_or("WALLET_BATCH_ARRAY_REQUIRED")?;
+    serde_json::to_value(invisi_core::wallet::execute_batch(key, requests)?)
+        .map_err(|_| "WALLET_INVALID_JSON".into())
+}
+
+/// Execute a JSON request array; free the returned UTF-8 JSON with `invisi_wallet_free`.
+/// Errors are returned as `{"error":{"code":"..."}}`; success is the wire response array.
+///
+/// # Safety
+/// Non-null input pointers must reference readable buffers of the given lengths.
+/// The host retains ownership of inputs and must clear its own key buffers.
+#[no_mangle]
+pub unsafe extern "C" fn invisi_wallet_execute_batch(
+    key: *const u8,
+    key_len: usize,
+    request: *const u8,
+    request_len: usize,
+) -> *mut c_char {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        if key.is_null()
+            || key_len != 32
+            || request.is_null()
+            || request_len == 0
+            || request_len > MAX_REQUEST_BYTES
+        {
+            return Err("WALLET_INVALID_INPUT".to_owned());
+        }
+        let key = Zeroizing::new(std::slice::from_raw_parts(key, key_len).to_vec());
+        response(&key, std::slice::from_raw_parts(request, request_len))
+    }))
+    .unwrap_or_else(|_| Err("WALLET_NATIVE_FAILURE".to_owned()));
+    let value = match result {
+        Ok(value) => value,
+        Err(code) => serde_json::json!({"error":{"code":code}}),
+    };
+    // JSON escaping removes embedded NUL bytes from the returned C string.
+    CString::new(value.to_string())
+        .map(CString::into_raw)
+        .unwrap_or(std::ptr::null_mut())
+}
+
+/// Release one result allocated by `invisi_wallet_execute_batch`; null is accepted.
+///
+/// # Safety
+/// The pointer must be null or an unfreed result returned by this library.
+#[no_mangle]
+pub unsafe extern "C" fn invisi_wallet_free(result: *mut c_char) {
+    if !result.is_null() {
+        let mut bytes = CString::from_raw(result).into_bytes_with_nul();
+        bytes.zeroize();
     }
 }

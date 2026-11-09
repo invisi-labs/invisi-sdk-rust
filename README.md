@@ -1,176 +1,124 @@
-# invisi-sdk-rust
+# Invisi Rust SDK
 
-InvisiPay 协议层 Rust SDK — 隐私支付的密码学原语 + 派生函数 + AEAD 字段加密。
+A Rust SDK for ordinary private Notes and deferred Credit grants, aligned with the
+shared TypeScript and Go protocol behavior. Source, comments and documentation use English.
+The SDK does not select accounts, read Keychain/Keystore, hold a mnemonic, or approve requests.
 
-与同生态项目对称：
-- `invisi-sdk-ts` (browser/node, @aztec/bb.js WASM) — Web 钱包、商户网页、Node 后端
-- **`invisi-sdk-rust`（本仓库）** — iOS / Android RN / Desktop / CLI / 嵌入式
+## Workspace
 
-## Workspace 结构
+| Crate | Responsibility |
+| --- | --- |
+| `invisi-sdk-core` | Wallet cryptography, Note/Credit models and transitions, addresses, FMD, delivery, disclosure, payment requests and measured gas references. No HTTP, prover or managed store. |
+| `invisi-sdk-protocol` | Current contract ABIs, shared chain/output types and canonical receipt decoding. |
+| `invisi-sdk-prover` | Authenticated circuit identities, explicit local witnesses, native BB proving and recursive aggregation. |
+| `invisi-sdk-rpc` | Indexed Protocol RPC, independent Ethereum reads and registered broadcaster quote/submit/status transport. |
+| `invisi-sdk-runtime` | Public Wallet, stateless preparation, external authorization, funding, proving and calldata. |
+| `invisi-sdk-session` | Inventory, staged synchronization, reservations, history, journal recovery and encrypted persistence; optional SQLite. |
+| `invisi-sdk-ffi` | Narrow native C ABI backed by core only. It does not pull in HTTP, proving or Session. |
+| `invisi-sdk` | Convenience facade that reexports the focused crates. Its `src` contains only `lib.rs`. |
+| `invisi-sdk-examples` | Flat, independent scenario programs, corresponding to the Go/TS examples. |
 
-本仓库是 Cargo workspace，包含三个 crate：
+Dependencies flow from core to protocol/prover, then RPC and runtime, then Session.
+Protocol DTOs live below RPC so receipt decoding does not create a dependency cycle.
+Native hosts that only need wallet cryptography depend on core or FFI directly.
 
-| Crate | 位置 | 类型 | 职责 | 依赖 |
-|---|---|---|---|---|
-| `invisi-sdk-core` | `crates/invisi-sdk-core/` | rlib | 轻量密码学 + 派生 + 随机数：`poseidon2` hash / `derive::{compute_identity_commitment, compute_payment_commitment, compute_payment_nullifier, derive_nullifier_key, compute_change_commitment}` / `nonce::generate_nonce` / `cipher::xchachapoly1305` / `pool` | 无 alloy；**可编译 WASM** |
-| `invisi-sdk-payer` | `crates/invisi-sdk-payer/` | rlib | 链上交互：`build_approve_calldata` / `build_pay_open_calldata` / `build_pay_blind_calldata` | alloy（自包含 sol!，不依赖 core） |
-| `invisi-sdk-ffi` | `crates/invisi-sdk-ffi/` | staticlib + cdylib + **rlib** | FFI C ABI 导出 — iOS Swift / Android JNI：`privacy_compute_*` + `privacy_build_*_calldata`；并 `pub use invisi_sdk_core::*` 重导出 | `invisi-sdk-core` + `invisi-sdk-payer` |
+## Wallet boundary
 
-## 包含的能力
+`invisi_sdk::sdk::Wallet` contains public identity and receiving keys only. Session
+configuration contains no executor, viewing key or authorization callback. The App/Vault
+executes explicit requests and returns responses. Managed and stateless preparation use
+the same transcript:
 
-core crate 的密码学模块：
-
-| 模块 | 功能 | 与协议层对齐 |
-|---|---|---|
-| `poseidon` | Aztec Barretenberg BN254 t=4 Poseidon2 sponge | ✅ 与 nexus/Noir 电路/@aztec/bb.js bit-perfect |
-| `domain` | 域分离常量 D_NKEY/D_IDENT/D_PAY/D_NULL/D_DERIVE | ✅ protocol-docs 1.2-commitment.md |
-| `derive` | nullifierKey / identityCommitment / paymentCommitment / paymentNullifier / changeCommitment | ✅ SPEC-085 派生模型 |
-| `pool` | ReceiverCommitment 批生成 (1..=500 nonces) | 待 nexus 对齐 pool 格式 |
-| `cipher` | XChaCha20Poly1305 AEAD 字段加密 + dbEncKey 派生 | App 独立 (DB 字段保护) |
-| `nonce` | 付款方随机 nonce 生成 | ✅ 与合约 nonce 校验对齐 |
-
-payer crate 的链上接口：
-
-| 模块 | 功能 | 与协议层对齐 |
-|---|---|---|
-| `calldata` | `build_approve_calldata` / `build_pay_open_calldata` / `build_pay_blind_calldata` | ✅ 字节级对齐 Solidity 合约 ABI；foundry `cast` 验证 |
-
-## 设计原则
-
-1. **non-custodial**：masterKey 由调用方从 OS 安全存储（Keychain/Keystore）读取后传入；SDK 不接触持久化。
-2. **无 panic in production**：所有错误返回 `Result<T, Error>` 含稳定字符串错误码（`NULLIFIER_ZERO` 等）。
-3. **跨平台**：no_std-friendly（预留），可编译到 iOS / Android / Linux / macOS / Windows / WASM。
-4. **单向兼容**：底层 hash 升级时（如换 Poseidon2 backend）外部接口 `h(domain, inputs)` 不变。
-
-## 安全性
-
-| 维度 | 实现 |
-|---|---|
-| 域分离 | 5 个 Poseidon2 domain tag（D_NKEY=1, D_IDENT=2, D_PAY=3, D_NULL=4, D_DERIVE=8） |
-| nullifier ≠ 0 不变式 | 协议 1.3:17-23 要求 — 强制断言；零值意味 invoiceId 复用 → 拒绝 |
-| AEAD | XChaCha20Poly1305（NIST 推荐，24-byte nonce，16-byte tag） |
-| 跨密钥隔离 | dbEncKey 与 nullifierKey 域分离派生 — masterKey 泄漏不影响 DB 加密反推 |
-| 测试 vectors | 3 个 Aztec 标准向量（hash2/hash4/hash2-zeros）+ 4 个 SPEC-085 向量 |
-
-## 使用
-
-### Cargo 依赖 — 内部（invisi-pay-app）
-
-若需调用本 SDK 的 C ABI（通过 FFI），依赖 `invisi-sdk-ffi` crate：
-
-```toml
-[dependencies]
-invisi-sdk-ffi = { path = "../../../../invisi-sdk-rust/crates/invisi-sdk-ffi" }
+```rust,ignore
+let request = prepared.export_wallet_request("payment-authorization")?;
+let requests = [request];
+// Send the serialized array to the native host and read its response array.
+wallet.accept_batch(&requests, &native_responses)?;
+let response = native_responses.iter().find(|r| r.id == requests[0].id)
+    .ok_or("missing wallet response")?;
+let authorized = prepared.with_wallet_response(&requests[0], response)?;
+let ready = authorized.prove(&prover, false)?;
+let call = ready.calldata(&chain, caller)?;
+// EVM transaction signing is a separate host operation after calldata exists.
 ```
 
-在 Rust 代码中（**注意**：Rust 路径名是 `invisi_sdk`，**不是** `invisi_sdk_ffi`，因为 ffi crate 的 `[lib].name = "invisi_sdk"` 覆盖了 dep key）：
-```rust
-use invisi_sdk::derive::{compute_identity_commitment, compute_payment_commitment};
-use invisi_sdk::nonce::generate_nonce;
+Wallet methods are `wallet.public`, `wallet.detect`, `wallet.decryptNote`,
+`wallet.decryptCredit`, and `wallet.authorize`. Integers use canonical decimal strings;
+bytes use lowercase `0x` hex. IDs are printable ASCII, 1–128 bytes. Native responses are
+checked against the retained request, identity, signatures, contexts and financial
+commitments. Public material never includes spending, viewing or detection private keys.
+Decrypted financial data and transient proving witnesses may return to the business SDK.
+
+The explicit native API `wallet::execute_batch(account_key, requests)` takes a host-owned key
+as a function argument. It never obtains a key from the JSON request or persists it.
+The host owns unlock, consent, key access and clearing its original key buffers.
+Batches permit at most 1024 items and 16 MiB of total JSON in each direction. All requests
+must have unique IDs and the same owner; the native core validates the entire batch before
+execution. Empty batches return empty arrays. Responses may arrive in any order; SDK
+acceptance rejects missing, duplicated, unknown or incorrectly bound responses. The C ABI
+exposes `invisi_wallet_execute_batch` with a length-delimited JSON array input.
+Request IDs correlate responses; chain replay rules and host approval policy are separate.
+
+## Note and Credit
+
+Notes use envelope `0x01`. Credit uses `0x82`, finite `availableCredit`, a canonical
+`unlimited` flag, three limits and gross usage counters. Create/update/revoke fees are
+pulled from the owner allowance; draw collects gross amounts, deducts its fee and issues
+one net ordinary Note. Updates use explicit balance deltas. Revocation is a public grant
+reference operation and does not need a ZK proof. There is no prepaid Credit compatibility
+model in the current business API.
+
+Ordinary spending requires private authorization. An explicit permissionless owner sweep
+can withdraw disclosed Notes only to their original owner, without outputs, funding or a
+fee, as required by the current circuit. Preparation and final export recheck membership,
+consumption, revocation, balances, allowance and public funding/revocation authorization.
+
+## Synchronization and storage
+
+Session refresh returns an opaque staged handle with serializable `wallet_requests`.
+The host returns a direct response array. Each response has `version`, `id`, `ownerAddress`,
+`method`, and exactly one `result` or `error: {code}`. Only `WALLET_NOT_RECIPIENT`
+skips a candidate; other errors abort without state changes.
+Apply rechecks canonical data and atomically commits through a revision CAS. Unlock or
+transport failures leave the work pending. Oversized staged refreshes fail without writes;
+select a smaller block range to remain within the native batch limits. Inventory and Credit
+role state remain separate.
+
+`EncryptedWalletStore` binds AES-GCM records to scope and revision. Hosts can supply an
+atomic encrypted-record backend; the `sqlite` feature supplies persistent SQLite with
+cross-connection transactional CAS. Keys and private wallet authorization witnesses are
+not journaled. Submitted call/hash and public signatures can be retained for reconciliation.
+
+## Proving and native integration
+
+Noir 1.0.0 / BB 6.0.0 release metadata and VK hashes are bundled with the prover crate.
+Circuit files and tool binaries are explicit authenticated host assets, not silent remote
+services. `NativeProver` accepts a host `WitnessExecutor`, including the external Noir CLI
+adapter; a mobile host can use its embedded native ACVM. Blocking RPC/proving work belongs
+off the UI thread.
+
+`crates/invisi-sdk-ffi/include/invisi_wallet.h` provides length-delimited borrowed inputs
+and owned JSON output. Release every output with `invisi_wallet_free`. Swift can call the
+C ABI; Android can forward it from JNI. React Native uses `@invisi-labs/native-wallet`
+for JSON transport. Platform binaries and the consuming App are separate integrations.
+Existing invoice/database `privacy_*` C symbols remain for the current App bridge and are
+distinct from the current Note/Credit business models.
+
+The workspace also retains the existing App integration: `invisi-sdk-payer` builds approve/pay-open/pay-blind calldata, and the core invoice APIs use canonical 32-byte nonces. Core exports `derive_nullifier_key`, `derive_change_nullifier_key`, `compute_identity_commitment`, `compute_payment_commitment`, `compute_payment_nullifier`, and `compute_change_commitment`. Corresponding `privacy_*` C exports remain in the FFI crate alongside native wallet requests. The SDK facade exposes the calldata builders through `invisi_sdk::payer`.
+
+## Examples and verification
+
+```sh
+cargo run -p invisi-sdk-examples --bin note-output
+cargo check -p invisi-sdk-examples --all-targets --all-features
+python3 scripts/check-english.py
+cargo fmt --all --check
+cargo test --workspace --all-features
+cargo test --workspace --all-features --release
+cargo build -p invisi-sdk-ffi --release
 ```
 
-调用者要把 FFI 符号透传到自家 staticlib/cdylib 时，加一行 re-export 让 dead-code eliminator 保留它们：
-```rust
-// 在 mobile/rust/src/lib.rs 顶层
-pub use invisi_sdk::*;
-```
-
-C/Swift/Kotlin 侧通过 FFI bridge 调用：
-```rust
-// FFI exported (in invisi-sdk-ffi)
-#[no_mangle]
-pub extern "C" fn privacy_compute_identity_commitment(...) { ... }
-#[no_mangle]
-pub extern "C" fn privacy_build_pay_open_calldata(...) { ... }
-```
-
-链接 `libinvisi_sdk.a`（静态库）或 `.dylib`（动态库）。
-
-### Cargo 依赖 — 外部（其他 Rust 项目）
-
-若为独立 Rust 项目，可依赖 core crate（无 alloy）：
-
-```toml
-[dependencies]
-invisi-sdk-core = { git = "https://github.com/invisi-lab/invisi-sdk-rust", tag = "v0.1.0" }
-```
-
-或依赖完整 workspace：
-
-```toml
-[dependencies]
-invisi-sdk-payer = { git = "https://github.com/invisi-lab/invisi-sdk-rust", tag = "v0.1.0" }
-```
-
-### 例子
-
-```rust
-// 依赖 invisi-sdk-core（无 alloy，可 WASM）
-use invisi_sdk_core::derive::{derive_nullifier_key, compute_identity_commitment, compute_payment_commitment};
-use invisi_sdk_core::nonce::generate_nonce;
-
-let master_key: [u8; 32] = /* 从 OS 安全存储读取 */;
-let invoice_id: [u8; 16] = /* 服务端分配 */;
-let receiving_addr: [u8; 20] = /* EVM 地址 */;
-
-let nk: [u8; 32] = derive_nullifier_key(&master_key, &invoice_id);
-let identity: [u8; 32] = compute_identity_commitment(&nk, &receiving_addr);
-
-// 付款方扫码后用 (identity, token, amount, nonce) 算 paymentCommitment 上链
-let token: [u8; 20] = /* USDT etc */;
-let amount: [u8; 32] = /* big-endian raw wei */;
-let nonce: [u8; 32] = generate_nonce(); // 付款方随机 32 byte
-let pc: [u8; 32] = compute_payment_commitment(1u64, &identity, &token, &amount, &nonce);
-
-// 构造链上 calldata（需依赖 invisi-sdk-payer crate，见 [dependencies] invisi-sdk-payer）
-// use invisi_sdk_payer::build_pay_open_calldata;
-```
-
-## 测试
-
-```bash
-cargo test                          # 全部测试 (含 ignored protocol vectors)
-cargo test --ignored                # 仅跑 ignored 测试
-cargo test --release                # release 模式跑测试 (性能基准)
-```
-
-## 移动端集成
-
-### invisi-pay-app 迁移指引
-
-iOS / Android React Native 应用 [`invisi-pay-app`](https://github.com/invisi-lab/invisi-pay-app) 需从单 crate 依赖迁移到 workspace：
-
-**Step 1: 更新 `apps/mobile/rust/Cargo.toml`**
-
-```diff
-[dependencies]
-- invisi-sdk = { path = "../../../../invisi-sdk-rust" }
-+ invisi-sdk-ffi = { path = "../../../../invisi-sdk-rust/crates/invisi-sdk-ffi" }
-```
-
-**Step 2: Rust import 路径不变（关键点：`[lib].name` 覆盖 dep key）**
-
-ffi crate 的 `[lib].name = "invisi_sdk"`，所以 Rust 用 `invisi_sdk` 路径（**不是** `invisi_sdk_ffi`）。`use invisi_sdk::*` 继续工作：
-
-```rust
-use invisi_sdk::derive::compute_identity_commitment;
-use invisi_sdk::nonce::generate_nonce;
-```
-
-**Step 3: C/Swift 链接不变**
-
-- iOS: `libinvisi_sdk.a` 链接方式同前
-- Android: `libinvisi_sdk.so` 链接方式同前
-- 所有 FFI 符号 `privacy_*` 继续导出
-
-### 本 SDK 架构
-
-- **invisi-sdk-core**：纯密码学，无 alloy，可独立编译 WASM、iOS、Android 库。
-- **invisi-sdk-payer**：链上交互（calldata 构造），依赖 alloy（自包含，不依赖 core）。
-- **invisi-sdk-ffi**：统一 FFI 入口，导出所有 C ABI，对 app 端透明。
-
-其中 **子项目②（prover）**：`invisi-sdk-prover` 为独立 crate（尚未实现），未来在 workspace 引入。
-
-## License
-
-Apache-2.0
+Live examples require `--execute` before opening network/storage and print unsigned calls
+for the host signer. See [examples](examples/README.md) and the
+[shared capability matrix](docs/sdk-parity.md) for scope, environment and reproduction.
+No release, push or App migration is performed by these commands.

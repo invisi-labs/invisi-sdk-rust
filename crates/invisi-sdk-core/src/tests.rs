@@ -8,10 +8,10 @@ use super::domain::*;
 
 #[test]
 fn domain_constants_match_protocol() {
-    assert_eq!(D_NKEY,   1);
-    assert_eq!(D_IDENT,  2);
-    assert_eq!(D_PAY,    3);
-    assert_eq!(D_NULL,   4);
+    assert_eq!(D_NKEY, 1);
+    assert_eq!(D_IDENT, 2);
+    assert_eq!(D_PAY, 3);
+    assert_eq!(D_NULL, 4);
     assert_eq!(D_DERIVE, 8);
     assert_eq!(D_CHANGE_NKEY, 11);
 }
@@ -60,7 +60,10 @@ use super::derive::*;
 fn nullifier_key_deterministic() {
     let mk = [42u8; 32];
     let inv = [7u8; 16];
-    assert_eq!(derive_nullifier_key(&mk, &inv), derive_nullifier_key(&mk, &inv));
+    assert_eq!(
+        derive_nullifier_key(&mk, &inv),
+        derive_nullifier_key(&mk, &inv)
+    );
 }
 
 #[test]
@@ -83,7 +86,10 @@ fn nullifier_key_varies_with_invoice() {
 fn identity_commitment_deterministic() {
     let nk = [1u8; 32];
     let addr = [2u8; 20];
-    assert_eq!(compute_identity_commitment(&nk, &addr), compute_identity_commitment(&nk, &addr));
+    assert_eq!(
+        compute_identity_commitment(&nk, &addr),
+        compute_identity_commitment(&nk, &addr)
+    );
 }
 
 #[test]
@@ -91,7 +97,10 @@ fn identity_commitment_varies_with_address() {
     let nk = [1u8; 32];
     let a1 = [1u8; 20];
     let a2 = [2u8; 20];
-    assert_ne!(compute_identity_commitment(&nk, &a1), compute_identity_commitment(&nk, &a2));
+    assert_ne!(
+        compute_identity_commitment(&nk, &a1),
+        compute_identity_commitment(&nk, &a2)
+    );
 }
 
 #[test]
@@ -174,7 +183,10 @@ fn change_nullifier_key_deterministic() {
     let pc = [9u8; 32];
     let a = derive_change_nullifier_key(&mk, &pc);
     let b = derive_change_nullifier_key(&mk, &pc);
-    assert_eq!(a, b, "same (masterKey, paymentCommitment) must yield same key");
+    assert_eq!(
+        a, b,
+        "same (masterKey, paymentCommitment) must yield same key"
+    );
 }
 
 #[test]
@@ -186,8 +198,8 @@ fn change_nullifier_key_varies_with_salt() {
     );
 }
 
-// 跨语言向量对齐（HARD GATE）——期望值来自 invisi-sdk-go/core/testdata/vectors.json
-// 的 deriveChangeNullifierKey 组。输入以 Fr 十进制表示成 32 字节 BE。
+// Cross-language vectors from the Go core deriveChangeNullifierKey fixtures.
+// Inputs are decimal scalars encoded as 32-byte big-endian words.
 #[test]
 fn xlang_vector_change_nullifier_key() {
     // payerMasterKey=100, paymentCommitment=200
@@ -206,13 +218,12 @@ fn xlang_vector_change_nullifier_key() {
     );
 }
 
-// changeCommitment 向量（compute_change_commitment 已存在，此测试锁定其对齐）：
-// chainId=1, changeNullifierKey=<第一条 deriveChangeNullifierKey 输出>, receivingAddress=2457,
+// Lock change commitments to the canonical cross-language vector.
+// chainId=1, change key from the first vector, receivingAddress=2457.
 // token=2748, amount=250, nonce=7  →  0x2504563f7319b051d7c1d94aa976daa69082c3b66f43456b92530a35142d98c4
 #[test]
 fn xlang_vector_change_commitment() {
-    let cnk =
-        hex_to_32("09dfcd6f144e3bf69b27da5ef2bb87274f1082e035ddb91b37bfc6702825123a");
+    let cnk = hex_to_32("09dfcd6f144e3bf69b27da5ef2bb87274f1082e035ddb91b37bfc6702825123a");
     let got = compute_change_commitment(
         1,
         &cnk,
@@ -227,7 +238,7 @@ fn xlang_vector_change_commitment() {
     );
 }
 
-// —— 小工具（跨语言向量对齐测试专用）——
+// Helpers for cross-language scalar vectors.
 fn u256_be(v: u64) -> [u8; 32] {
     let mut o = [0u8; 32];
     o[24..].copy_from_slice(&v.to_be_bytes());
@@ -247,7 +258,9 @@ fn hex_to_32(s: &str) -> [u8; 32] {
 
 #[test]
 fn change_commitment_equals_identity_then_payment() {
-    use crate::derive::{compute_change_commitment, compute_identity_commitment, compute_payment_commitment};
+    use crate::derive::{
+        compute_change_commitment, compute_identity_commitment, compute_payment_commitment,
+    };
     let change_nk = [7u8; 32];
     let change_addr = [9u8; 20];
     let token = [3u8; 20];
@@ -257,7 +270,8 @@ fn change_commitment_equals_identity_then_payment() {
 
     let rcv = compute_identity_commitment(&change_nk, &change_addr);
     let expected = compute_payment_commitment(chain_id, &rcv, &token, &amount, &nonce);
-    let got = compute_change_commitment(chain_id, &change_nk, &change_addr, &token, &amount, &nonce);
+    let got =
+        compute_change_commitment(chain_id, &change_nk, &change_addr, &token, &amount, &nonce);
     assert_eq!(got, expected);
 }
 
@@ -265,7 +279,10 @@ use super::error::Error;
 
 #[test]
 fn error_codes_stable() {
-    assert_eq!(Error::MasterKeyMissing("m1".into()).code(), "MASTERKEY_MISSING");
+    assert_eq!(
+        Error::MasterKeyMissing("m1".into()).code(),
+        "MASTERKEY_MISSING"
+    );
     assert_eq!(Error::NullifierIsZero.code(), "NULLIFIER_ZERO");
     assert_eq!(Error::PoolSizeOutOfRange.code(), "POOL_SIZE_OUT_OF_RANGE");
     assert_eq!(Error::EncryptFailed.code(), "ENCRYPT_FAILED");
@@ -281,14 +298,14 @@ fn error_display_includes_context() {
 
 #[test]
 fn generate_nonce_in_field_and_random() {
-    use crate::nonce::generate_nonce;
     use crate::field::bytes_to_field;
+    use crate::nonce::generate_nonce;
     let a = generate_nonce();
     let b = generate_nonce();
-    assert_ne!(a, b, "两次随机 nonce 不应相同");
-    // 落在 field 内：解码再编码应等幂（已 < p）
+    assert_ne!(a, b, "independent random nonces must differ");
+    // Canonical field encoding must survive a decode/encode round trip.
     let round = crate::field::field_to_bytes_be(bytes_to_field(&a));
-    assert_eq!(round, a, "nonce 应已是 field 内规范 32 字节");
+    assert_eq!(round, a, "nonce must be a canonical 32-byte field word");
 }
 
 use super::pool::*;
@@ -383,7 +400,10 @@ fn cipher_tampered_tag_fails() {
     let mut ct = encrypt_with_key(&key, b"secret").unwrap();
     let last = ct.len() - 1;
     ct[last] ^= 0xff;
-    assert!(matches!(decrypt_with_key(&key, &ct), Err(Error::DecryptFailed)));
+    assert!(matches!(
+        decrypt_with_key(&key, &ct),
+        Err(Error::DecryptFailed)
+    ));
 }
 
 #[test]
@@ -391,7 +411,10 @@ fn cipher_short_input_rejected() {
     let key = [1u8; 32];
     // 39 bytes < 24 (nonce) + 16 (tag) — malformed
     let too_short = vec![0u8; 39];
-    assert!(matches!(decrypt_with_key(&key, &too_short), Err(Error::CiphertextMalformed)));
+    assert!(matches!(
+        decrypt_with_key(&key, &too_short),
+        Err(Error::CiphertextMalformed)
+    ));
 }
 
 #[test]
@@ -417,7 +440,10 @@ fn db_enc_key_isolated_from_payment_keys() {
     let inv = [1u8; 16];
     let db_key = db_enc_key_from_master(&mk);
     let nk = derive_nullifier_key(&mk, &inv);
-    assert_ne!(db_key, nk, "domain separation must isolate D_DERIVE from D_NKEY");
+    assert_ne!(
+        db_key, nk,
+        "domain separation must isolate D_DERIVE from D_NKEY"
+    );
 }
 
 #[test]
@@ -461,7 +487,10 @@ fn protocol_vector_nullifier_key() {
     let master_key: [u8; 32] = unimplemented!("vector: master_key");
     let invoice_id: [u8; 16] = unimplemented!("vector: invoice_id");
     let expected: [u8; 32] = unimplemented!("vector: expected nullifier_key");
-    assert_eq!(super::derive::derive_nullifier_key(&master_key, &invoice_id), expected);
+    assert_eq!(
+        super::derive::derive_nullifier_key(&master_key, &invoice_id),
+        expected
+    );
 }
 
 #[test]
@@ -470,7 +499,10 @@ fn protocol_vector_identity_commitment() {
     let nullifier_key: [u8; 32] = unimplemented!("vector: nullifier_key");
     let receiving_address: [u8; 20] = unimplemented!("vector: receiving_address");
     let expected: [u8; 32] = unimplemented!("vector: expected identity_commitment");
-    assert_eq!(super::derive::compute_identity_commitment(&nullifier_key, &receiving_address), expected);
+    assert_eq!(
+        super::derive::compute_identity_commitment(&nullifier_key, &receiving_address),
+        expected
+    );
 }
 
 #[test]
@@ -483,7 +515,13 @@ fn protocol_vector_payment_commitment() {
     let nonce: [u8; 32] = unimplemented!("vector: nonce");
     let expected: [u8; 32] = unimplemented!("vector: expected payment_commitment");
     assert_eq!(
-        super::derive::compute_payment_commitment(chain_id, &identity_commitment, &token, &amount, &nonce),
+        super::derive::compute_payment_commitment(
+            chain_id,
+            &identity_commitment,
+            &token,
+            &amount,
+            &nonce
+        ),
         expected
     );
 }
@@ -498,20 +536,21 @@ fn protocol_vector_payment_nullifier() {
     let nonce: [u8; 32] = unimplemented!("vector: nonce");
     let expected: [u8; 32] = unimplemented!("vector: expected payment_nullifier");
     assert_eq!(
-        super::derive::compute_payment_nullifier(&nullifier_key, chain_id, &token, &amount, &nonce).unwrap(),
+        super::derive::compute_payment_nullifier(&nullifier_key, chain_id, &token, &amount, &nonce)
+            .unwrap(),
         expected
     );
 }
 
 // ==================== Nexus alignment vectors (HARD GATE) ====================
 //
-// 取自 invisi-nexus/pkg/kms/poseidon2_test.go (lines 11-37).
-// 三个 vector 与 Noir 电路 + @aztec/bb.js 对账过 — 任何一个不通过都意味本仓
-// Poseidon2 实现与协议不兼容, 必须立即修. 不要在没改 poseidon.rs 的情况下
-// 修改这些 expected 值.
+// Taken from the Nexus Poseidon2 alignment fixtures.
+// These vectors agree with Noir circuits and Aztec Poseidon2.
+// A mismatch means this implementation is incompatible with the protocol.
+// Never update expected values without investigating the hash implementation.
 
-use ark_bn254::Fr;
 use super::poseidon::hash as raw_hash;
+use ark_bn254::Fr;
 
 fn fr_from_hex(s: &str) -> Fr {
     use ark_ff::PrimeField;
@@ -524,12 +563,20 @@ fn nexus_vector_hash2_one_two() {
     let inputs = [Fr::from(1u64), Fr::from(2u64)];
     let got = raw_hash(&inputs);
     let want = fr_from_hex("038682aa1cb5ae4e0a3f13da432a95c77c5c111f6f030faf9cad641ce1ed7383");
-    assert_eq!(got, want, "hash(1,2) MUST match Aztec Poseidon2 / Noir circuit / bb.js");
+    assert_eq!(
+        got, want,
+        "hash(1,2) MUST match Aztec Poseidon2 / Noir circuit / bb.js"
+    );
 }
 
 #[test]
 fn nexus_vector_hash4_one_two_three_four() {
-    let inputs = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64), Fr::from(4u64)];
+    let inputs = [
+        Fr::from(1u64),
+        Fr::from(2u64),
+        Fr::from(3u64),
+        Fr::from(4u64),
+    ];
     let got = raw_hash(&inputs);
     let want = fr_from_hex("130bf204a32cac1f0ace56c78b731aa3809f06df2731ebcf6b3464a15788b1b9");
     assert_eq!(got, want, "hash(1,2,3,4) MUST match Aztec Poseidon2");
@@ -540,5 +587,8 @@ fn nexus_vector_hash2_zero_zero() {
     let inputs = [Fr::from(0u64), Fr::from(0u64)];
     let got = raw_hash(&inputs);
     let want = fr_from_hex("0b63a53787021a4a962a452c2921b3663aff1ffd8d5510540f8e659e782956f1");
-    assert_eq!(got, want, "hash(0,0) MUST match Aztec Poseidon2 (zero-zero edge case)");
+    assert_eq!(
+        got, want,
+        "hash(0,0) MUST match Aztec Poseidon2 (zero-zero edge case)"
+    );
 }

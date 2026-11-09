@@ -3,18 +3,25 @@ name = "invisi-sdk-core"
 version = "0.1.0"
 edition = "2021"
 authors = ["InvisiPay team"]
-license = "Apache-2.0"
-description = "InvisiPay protocol core crypto — Poseidon2, commitment derivation, AEAD field encryption"
 repository = "https://github.com/invisi-lab/invisi-sdk-rust"
-
-# 注意：core 不设 [lib] name —— 默认 crate 名 invisi_sdk_core。
-# 只有 invisi-sdk-ffi 用 name = "invisi_sdk"（见 ffi Cargo.toml），避免双 crate 同名冲突。
+license = "Apache-2.0"
+description = "Invisi SDK core capabilities"
 
 [dependencies]
+alloy-primitives = { version = "0.8", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1.0"
+hex = "0.4"
 ark-bn254 = { version = "0.4", default-features = false, features = ["scalar_field"] }
 ark-ff = { version = "0.4", default-features = false }
 chacha20poly1305 = "0.10"
 rand = "0.8"
-thiserror = "1.0"
+sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
-hex = "0.4"
+base64 = "0.22"
+aes-gcm = "0.10"
+hkdf = "0.12"
+k256 = { version = "0.13", features = ["ecdh", "ecdsa"] }
+zeroize = "1"
+decaf377-fmd = "=2.1.1"

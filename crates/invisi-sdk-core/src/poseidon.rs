@@ -1,27 +1,16 @@
-//! Aztec Barretenberg BN254 t=4 Poseidon2 sponge hash.
-//!
-//! 与 `../invisi-nexus/pkg/kms/poseidon2.go` 1:1 对齐 (bit-perfect):
-//!   - Sponge: RATE=3, capacity=1, IV=N*2^64
-//!   - Permutation: t=4, RF=8 full rounds, RP=56 partial rounds, d=5 S-box
-//!   - 与 Noir 电路 + @aztec/bb.js poseidon2Hash 输出位对位一致
-//!
-//! 3 个 alignment vectors (`hash(1,2)` / `hash(1,2,3,4)` / `hash(0,0)`) 是硬门 —
-//! 见 `tests.rs::nexus_vector_*`. 任何一个不通过都意味实现与协议不兼容.
+//! Barretenberg BN254 Poseidon2: width 4, rate 3, RF=8, RP=56, exponent 5.
+//! Alignment vectors must match Noir and the TypeScript/Go implementations.
 
 use ark_bn254::Fr;
 
 use crate::field::{bytes_to_field, field_to_bytes_be, u64_to_field};
-use crate::poseidon_constants::{
-    internal_diag, round_constants, FULL_ROUNDS, PARTIAL_ROUNDS, T,
-};
+use crate::poseidon_constants::{internal_diag, round_constants, FULL_ROUNDS, PARTIAL_ROUNDS, T};
 
 const POSEIDON2_RATE: usize = 3;
 const HALF_FULL: usize = FULL_ROUNDS / 2;
 
 /// Domain-separated hash: prepend `domain` field to inputs, then sponge.
 ///
-/// 与 nexus `DeriveNullifierKey([D_NKEY, mk, inv])` 的"把 domain 当 input[0]"
-/// 调用风格一致.
 pub fn h(domain: u64, inputs: &[&[u8; 32]]) -> [u8; 32] {
     let mut fr_inputs: Vec<Fr> = Vec::with_capacity(1 + inputs.len());
     fr_inputs.push(u64_to_field(domain));

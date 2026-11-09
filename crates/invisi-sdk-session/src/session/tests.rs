@@ -1,0 +1,1058 @@
+use super::*;
+use crate::{
+    protocol::{IInvisiProtocol as abi, InvisiProtocol as P},
+    prover::{ProofBundle, ProofStatement, Prover, ProvingRequest},
+    rpc::{CanonicalLog, CanonicalReceipt, CanonicalTransaction, Membership, MembershipInput},
+    sdk::{ChainState, TransferPreparation, WalletResponse},
+};
+use alloy_sol_types::SolEvent;
+use serde_json::json;
+use std::collections::BTreeSet;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex,
+};
+fn block(n: u64) -> CanonicalBlock {
+    CanonicalBlock {
+        number: n,
+        hash: B256::with_last_byte(n as u8),
+        parent_hash: B256::with_last_byte(n.saturating_sub(1) as u8),
+        timestamp: 2_000_000_000 + n,
+    }
+}
+fn context() -> ProtocolContext {
+    ProtocolContext {
+        chain_id: 31337,
+        protocol_address: U256::from(4660),
+    }
+}
+fn key(n: u8) -> [u8; 32] {
+    let mut key = [0; 32];
+    key[31] = n;
+    key
+}
+fn wallet(n: u8) -> Wallet {
+    let owner = if n == 1 {
+        "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf"
+    } else {
+        "0x2b5ad5c4795c026514f8317c7a215e218dccd6cf"
+    };
+    let base = Wallet::from_owner(owner.parse().unwrap()).unwrap();
+    let q = base
+        .prepare_request("public", "wallet.public", serde_json::json!({}))
+        .unwrap();
+    let r: WalletResponse =
+        serde_json::from_value(crate::wallet::execute(&key(n), &q.as_value()).unwrap()).unwrap();
+    Wallet::from_response(&q, &r).unwrap()
+}
+#[derive(Default)]
+struct Chain {
+    height: std::sync::atomic::AtomicU64,
+    reorg: AtomicBool,
+    spent: Mutex<BTreeSet<B256>>,
+    roots: Mutex<BTreeSet<B256>>,
+}
+impl ChainState for Chain {
+    fn context(&self) -> ProtocolContext {
+        context()
+    }
+    fn snapshot(&self) -> Result<CanonicalBlock> {
+        Ok(block(self.height.load(Ordering::SeqCst).max(10)))
+    }
+    fn canonical(&self, b: &CanonicalBlock) -> Result<()> {
+        if self.reorg.load(Ordering::SeqCst) || *b != block(b.number) {
+            return Err("chain reorg".into());
+        }
+        Ok(())
+    }
+    fn known_root(&self, _: u64, root: B256, _: &CanonicalBlock) -> Result<bool> {
+        Ok(self.roots.lock().unwrap().contains(&root))
+    }
+    fn nullifier_spent(&self, n: B256, _: &CanonicalBlock) -> Result<bool> {
+        Ok(self.spent.lock().unwrap().contains(&n))
+    }
+    fn credit_revoked(
+        &self,
+        _: Address,
+        _: Address,
+        _: u64,
+        _: u16,
+        _: &CanonicalBlock,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+    fn token_balance_allowance(
+        &self,
+        _: Address,
+        _: Address,
+        _: &CanonicalBlock,
+    ) -> Result<(U256, U256)> {
+        Ok((U256::MAX, U256::MAX))
+    }
+    fn credit_allocation(&self, _: Address, _: Address, _: &CanonicalBlock) -> Result<(u64, u16)> {
+        Ok((1, 0))
+    }
+}
+struct Source {
+    chain: Arc<Chain>,
+    receipt: Mutex<CanonicalReceipt>,
+    transaction: Mutex<Option<CanonicalTransaction>>,
+    proofs: Mutex<BTreeMap<B256, (u64, u16, [U256; 16], U256)>>,
+}
+impl SessionSource for Source {
+    fn context(&self) -> ProtocolContext {
+        context()
+    }
+    fn deployment_start(&self) -> u64 {
+        0
+    }
+    fn indexed_head(&self) -> Result<CanonicalBlock> {
+        Ok(block(10))
+    }
+    fn block(&self, n: u64) -> Result<CanonicalBlock> {
+        let b = block(n);
+        self.chain.canonical(&b)?;
+        Ok(b)
+    }
+    fn discover(&self, from: u64, to: u64) -> Result<Vec<B256>> {
+        let r = self.receipt.lock().unwrap();
+        Ok(if (from..=to).contains(&r.block.number) {
+            vec![r.transaction_hash]
+        } else {
+            vec![]
+        })
+    }
+    fn receipt(&self, hash: B256) -> Result<Option<CanonicalReceipt>> {
+        let r = self.receipt.lock().unwrap();
+        Ok(if r.transaction_hash == hash {
+            Some(r.clone())
+        } else {
+            None
+        })
+    }
+    fn transaction(&self, _: B256) -> Result<Option<CanonicalTransaction>> {
+        Ok(self.transaction.lock().unwrap().clone())
+    }
+    fn membership(&self, i: &MembershipInput, b: &CanonicalBlock) -> Result<Membership> {
+        let p = self.proofs.lock().unwrap();
+        let (tree, index, path, root) = p.get(&i.commitment).ok_or("proof unavailable")?;
+        Ok(Membership {
+            tree_id: *tree,
+            leaf_index: *index as u32,
+            leaf: i.commitment,
+            root: sdk::field_word(*root),
+            path: path.iter().map(|n| sdk::field_word(*n)).collect(),
+            block: b.clone(),
+        })
+    }
+}
+fn log<E: SolEvent>(event: &E, index: u32) -> CanonicalLog {
+    let e = event.encode_log_data();
+    CanonicalLog {
+        address: sdk::word_address(context().protocol_address).unwrap(),
+        topics: e.topics().to_vec(),
+        data: e.data.to_vec(),
+        log_index: index,
+    }
+}
+struct Harness {
+    session: WalletSession,
+    store: Arc<MemoryWalletStore>,
+    chain: Arc<Chain>,
+    source: Arc<Source>,
+    note: crate::note::Note,
+    commitment: B256,
+}
+fn harness() -> Harness {
+    let wallet = wallet(1);
+    let note = crate::note::Note {
+        context: context(),
+        owner_address: sdk::address_word(wallet.owner_address()),
+        token_address: U256::from(22136),
+        amount: U256::from(70),
+        nonce: U256::from(123),
+        payload: vec![1, 2],
+    };
+    let commitment = sdk::field_word(note.commitment().unwrap());
+    let delivery = crate::delivery::DeliveryContext {
+        context: context(),
+        token_address: note.token_address,
+        output_commitment: U256::from_be_slice(commitment.as_slice()),
+    };
+    let keys = wallet.receiving_keys().unwrap();
+    let ciphertext =
+        crate::delivery::encrypt_note(&keys.viewing_public_key, &note, &delivery).unwrap();
+    let clue = crate::fmd::create_clue(&keys.clue_key).unwrap();
+    let path = [U256::ZERO; 16];
+    let root = sdk::merkle_root(U256::from_be_slice(commitment.as_slice()), 0, &path).unwrap();
+    let chain = Arc::new(Chain::default());
+    chain.roots.lock().unwrap().insert(sdk::field_word(root));
+    let insert = P::CommitmentsInserted {
+        treeId: U256::from(1),
+        startLeafIndex: 0,
+        commitments: vec![commitment],
+    };
+    let shield = P::Shield {
+        token: sdk::word_address(note.token_address).unwrap(),
+        payer: wallet.owner_address(),
+        amount: note.amount,
+        treeId: U256::from(1),
+        startLeafIndex: 0,
+        deliveries: vec![abi::Delivery {
+            ciphertext: ciphertext.into(),
+            clue: clue.into(),
+        }],
+        deadline: U256::from(2_000_000_100u64),
+    };
+    let receipt = CanonicalReceipt {
+        transaction_hash: B256::with_last_byte(9),
+        block: block(10),
+        success: true,
+        logs: vec![log(&insert, 0), log(&shield, 1)],
+    };
+    let mut proofs = BTreeMap::new();
+    proofs.insert(commitment, (1, 0, path, root));
+    let source = Arc::new(Source {
+        chain: chain.clone(),
+        receipt: Mutex::new(receipt),
+        transaction: Mutex::new(None),
+        proofs: Mutex::new(proofs),
+    });
+    let store = Arc::new(MemoryWalletStore::default());
+    let session = WalletSession::connect(
+        Invisi::new(chain.clone()),
+        wallet,
+        store.clone(),
+        source.clone(),
+        "test",
+    )
+    .unwrap();
+    Harness {
+        session,
+        store,
+        chain,
+        source,
+        note,
+        commitment,
+    }
+}
+fn responses(pending: &PendingWalletRefresh) -> Vec<sdk::WalletResponse> {
+    let requests: Vec<_> = pending
+        .wallet_requests()
+        .iter()
+        .map(sdk::WalletRequest::as_value)
+        .collect();
+    crate::wallet::execute_batch(&key(1), &requests)
+        .unwrap()
+        .into_iter()
+        .map(|value| serde_json::from_value(value).unwrap())
+        .collect()
+}
+fn nonmatch(q: &sdk::WalletRequest) -> sdk::WalletResponse {
+    serde_json::from_value(json!({"version":q.version,"id":q.id,"ownerAddress":q.owner_address,"method":q.method,"error":{"code":"WALLET_NOT_RECIPIENT"}})).unwrap()
+}
+#[test]
+fn batch_member_errors_do_not_commit_and_reordered_retries_succeed() {
+    let h = harness();
+    let pending = h.session.refresh(RefreshOptions::from_block(0)).unwrap();
+    let before = h.session.snapshot().unwrap();
+    let mut replies = responses(&pending);
+    replies[0].outcome = sdk::WalletOutcome::Error {
+        error: sdk::WalletError {
+            code: "WALLET_LOCKED".into(),
+        },
+    };
+    assert!(pending.apply_wallet_responses(&replies).is_err());
+    assert_eq!(h.session.snapshot().unwrap().revision, before.revision);
+    assert!(h.session.snapshot().unwrap().notes.is_empty());
+    let mut replies = responses(&pending);
+    replies.reverse();
+    pending.apply_wallet_responses(&replies).unwrap();
+    assert_eq!(h.session.snapshot().unwrap().notes.len(), 1);
+}
+fn synced() -> Harness {
+    let h = harness();
+    let pending = h.session.refresh(RefreshOptions::from_block(0)).unwrap();
+    pending
+        .apply_wallet_responses(&responses(&pending))
+        .unwrap();
+    h
+}
+fn transfer(h: &Harness) -> TransferPreparation {
+    TransferPreparation {
+        token: sdk::word_address(h.note.token_address).unwrap(),
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        withdrawal: Some((h.session.wallet.owner_address(), h.note.amount)),
+        funding: sdk::empty_funding(),
+        fee: sdk::Fee::default(),
+        deadline: 2_000_000_100,
+        automatic_change: false,
+    }
+}
+#[test]
+fn stages_native_requests_without_state_writes_and_retries_rejected_responses() {
+    let h = harness();
+    let pending = h.session.refresh(RefreshOptions::from_block(0)).unwrap();
+    assert_eq!(pending.wallet_requests().len(), 1);
+    assert_eq!(h.session.snapshot().unwrap().revision, 0);
+    let mut replies = responses(&pending);
+    let valid = replies.clone();
+    replies[0].id = "wrong".into();
+    assert!(pending.apply_wallet_responses(&replies).is_err());
+    assert_eq!(h.session.snapshot().unwrap().revision, 0);
+    assert!(pending.apply_wallet_responses(&[]).is_err());
+    pending.apply_wallet_responses(&valid).unwrap();
+    assert_eq!(
+        h.session
+            .balance(sdk::word_address(h.note.token_address).unwrap())
+            .unwrap()
+            .available,
+        Some(U256::from(70))
+    );
+    assert!(pending.apply_wallet_responses(&valid).is_err());
+}
+#[test]
+fn refresh_rejects_forged_plaintext_wrong_membership_reorg_and_stale_revision() {
+    let h = harness();
+    let pending = h.session.refresh(RefreshOptions::from_block(0)).unwrap();
+    let mut replies = responses(&pending);
+    let result = replies[0].result_mut().unwrap();
+    let mut plain = hex::decode(
+        result["plaintext"]
+            .as_str()
+            .unwrap()
+            .trim_start_matches("0x"),
+    )
+    .unwrap();
+    plain[47] ^= 1;
+    result["plaintext"] = serde_json::json!(format!("0x{}", hex::encode(plain)));
+    assert!(pending.apply_wallet_responses(&replies).is_err());
+    assert_eq!(h.session.snapshot().unwrap().revision, 0);
+    let valid = responses(&pending);
+    h.chain.reorg.store(true, Ordering::SeqCst);
+    assert!(pending.apply_wallet_responses(&valid).is_err());
+    h.chain.reorg.store(false, Ordering::SeqCst);
+    let mut state = h.session.snapshot().unwrap();
+    state.scope = Some(h.session.scope.clone());
+    h.store
+        .compare_and_swap(&h.session.scope.key(), 0, state)
+        .unwrap();
+    assert!(pending.apply_wallet_responses(&valid).is_err());
+}
+#[test]
+fn reservations_are_atomic_and_resume_invalidates_prior_handles() {
+    let h = synced();
+    let first = h.session.prepare_transfer(transfer(&h)).unwrap();
+    let id = first.id().to_owned();
+    assert!(h.session.prepare_transfer(transfer(&h)).is_err());
+    let resumed = h.session.resume(&id, None).unwrap();
+    assert!(first.cancel().is_err());
+    resumed.cancel().unwrap();
+    assert!(h.session.snapshot().unwrap().notes[&h.commitment]
+        .reserved_by
+        .is_none());
+    assert!(h.session.prepare_transfer(transfer(&h)).is_ok());
+}
+#[test]
+fn storage_encrypts_and_binds_scope_revision_and_ciphertext() {
+    let records = Arc::new(MemoryAtomicRecords::default());
+    let store = EncryptedWalletStore::new(records.clone(), [7; 32]).unwrap();
+    store
+        .compare_and_swap("scope-a", 0, WalletState::default())
+        .unwrap();
+    let record = records.read("scope-a").unwrap().unwrap();
+    assert!(!String::from_utf8_lossy(&record.data).contains("notes"));
+    assert_eq!(store.snapshot("scope-a").unwrap().revision, 1);
+    records.compare_and_swap("scope-b", 0, &record).unwrap();
+    assert!(store.snapshot("scope-b").is_err());
+    let mut corrupt = record.clone();
+    corrupt.revision = 2;
+    corrupt.data[13] ^= 1;
+    records.compare_and_swap("scope-a", 1, &corrupt).unwrap();
+    assert!(store.snapshot("scope-a").is_err());
+    assert!(!store.persistent());
+}
+#[test]
+fn explicit_not_recipient_is_a_no_match_and_scope_isolation_is_enforced() {
+    let h = harness();
+    let pending = h.session.refresh(RefreshOptions::from_block(0)).unwrap();
+    let replies = pending
+        .wallet_requests()
+        .iter()
+        .map(nonmatch)
+        .collect::<Vec<_>>();
+    pending.apply_wallet_responses(&replies).unwrap();
+    assert!(h.session.snapshot().unwrap().notes.is_empty());
+    let other = WalletSession::connect(
+        h.session.invisi.clone(),
+        wallet(2),
+        h.store.clone(),
+        h.source.clone(),
+        "test",
+    )
+    .unwrap();
+    assert!(other.snapshot().unwrap().notes.is_empty());
+    assert_eq!(other.snapshot().unwrap().revision, 0);
+}
+
+struct Backend;
+impl Prover for Backend {
+    fn prove(&self, r: &ProvingRequest) -> Result<ProofBundle> {
+        let s = &r.statement;
+        let proof = vec![
+            0;
+            if r.statement.target == "noir-recursive" {
+                458 * 32
+            } else {
+                32
+            }
+        ];
+        Ok(ProofBundle {
+            format_version: 1,
+            circuit_name: s.circuit_name.clone(),
+            target: s.target.clone(),
+            bb_version: "6.0.0".into(),
+            artifact_sha256: s.artifact_sha256.clone(),
+            vk_sha256: s.vk_sha256.clone(),
+            proof_sha256: crate::prover::sha256(&proof),
+            proof,
+            public_inputs: s.expected_public_inputs.clone(),
+        })
+    }
+    fn verify(&self, _: &ProofBundle, _: &ProofStatement) -> Result<bool> {
+        Ok(true)
+    }
+}
+#[test]
+fn durable_journal_omits_wallet_authorization_and_requires_reverification_on_resume() {
+    let h = synced();
+    let bob = wallet(2);
+    let mut options = transfer(&h);
+    options.withdrawal = None;
+    options.outputs = vec![sdk::NoteOutput::for_recipient(
+        context(),
+        options.token,
+        &bob,
+        U256::from(30),
+        vec![],
+    )
+    .unwrap()];
+    options.automatic_change = true;
+    let mut operation = h.session.prepare_transfer(options).unwrap();
+    let request = operation.export_wallet_request("authorize-1").unwrap();
+    let response: WalletResponse =
+        serde_json::from_value(crate::wallet::execute(&key(1), &request.as_value()).unwrap())
+            .unwrap();
+    let signature = response.result().unwrap()["signature"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let operation = operation.with_wallet_response(&response).unwrap();
+    assert_eq!(operation.phase(), sdk::Phase::Authorized);
+    let encoded = serde_json::to_string(&h.session.snapshot().unwrap()).unwrap();
+    assert!(!encoded.contains(&signature));
+    assert!(!encoded.contains("public_key_x"));
+    assert!(!encoded.contains("spending_public_key"));
+    let operation = operation.prove(&Backend, false).unwrap();
+    let id = operation.id().to_owned();
+    assert_eq!(operation.phase(), sdk::Phase::Proved);
+    let resumed = h.session.resume(&id, Some(&Backend)).unwrap();
+    assert_eq!(resumed.phase(), sdk::Phase::Proved);
+    assert!(operation.cancel().is_err());
+    let reset = h.session.resume(&id, None).unwrap();
+    assert_eq!(reset.phase(), sdk::Phase::Prepared);
+    assert!(resumed.cancel().is_err());
+    reset.cancel().unwrap();
+}
+fn tracked_sweep(h: &Harness) -> Operation {
+    let operation = h
+        .session
+        .prepare_transfer(transfer(h))
+        .unwrap()
+        .prove(&Backend, false)
+        .unwrap();
+    let mut operation = operation;
+    let call = operation
+        .calldata(h.session.wallet.owner_address())
+        .unwrap();
+    operation
+        .track_transaction(B256::with_last_byte(8))
+        .unwrap();
+    *h.source.transaction.lock().unwrap() = Some(CanonicalTransaction {
+        hash: B256::with_last_byte(8),
+        to: Some(call.to),
+        input: call.data,
+        value: call.value,
+        chain_id: context().chain_id,
+        block: Some(block(10)),
+    });
+    operation
+}
+#[test]
+fn exported_operations_cannot_cancel_and_reconciliation_checks_exact_transaction() {
+    let h = synced();
+    let operation = tracked_sweep(&h);
+    let id = operation.id().to_owned();
+    assert!(operation.cancel().is_err());
+    assert!(h.session.snapshot().unwrap().notes[&h.commitment]
+        .reserved_by
+        .is_some());
+    {
+        let mut receipt = h.source.receipt.lock().unwrap();
+        receipt.transaction_hash = B256::with_last_byte(8);
+        receipt.success = false;
+        receipt.logs.clear();
+    }
+    h.source
+        .transaction
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .input
+        .push(1);
+    assert!(h.session.reconcile(&id).is_err());
+    h.source
+        .transaction
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .input
+        .pop();
+    let pending = match h.session.reconcile(&id).unwrap() {
+        Reconciliation::Ready(v) => v,
+        _ => panic!("expected canonical reconciliation"),
+    };
+    assert!(pending.wallet_requests().is_empty());
+    pending.apply_wallet_responses(&[]).unwrap();
+    let state = h.session.snapshot().unwrap();
+    assert_eq!(state.operations[&id].status, OperationStatus::Reverted);
+    assert!(state.notes[&h.commitment].reserved_by.is_none());
+    assert!(state.discovery_through.is_some());
+}
+#[test]
+fn successful_canonical_shield_reconciliation_commits_only_after_explicit_native_responses() {
+    use alloy_sol_types::SolCall;
+    let h = harness();
+    let output =
+        sdk::NoteOutput::from_note(h.note.clone(), h.session.wallet.receiving_keys()).unwrap();
+    let mut funding = sdk::empty_funding();
+    funding.payer = h.session.wallet.owner_address();
+    funding.amount = h.note.amount;
+    let options = sdk::ShieldPreparation {
+        token: sdk::word_address(h.note.token_address).unwrap(),
+        outputs: vec![output],
+        funding,
+        fee: sdk::Fee::default(),
+        deadline: 2_000_000_100,
+    };
+    let mut operation = h.session.prepare_shield(options).unwrap().ready().unwrap();
+    let call = operation
+        .calldata(h.session.wallet.owner_address())
+        .unwrap();
+    operation
+        .track_transaction(B256::with_last_byte(9))
+        .unwrap();
+    *h.source.transaction.lock().unwrap() = Some(CanonicalTransaction {
+        hash: B256::with_last_byte(9),
+        to: Some(call.to),
+        input: call.data.clone(),
+        value: call.value,
+        chain_id: context().chain_id,
+        block: Some(block(10)),
+    });
+    let parsed = P::shieldCall::abi_decode(&call.data, true).unwrap();
+    let event = P::Shield {
+        token: parsed.p.token,
+        payer: h.session.wallet.owner_address(),
+        amount: h.note.amount,
+        treeId: U256::from(1),
+        startLeafIndex: 0,
+        deliveries: parsed._2,
+        deadline: parsed.p.deadline,
+    };
+    h.source.receipt.lock().unwrap().logs[1] = log(&event, 1);
+    let pending = match h.session.reconcile(operation.id()).unwrap() {
+        Reconciliation::Ready(v) => v,
+        _ => panic!("expected reconciliation"),
+    };
+    assert!(h.session.snapshot().unwrap().notes.is_empty());
+    let mut wrong = responses(&pending);
+    wrong[0].id = "wrong".into();
+    assert!(pending.apply_wallet_responses(&wrong).is_err());
+    assert!(h.session.snapshot().unwrap().notes.is_empty());
+    pending
+        .apply_wallet_responses(&responses(&pending))
+        .unwrap();
+    let state = h.session.snapshot().unwrap();
+    assert_eq!(
+        state.operations[operation.id()].status,
+        OperationStatus::Confirmed
+    );
+    assert_eq!(state.notes.len(), 1);
+    assert!(state.discovery_through.is_none());
+}
+
+#[test]
+fn durable_snapshot_rejects_corrupted_capacity_sources_and_authorization_flags() {
+    let h = synced();
+    let operation = h.session.prepare_transfer(transfer(&h)).unwrap();
+    let snapshot = h.session.snapshot().unwrap().operations[operation.id()]
+        .snapshot
+        .clone();
+    let value = serde_json::to_value(snapshot).unwrap();
+    for (field, patch) in [
+        ("capacity", serde_json::json!(0)),
+        ("needsAuthorization", serde_json::json!(true)),
+        ("token", serde_json::json!(Address::repeat_byte(9))),
+    ] {
+        let mut bad = value.clone();
+        bad[field] = patch;
+        let snapshot: PreparedSnapshot = serde_json::from_value(bad).unwrap();
+        assert!(
+            snapshot.restore(h.session.wallet(), None).is_err(),
+            "{field}"
+        );
+    }
+}
+#[test]
+fn credit_inventory_is_separate_and_canonical_draw_recovers_owned_successor_without_decrypting_new_envelopes(
+) {
+    use crate::credit::{CreditPolicy, CreditState, CreditUsage};
+    let h = harness();
+    let alice = wallet(1);
+    let bob = wallet(2);
+    let state = CreditDeliveryState {
+        note: CreditState {
+            context: context(),
+            token_address: h.note.token_address,
+            spender_wallet_identity: sdk::address_word(bob.owner_address()),
+            owner_wallet_identity: sdk::address_word(alice.owner_address()),
+            revocation_shard: 1,
+            revocation_slot: 0,
+            nonce: U256::from(74),
+            expiry: 2_100_000_000,
+            credit_shared_key: U256::from(75),
+            policy: CreditPolicy::default(),
+            usage: CreditUsage::default(),
+            available_credit: U256::from(400),
+            unlimited: false,
+            payload: Vec::new(),
+        },
+        owner_receiving_keys: alice.receiving_keys().unwrap().clone(),
+        spender_receiving_keys: bob.receiving_keys().unwrap().clone(),
+    };
+    let delivery_for = |state: &CreditDeliveryState, role: CreditRole| {
+        let keys = if role == CreditRole::Owner {
+            &state.owner_receiving_keys
+        } else {
+            &state.spender_receiving_keys
+        };
+        let context = crate::delivery::DeliveryContext {
+            context: context(),
+            token_address: state.note.token_address,
+            output_commitment: state.note.commitment().unwrap(),
+        };
+        abi::Delivery {
+            ciphertext: crate::delivery::encrypt_credit(
+                &keys.viewing_public_key,
+                state,
+                &context,
+                role,
+            )
+            .unwrap()
+            .into(),
+            clue: crate::fmd::create_clue(&keys.clue_key).unwrap().into(),
+        }
+    };
+    let commitment = sdk::field_word(state.note.commitment().unwrap());
+    let path = [U256::ZERO; 16];
+    let root = sdk::merkle_root(U256::from_be_slice(commitment.as_slice()), 0, &path).unwrap();
+    h.chain.roots.lock().unwrap().insert(sdk::field_word(root));
+    h.source
+        .proofs
+        .lock()
+        .unwrap()
+        .insert(commitment, (2, 0, path, root));
+    let created = P::CreditCreated {
+        token: sdk::word_address(h.note.token_address).unwrap(),
+        owner: alice.owner_address(),
+        outputTreeId: U256::from(2),
+        revocationShard: 1,
+        revocationSlot: 0,
+        creditCommitment: commitment,
+        leafIndex: 0,
+        deliveries: vec![
+            delivery_for(&state, CreditRole::Owner),
+            delivery_for(&state, CreditRole::Spender),
+        ],
+        deadline: U256::from(2_000_000_100u64),
+        feeRecipient: Address::ZERO,
+        feeAmount: U256::ZERO,
+    };
+    let insertion = P::CommitmentsInserted {
+        treeId: U256::from(2),
+        startLeafIndex: 0,
+        commitments: vec![commitment],
+    };
+    h.source.receipt.lock().unwrap().logs = vec![log(&insertion, 0), log(&created, 1)];
+    let pending = h.session.refresh(RefreshOptions::from_block(0)).unwrap();
+    assert_eq!(pending.wallet_requests().len(), 2);
+    pending
+        .apply_wallet_responses(&responses(&pending))
+        .unwrap();
+    let initial = h.session.snapshot().unwrap();
+    assert_eq!(initial.credits.len(), 1);
+    assert!(initial.notes.is_empty());
+    assert_eq!(
+        initial.credits.values().next().unwrap().role,
+        CreditRole::Owner
+    );
+    let transition =
+        crate::credit::derive_credit_state(&state.note, U256::from(30), block(10).timestamp)
+            .unwrap();
+    let successor = CreditDeliveryState {
+        note: transition.state.clone(),
+        owner_receiving_keys: state.owner_receiving_keys.clone(),
+        spender_receiving_keys: state.spender_receiving_keys.clone(),
+    };
+    let output = sdk::NoteOutput::for_recipient(
+        context(),
+        sdk::word_address(h.note.token_address).unwrap(),
+        &bob,
+        U256::from(30),
+        Vec::new(),
+    )
+    .unwrap();
+    let credit_commitment = sdk::field_word(transition.state_commitment);
+    let note_commitment = output.commitment();
+    let mut credit_path = [U256::ZERO; 16];
+    credit_path[0] = U256::from_be_slice(note_commitment.as_slice());
+    let mut note_path = [U256::ZERO; 16];
+    note_path[0] = U256::from_be_slice(credit_commitment.as_slice());
+    let next_root = sdk::merkle_root(transition.state_commitment, 0, &credit_path).unwrap();
+    assert_eq!(
+        sdk::merkle_root(
+            U256::from_be_slice(note_commitment.as_slice()),
+            1,
+            &note_path
+        )
+        .unwrap(),
+        next_root
+    );
+    h.chain
+        .roots
+        .lock()
+        .unwrap()
+        .insert(sdk::field_word(next_root));
+    h.source
+        .proofs
+        .lock()
+        .unwrap()
+        .insert(credit_commitment, (3, 0, credit_path, next_root));
+    h.source
+        .proofs
+        .lock()
+        .unwrap()
+        .insert(note_commitment, (3, 1, note_path, next_root));
+    h.chain
+        .spent
+        .lock()
+        .unwrap()
+        .insert(sdk::field_word(transition.nullifier));
+    let params = abi::CreditDrawParams {
+        token: sdk::word_address(h.note.token_address).unwrap(),
+        sources: vec![abi::InputSource {
+            treeId: U256::from(2),
+            merkleRoot: sdk::field_word(root),
+        }],
+        payers: vec![abi::CreditPayer {
+            payer: alice.owner_address(),
+            amount: U256::from(30),
+        }],
+        grantRefs: vec![abi::CreditGrantRef {
+            payerIndex: U256::ZERO,
+            shard: 1,
+            slot: 0,
+        }],
+        nullifiers: vec![sdk::field_word(transition.nullifier)],
+        creditCommitments: vec![credit_commitment],
+        recoveryAmounts: vec![sdk::field_word(transition.recovery_amount)],
+        noteCommitment: note_commitment,
+        totalAmount: U256::from(30),
+        deadline: U256::from(2_000_000_100u64),
+        feeRecipient: Address::ZERO,
+        feeAmount: U256::ZERO,
+    };
+    let draw = P::CreditDraw {
+        outputTreeId: U256::from(3),
+        params,
+        leafIndices: vec![0, 1],
+        deliveries: vec![
+            delivery_for(&successor, CreditRole::Owner),
+            delivery_for(&successor, CreditRole::Spender),
+            output.delivery().clone(),
+        ],
+    };
+    let insertion = P::CommitmentsInserted {
+        treeId: U256::from(3),
+        startLeafIndex: 0,
+        commitments: vec![credit_commitment, note_commitment],
+    };
+    {
+        let mut receipt = h.source.receipt.lock().unwrap();
+        receipt.transaction_hash = B256::with_last_byte(8);
+        receipt.logs = vec![log(&insertion, 2), log(&draw, 3)];
+    }
+    let pending = h.session.refresh(RefreshOptions::from_block(0)).unwrap();
+    let no_matches = pending
+        .wallet_requests()
+        .iter()
+        .map(nonmatch)
+        .collect::<Vec<_>>();
+    pending.apply_wallet_responses(&no_matches).unwrap();
+    let after = h.session.snapshot().unwrap();
+    assert_eq!(after.credits.len(), 2);
+    assert!(after.credits[&credit_key(commitment, CreditRole::Owner)].consumed);
+    assert_eq!(
+        after.credits[&credit_key(credit_commitment, CreditRole::Owner)]
+            .delivery
+            .note
+            .available_credit,
+        U256::from(370)
+    );
+    assert!(after.notes.is_empty());
+    assert_eq!(
+        h.session
+            .balance(sdk::word_address(h.note.token_address).unwrap())
+            .unwrap()
+            .known,
+        U256::ZERO
+    );
+    let id = credit_key(credit_commitment, CreditRole::Owner);
+    let operation = h
+        .session
+        .prepare_update_credit(
+            &id,
+            crate::credit::CreditUpdateChanges::default(),
+            2_000_000_100,
+            sdk::Fee::default(),
+        )
+        .unwrap();
+    assert!(h
+        .session
+        .prepare_update_credit(
+            &id,
+            crate::credit::CreditUpdateChanges::default(),
+            2_000_000_100,
+            sdk::Fee::default()
+        )
+        .is_err());
+    let resumed = h.session.resume(operation.id(), None).unwrap();
+    assert!(operation.cancel().is_err());
+    resumed.cancel().unwrap();
+}
+
+#[test]
+fn concurrent_apply_has_one_winner_and_expiry_requires_canonical_unspent_inputs() {
+    let h = harness();
+    let pending = h.session.refresh(RefreshOptions::from_block(0)).unwrap();
+    let replies = responses(&pending);
+    let barrier = std::sync::Barrier::new(2);
+    let results = std::thread::scope(|scope| {
+        let a = scope.spawn(|| {
+            barrier.wait();
+            pending.apply_wallet_responses(&replies)
+        });
+        let b = scope.spawn(|| {
+            barrier.wait();
+            pending.apply_wallet_responses(&replies)
+        });
+        [a.join().unwrap().is_ok(), b.join().unwrap().is_ok()]
+    });
+    assert_eq!(results.iter().filter(|success| **success).count(), 1);
+    assert_eq!(h.session.snapshot().unwrap().revision, 1);
+    let mut options = transfer(&h);
+    options.deadline = 2_000_000_015;
+    let mut operation = h
+        .session
+        .prepare_transfer(options)
+        .unwrap()
+        .prove(&Backend, false)
+        .unwrap();
+    let id = operation.id().to_owned();
+    operation
+        .calldata(h.session.wallet.owner_address())
+        .unwrap();
+    h.chain.height.store(20, Ordering::SeqCst);
+    assert!(h.session.expire_operation(&id).is_err());
+    operation
+        .track_transaction(B256::with_last_byte(8))
+        .unwrap();
+    h.session.expire_operation(&id).unwrap();
+    let state = h.session.snapshot().unwrap();
+    assert_eq!(state.operations[&id].status, OperationStatus::Expired);
+    assert!(state.notes[&h.commitment].reserved_by.is_none());
+}
+#[test]
+fn same_wallet_aggregate_externalizes_tracks_and_reconciles_member_journals_atomically() {
+    let h = synced();
+    let mut state = h.session.snapshot().unwrap();
+    let mut extra = state.notes[&h.commitment].clone();
+    extra.input.note.nonce += U256::from(1);
+    extra.commitment = sdk::field_word(extra.input.note.commitment().unwrap());
+    extra.nullifier = sdk::field_word(extra.input.note.nullifier().unwrap());
+    extra.input.root = sdk::merkle_root(
+        U256::from_be_slice(extra.commitment.as_slice()),
+        extra.input.leaf_index,
+        &extra.input.path,
+    )
+    .unwrap();
+    h.chain
+        .roots
+        .lock()
+        .unwrap()
+        .insert(sdk::field_word(extra.input.root));
+    state.notes.insert(extra.commitment, extra);
+    h.session.commit(state).unwrap();
+    let first = h
+        .session
+        .prepare_transfer(transfer(&h))
+        .unwrap()
+        .prove(&Backend, true)
+        .unwrap();
+    let second = h
+        .session
+        .prepare_transfer(transfer(&h))
+        .unwrap()
+        .prove(&Backend, true)
+        .unwrap();
+    let mut operations = vec![first, second];
+    let call = h
+        .session
+        .aggregate(&Backend, &mut operations, h.session.wallet.owner_address())
+        .unwrap();
+    let snapshot = h.session.snapshot().unwrap();
+    assert!(operations
+        .iter()
+        .all(|operation| snapshot.operations[operation.id()].externalized));
+    let hash = B256::with_last_byte(8);
+    h.session.track_aggregate(&mut operations, hash).unwrap();
+    let state = h.session.snapshot().unwrap();
+    assert!(operations
+        .iter()
+        .all(|operation| state.operations[operation.id()].transaction_hash == Some(hash)));
+    *h.source.transaction.lock().unwrap() = Some(CanonicalTransaction {
+        hash,
+        to: Some(call.to),
+        input: call.data,
+        value: call.value,
+        chain_id: context().chain_id,
+        block: Some(block(10)),
+    });
+    {
+        let mut receipt = h.source.receipt.lock().unwrap();
+        receipt.transaction_hash = hash;
+        receipt.success = false;
+        receipt.logs.clear();
+    }
+    let pending = match h.session.reconcile(operations[0].id()).unwrap() {
+        Reconciliation::Ready(v) => v,
+        _ => panic!("expected group reconciliation"),
+    };
+    pending.apply_wallet_responses(&[]).unwrap();
+    let state = h.session.snapshot().unwrap();
+    assert!(operations
+        .iter()
+        .all(|operation| state.operations[operation.id()].status == OperationStatus::Reverted));
+    assert!(state.notes.values().all(|note| note.reserved_by.is_none()));
+}
+#[test]
+fn canonical_reset_keeps_uncertain_operation_inputs_reserved() {
+    let h = synced();
+    let operation = h.session.prepare_transfer(transfer(&h)).unwrap();
+    h.session.invalidate_reorg().unwrap();
+    assert!(h.session.prepare_transfer(transfer(&h)).is_err());
+    let mut options = RefreshOptions::from_block(0);
+    options.reset = true;
+    let pending = h.session.refresh(options).unwrap();
+    pending
+        .apply_wallet_responses(&responses(&pending))
+        .unwrap();
+    let state = h.session.snapshot().unwrap();
+    assert!(!state.invalidated);
+    assert_eq!(
+        state.operations[operation.id()].status,
+        OperationStatus::Reorged
+    );
+    assert_eq!(
+        state.notes[&h.commitment].reserved_by.as_deref(),
+        Some(operation.id())
+    );
+}
+
+#[test]
+fn healthy_reset_preserves_canonical_terminal_history_and_does_not_resurrect_reservations() {
+    let h = synced();
+    let original = h.source.receipt.lock().unwrap().clone();
+    let operation = tracked_sweep(&h);
+    let id = operation.id().to_owned();
+    {
+        let mut receipt = h.source.receipt.lock().unwrap();
+        receipt.transaction_hash = B256::with_last_byte(8);
+        receipt.success = false;
+        receipt.logs.clear();
+    }
+    let pending = match h.session.reconcile(&id).unwrap() {
+        Reconciliation::Ready(v) => v,
+        _ => panic!("expected mined outcome"),
+    };
+    pending.apply_wallet_responses(&[]).unwrap();
+    *h.source.receipt.lock().unwrap() = original;
+    let mut options = RefreshOptions::from_block(0);
+    options.reset = true;
+    let pending = h.session.refresh(options).unwrap();
+    pending
+        .apply_wallet_responses(&responses(&pending))
+        .unwrap();
+    let state = h.session.snapshot().unwrap();
+    assert_eq!(state.operations[&id].status, OperationStatus::Reverted);
+    assert!(state.operations[&id].resolved_at.is_some());
+    assert!(state.notes[&h.commitment].reserved_by.is_none());
+    assert_eq!(
+        h.session
+            .balance(sdk::word_address(h.note.token_address).unwrap())
+            .unwrap()
+            .available,
+        Some(h.note.amount)
+    );
+}
+
+#[test]
+fn oversized_staged_batches_fail_before_returning_a_handle_or_writing_state() {
+    let h = harness();
+    let receipt = h.source.receipt.lock().unwrap().clone();
+    let receipts = (0..1025u64)
+        .map(|n| {
+            let mut receipt = receipt.clone();
+            receipt.transaction_hash = sdk::field_word(U256::from(n + 1));
+            receipt
+        })
+        .collect();
+    let before = h.session.snapshot().unwrap();
+    let error = h
+        .session
+        .stage_refresh(
+            before.clone(),
+            block(10),
+            receipts,
+            RefreshOptions::from_block(0),
+            None,
+        )
+        .unwrap_err();
+    assert!(error.contains("smaller block range"));
+    assert_eq!(h.session.snapshot().unwrap().revision, before.revision);
+    assert!(h.session.snapshot().unwrap().notes.is_empty());
+}

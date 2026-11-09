@@ -1,6 +1,49 @@
+[package]
+name = "invisi-sdk"
+version = "0.1.0"
+edition = "2021"
+authors = ["InvisiPay team"]
+license = "Apache-2.0"
+description = "Rust SDK for InvisiPay privacy payment protocol — Aztec BN254 t=4 Poseidon2, commitment derivation, AEAD field encryption"
+repository = "https://github.com/invisi-lab/invisi-sdk-rust"
+readme = "README.md"
+keywords = ["zk", "poseidon2", "bn254", "privacy", "noir"]
+categories = ["cryptography"]
+
+[lib]
+name = "invisi_sdk"
+
+[dependencies]
+invisi-sdk-core = { path = "crates/invisi-sdk-core" }
+invisi-sdk-payer = { path = "crates/invisi-sdk-payer" }
+invisi-sdk-protocol = { path = "crates/invisi-sdk-protocol" }
+invisi-sdk-prover = { path = "crates/invisi-sdk-prover" }
+invisi-sdk-rpc = { path = "crates/invisi-sdk-rpc" }
+invisi-sdk-runtime = { path = "crates/invisi-sdk-runtime" }
+invisi-sdk-session = { path = "crates/invisi-sdk-session" }
+
+[dev-dependencies]
+alloy-primitives = { version = "0.8", features = ["serde"] }
+alloy-sol-types = { version = "0.8", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
+k256 = { version = "0.13", features = ["ecdh", "ecdsa"] }
+aes-gcm = "0.10"
+hkdf = "0.12"
+zeroize = "1"
+decaf377-fmd = "=2.1.1"
+base64 = "0.22"
+
+[features]
+default = []
+sqlite = ["invisi-sdk-session/sqlite"]
+
 [workspace]
+members = ["crates/*", "examples"]
 resolver = "2"
-members = ["crates/invisi-sdk-core", "crates/invisi-sdk-ffi", "crates/invisi-sdk-payer"]
 
 [profile.release]
 opt-level = "z"

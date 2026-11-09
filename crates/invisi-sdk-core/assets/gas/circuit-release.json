@@ -1,0 +1,17 @@
+{
+  "sourceManifestSha256": "558ff7a7538c76962b02a8eae6d76db15fd5ce47d85f42293f281e8aa8439f3f",
+  "manifests": [
+    {
+      "name": "transact-user",
+      "version": 4,
+      "formatVersion": 7,
+      "sha256": "53261bef0f4b44c44ca939d4c29d1b0a3312466d48bc56968aeb3ac0b92e7820"
+    },
+    {
+      "name": "credit",
+      "version": 7,
+      "formatVersion": 8,
+      "sha256": "11b6b4191e8a62ae891fae41b2d3f37ccae00add26701eb5171a4e296400e861"
+    }
+  ]
+}

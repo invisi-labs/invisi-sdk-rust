@@ -1,0 +1,85 @@
+[package]
+name = "invisi-sdk-examples"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "support/discovery.rs"
+
+[dependencies]
+invisi-sdk = { path = ".." }
+alloy-primitives = { version = "0.8", features = ["serde"] }
+alloy-sol-types = "0.8"
+serde_json = "1"
+hex = "0.4"
+zeroize = "1"
+
+[features]
+default = []
+sqlite = ["invisi-sdk/sqlite"]
+
+[[bin]]
+name = "note-output"
+path = "02-note/note-output.rs"
+[[bin]]
+name = "register"
+path = "01-address-registry/register.rs"
+[[bin]]
+name = "shield"
+path = "02-note/shield.rs"
+[[bin]]
+name = "transfer"
+path = "03-note/transfer.rs"
+[[bin]]
+name = "withdraw"
+path = "03-note/withdraw.rs"
+[[bin]]
+name = "aggregate"
+path = "03-note/aggregate.rs"
+[[bin]]
+name = "create-credit"
+path = "04-credit/create.rs"
+[[bin]]
+name = "draw-credit"
+path = "04-credit/draw.rs"
+[[bin]]
+name = "update-credit"
+path = "04-credit/update.rs"
+[[bin]]
+name = "revoke-credit"
+path = "04-credit/revoke.rs"
+[[bin]]
+name = "restore-session"
+path = "05-session/restore.rs"
+required-features = ["sqlite"]
+[[bin]]
+name = "send-session"
+path = "05-session/send.rs"
+required-features = ["sqlite"]
+[[bin]]
+name = "disclose-note"
+path = "06-disclosure/note.rs"
+[[bin]]
+name = "disclose-credit"
+path = "06-disclosure/credit.rs"
+
+[[bin]]
+name = "create-credit-session"
+path = "05-session/credit-create.rs"
+required-features = ["sqlite"]
+
+[[bin]]
+name = "draw-credit-session"
+path = "05-session/credit-draw.rs"
+required-features = ["sqlite"]
+
+[[bin]]
+name = "update-credit-session"
+path = "05-session/credit-update.rs"
+required-features = ["sqlite"]
+
+[[bin]]
+name = "revoke-credit-session"
+path = "05-session/credit-revoke.rs"
+required-features = ["sqlite"]

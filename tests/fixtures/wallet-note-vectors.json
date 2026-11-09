@@ -1,0 +1,387 @@
+{
+  "source": "Independent protocol Node ECDH/HKDF/AES-GCM and Poseidon2; public test keys only; mode-B Credit available balance with canonical unlimited flag and opaque payload.",
+  "context": {
+    "chainId": "31337",
+    "protocolAddress": "0x0000000000000000000000000000000000001234",
+    "tokenAddress": "0x0000000000000000000000000000000000005678",
+    "timestamp": "2000000000"
+  },
+  "owner": {
+    "viewingPrivateKey": "0x80d9cd50805bf2ff5f95f9a091add4515bebb62293c721362fd077891c23069f",
+    "viewingPublicKey": "0x0396f42bb298c8a0e74539294780d709799f9838c0b69a134f38c6d968f2921397",
+    "ownerAddress": "721457446580647751014191829380889690493307935711"
+  },
+  "spender": {
+    "viewingPrivateKey": "0x5613f6a18f143c1b79ce20c6ed92262243be54d39a4c4ecc0c724221ae277f7d",
+    "viewingPublicKey": "0x027eb25acef93b6d40d19a5349282bd5769e7a439e1c356cce1f83078545b8a7e1",
+    "ownerAddress": "247512291986854564435551364600938690683113101007"
+  },
+  "note": {
+    "ownerAddress": "721457446580647751014191829380889690493307935711",
+    "amount": "70",
+    "nonce": "123",
+    "identity": "6926912196397698361902183095122882995874769628766014824017090475773870789036",
+    "commitment": "0x2896028af6f77d679612169cfcef4831e8af4c28dd0dc00b4e60374dc80e2306",
+    "nullifier": "0x004ed6340f289ef6d34949ca0a5ead03818fb112fa9fd0e3538474f2c32e3e96",
+    "ciphertext": "0x010256b328b30c8bf5839e24058747879408bdb36241dc9c2e7c619faa12b29209670707070707070707070707070707070708080808080808080808080822a505b086bc749a1e65218db68cfaafdf8ee55a1a76a2c44fdf3f08e2a4875ec53fc60321e52376c890fd9c7a12ec6ca17e9916bcba8c45fd5c2b24f3a8a634ddca5b9d9cde45441163bb9c33c6274e2fa5ddae7f0ea0ddd94a551dcb5a9e733471",
+    "deliverySource": {
+      "envelopeType": 0,
+      "envelopeVersion": 2,
+      "header": 1,
+      "ciphertextBytes": 160,
+      "protocolClientSha256": "b7d7f2483641dc8e3972b78d20e2efbea6a19864c29db662a1b54e7111ee4cac"
+    }
+  },
+  "credit": {
+    "spenderWalletIdentity": "247512291986854564435551364600938690683113101007",
+    "ownerWalletIdentity": "721457446580647751014191829380889690493307935711",
+    "revocationShard": "1",
+    "revocationSlot": "0",
+    "nonce": "678",
+    "expiry": "2000000123",
+    "creditSharedKey": "999",
+    "singleLimit": "0",
+    "dailyLimit": "0",
+    "monthlyLimit": "0",
+    "lastDay": "0",
+    "dailySpent": "0",
+    "lastMonth": "0",
+    "monthlySpent": "0",
+    "totalSpent": "0",
+    "availableCredit": "1000000",
+    "unlimited": false,
+    "commitment": "0x0a18ab461e73958bad7759b4c2fc0d40d0c8c6f2265a6b9d43e76c46950c0be6",
+    "nullifier": "0x06c0a670913e49ce7e76ca24f946246ee50faada3e1f545ae0690fe3873db0f0",
+    "draw": {
+      "nullifier": "0x06c0a670913e49ce7e76ca24f946246ee50faada3e1f545ae0690fe3873db0f0",
+      "state": {
+        "spenderWalletIdentity": "247512291986854564435551364600938690683113101007",
+        "ownerWalletIdentity": "721457446580647751014191829380889690493307935711",
+        "revocationShard": "1",
+        "revocationSlot": "0",
+        "nonce": "17887489411317877630821234464444864168073681065072659662360036414957401214116",
+        "expiry": "2000000123",
+        "creditSharedKey": "999",
+        "singleLimit": "0",
+        "dailyLimit": "0",
+        "monthlyLimit": "0",
+        "availableCredit": "999970",
+        "lastDay": "23149",
+        "dailySpent": "30",
+        "lastMonth": "761",
+        "monthlySpent": "30",
+        "totalSpent": "30",
+        "unlimited": false
+      },
+      "stateCommitment": "0x192d5cbbfcedb9c2586721edbc286b9aee0576fa1a4184dbcd8f254467031adb",
+      "recoveryAmount": "0x22eea3808d7dc36da55df2ea1c5b6c5be76d8450b4e4a87f906394666e0e571e"
+    },
+    "ownerCiphertext": "0x820256b328b30c8bf5839e24058747879408bdb36241dc9c2e7c619faa12b29209670707070707070707070707070707070708080808080808080808080882dac18b1a8dc5bb6453504f9f2ecb0fe0dc40d33ea485040104a5528bcf434474ef71a5423c8769a96ddcd6cfefb3853eb977b5ffc0072432e1ef6c8ba5eb9c67046d6b717ceb27711dbd38db7ed30d710036a5224a224fb9821edb00c2551fc6caad5791087c7dc5eaa319b1b0a34f3cb5dd87f490357a439791515aeb4660f8aaa02629ceb85b8a1c377f2a655479bdf9a316bdeb4a7eedef773b42088aa70d9f39591489339c171c571531fb2ae9822511e4ebe2a36c16e55de4d7a38ca74dc8788468a362857d615cfcf8df2f65b0d27bf5c68355fa2f2c436a7f8914d73adaac2d432d82b09da7073dfd685752204d3fec8167699d4e6da3e5b88232455638b72ac5683ee96ee035fd9bd0f28793860a276854b4eff1408b75e15f8bdaf928b859ed60ed234e76d96812661d609b715b0fd7759ed867644ba645f8480f5f87e83ad5c1b415dc5788ee9eec7098797d9450831699cdaf65800bdc4f4db1ffa3911d953296340fbbe723bfa67d63ec7d47f547523ee8b2c104c0e867928859894bcc5b1929efa725c5d920293ee2357b6fc502b749cff344e418e57900514a3789836a3161",
+    "spenderCiphertext": "0x820256b328b30c8bf5839e24058747879408bdb36241dc9c2e7c619faa12b292096707070707070707070707070707070707080808080808080808080808537b2a7a92b05ca58e36d773618a27fcc9de7a69629ee9225af8082dd076252530ca837c88edd08b66f8059eb341621e8d23692c2e134481655f0afcffab1611bc7ed369a929072cbbc8fe4e235d88099cbd950fcdddd8d95498c6b13e89bfa0b0616d49b84402de8d675494ff79d9cfe2150059d99627358b80b03c1e1e034b958f535de7c9d5c526dcb60ba7f8d3c59ebde4320ee9f76609dc5ab902ca4bb0a448123658845f5f627bbddd451df9314757e3b3a484447276cc74aa7b07b9f9a13bdb1db67497a10da59b96bb9bd7d3f9600d8b0e76a8c14a96a44f9be7b48d1e8c1e85fd4b411517a09e7fdf28675342cacec2e8694398aa991d6599d6343cd191828c2961feeea235273bc0a7b5ae55da968f07c0e7daf0572ab194f268e161f8c60038568fbdcec9587b9260b112d34b5bbd9caccb6d2acb2815418359d7a3969684fa37b1027e332c37b6ebd29270dca88535f178fd10c402b380b9197cefb1358da4aecfb21affd3f3c991f12459f4816a9e0adf94f2b6cbe36c41d29cea24535f8145ba029de893bfae71ed1eea5ac087bc90c1f35ec161620724519a49a5d200e73b67",
+    "ownerReceivingKeys": {
+      "viewingPublicKey": "0x0396f42bb298c8a0e74539294780d709799f9838c0b69a134f38c6d968f2921397",
+      "clueKey": "0xc69480518ea88f8cb925fbcd8f5100b1ebc46cc4d8cbe19e0478936567e6b211"
+    },
+    "spenderReceivingKeys": {
+      "viewingPublicKey": "0x027eb25acef93b6d40d19a5349282bd5769e7a439e1c356cce1f83078545b8a7e1",
+      "clueKey": "0xc69480518ea88f8cb925fbcd8f5100b1ebc46cc4d8cbe19e0478936567e6b211"
+    },
+    "deliverySource": {
+      "envelopeType": 1,
+      "envelopeVersion": 2,
+      "header": 130,
+      "ciphertextBytes": 485,
+      "protocolClientSha256": "c47c756f9daeb7fee98e564b01c5222925634da26b8fc616ed30ee56e7c3a9dc",
+      "purpose": "Independent Node crypto delivery vectors; canonical fixture clue points do not claim FMD detectability."
+    }
+  },
+  "memoVectors": [
+    {
+      "name": "text",
+      "kind": "funds",
+      "role": "owner",
+      "memo": "0x496e766f69636520323032362d303031",
+      "ciphertext": "0x010256b328b30c8bf5839e24058747879408bdb36241dc9c2e7c619faa12b29209670707070707070707070707070707070708080808080808080808080822a505b086bc749a1e65218db68cfaafdf8ee55a1a76a2c44fdf3f08e2a4875ec53fc60321e52376c890fd9c7a12ec6ca17e9916bcba8c45fd5c2b24f3a8a634ddca5b9d9cde45441163bb9c33c6274e2fb4ad087bb1d39c1d0c1dba49db6ae5676d96b06e1945ed6b4ea51af432df9d0be6a7"
+    },
+    {
+      "name": "text",
+      "kind": "credit",
+      "role": "owner",
+      "memo": "0x496e766f69636520323032362d303031",
+      "ciphertext": "0x820256b328b30c8bf5839e24058747879408bdb36241dc9c2e7c619faa12b29209670707070707070707070707070707070708080808080808080808080882dac18b1a8dc5bb6453504f9f2ecb0fe0dc40d33ea485040104a5528bcf434474ef71a5423c8769a96ddcd6cfefb3853eb977b5ffc0072432e1ef6c8ba5eb9c67046d6b717ceb27711dbd38db7ed30d710036a5224a224fb9821edb00c2551fc6caad5791087c7dc5eaa319b1b0a34f3cb5dd87f490357a439791515aeb4660f8aaa02629ceb85b8a1c377f2a655479bdf9a316bdeb4a7eedef773b42088aa70d9f39591489339c171c571531fb2ae9822511e4ebe2a36c16e55de4d7a38ca74dc8788468a362857d615cfcf8df2f65b0d27bf5c68355fa2f2c436a7f8914d73adaac2d432d82b09da7073dfd685752204d3fec8167699d4e6da3e5b88232455638b72ac5683ee96ee035fd9bd0f28793860a276854b4eff1408b75e15f8bdaf928b859ed60ed234e76d96812661d609b715b0fd7759ed867644ba645f8480f5f87e83ad5c1b415dc5788ee9eec7098797d9450831699cdaf65800bdc4f4db1ffa3911d953296340fbbe723bfa67d63ec7d47f547523ee8b2c104c0e867928859894bcc5b1929efa725c5d920293ee2357b6fc502b7589c9fb3c4902093a7f34c796d90b1895bfb96fc753fc203374dada5c43bba667e40"
+    },
+    {
+      "name": "text",
+      "kind": "credit",
+      "role": "spender",
+      "memo": "0x496e766f69636520323032362d303031",
+      "ciphertext": "0x820256b328b30c8bf5839e24058747879408bdb36241dc9c2e7c619faa12b292096707070707070707070707070707070707080808080808080808080808537b2a7a92b05ca58e36d773618a27fcc9de7a69629ee9225af8082dd076252530ca837c88edd08b66f8059eb341621e8d23692c2e134481655f0afcffab1611bc7ed369a929072cbbc8fe4e235d88099cbd950fcdddd8d95498c6b13e89bfa0b0616d49b84402de8d675494ff79d9cfe2150059d99627358b80b03c1e1e034b958f535de7c9d5c526dcb60ba7f8d3c59ebde4320ee9f76609dc5ab902ca4bb0a448123658845f5f627bbddd451df9314757e3b3a484447276cc74aa7b07b9f9a13bdb1db67497a10da59b96bb9bd7d3f9600d8b0e76a8c14a96a44f9be7b48d1e8c1e85fd4b411517a09e7fdf28675342cacec2e8694398aa991d6599d6343cd191828c2961feeea235273bc0a7b5ae55da968f07c0e7daf0572ab194f268e161f8c60038568fbdcec9587b9260b112d34b5bbd9caccb6d2acb2815418359d7a3969684fa37b1027e332c37b6ebd29270dca88535f178fd10c402b380b9197cefb1358da4aecfb21affd3f3c991f12459f4816a9e0adf94f2b6cbe36c41d29cea24535f8145ba029de893bfae71ed1eea5ac087bc90d002667eaa519acee6d75c185ef9a33f51bfaa0327822640809c734237aa786f24ee"
+    },
+    {
+      "name": "utf8",
+      "kind": "funds",
+      "role": "owner",
+      "memo": "0x5265636569707420f09fa7be20e282ac",
+      "ciphertext": "0x010256b328b30c8bf5839e24058747879408bdb36241dc9c2e7c619faa12b29209670707070707070707070707070707070708080808080808080808080822a505b086bc749a1e65218db68cfaafdf8ee55a1a76a2c44fdf3f08e2a4875ec53fc60321e52376c890fd9c7a12ec6ca17e9916bcba8c45fd5c2b24f3a8a634ddca5b9d9cde45441163bb9c33c6274e2fb4ad1370a4d99c0e1d1d78e64ee2e8b5df0b5fad4dbf7bd91f7c8433f05fdea42e67"
+    },
+    {
+      "name": "utf8",
+      "kind": "credit",
+      "role": "owner",
+      "memo": "0x5265636569707420f09fa7be20e282ac",
+      "ciphertext": "0x820256b328b30c8bf5839e24058747879408bdb36241dc9c2e7c619faa12b29209670707070707070707070707070707070708080808080808080808080882dac18b1a8dc5bb6453504f9f2ecb0fe0dc40d33ea485040104a5528bcf434474ef71a5423c8769a96ddcd6cfefb3853eb977b5ffc0072432e1ef6c8ba5eb9c67046d6b717ceb27711dbd38db7ed30d710036a5224a224fb9821edb00c2551fc6caad5791087c7dc5eaa319b1b0a34f3cb5dd87f490357a439791515aeb4660f8aaa02629ceb85b8a1c377f2a655479bdf9a316bdeb4a7eedef773b42088aa70d9f39591489339c171c571531fb2ae9822511e4ebe2a36c16e55de4d7a38ca74dc8788468a362857d615cfcf8df2f65b0d27bf5c68355fa2f2c436a7f8914d73adaac2d432d82b09da7073dfd685752204d3fec8167699d4e6da3e5b88232455638b72ac5683ee96ee035fd9bd0f28793860a276854b4eff1408b75e15f8bdaf928b859ed60ed234e76d96812661d609b715b0fd7759ed867644ba645f8480f5f87e83ad5c1b415dc5788ee9eec7098797d9450831699cdaf65800bdc4f4db1ffa3911d953296340fbbe723bfa67d63ec7d47f547523ee8b2c104c0e867928859894bcc5b1929efa725c5d920293ee2357b6fc502b7589c84b8d19a2080b6f38ed6f818bc5be9669efe8cc3f7f3ebb675cb25de0663d241"
+    },
+    {
+      "name": "utf8",
+      "kind": "credit",
+      "role": "spender",
+      "memo": "0x5265636569707420f09fa7be20e282ac",
+      "ciphertext": "0x820256b328b30c8bf5839e24058747879408bdb36241dc9c2e7c619faa12b292096707070707070707070707070707070707080808080808080808080808537b2a7a92b05ca58e36d773618a27fcc9de7a69629ee9225af8082dd076252530ca837c88edd08b66f8059eb341621e8d23692c2e134481655f0afcffab1611bc7ed369a929072cbbc8fe4e235d88099cbd950fcdddd8d95498c6b13e89bfa0b0616d49b84402de8d675494ff79d9cfe2150059d99627358b80b03c1e1e034b958f535de7c9d5c526dcb60ba7f8d3c59ebde4320ee9f76609dc5ab902ca4bb0a448123658845f5f627bbddd451df9314757e3b3a484447276cc74aa7b07b9f9a13bdb1db67497a10da59b96bb9bd7d3f9600d8b0e76a8c14a96a44f9be7b48d1e8c1e85fd4b411517a09e7fdf28675342cacec2e8694398aa991d6599d6343cd191828c2961feeea235273bc0a7b5ae55da968f07c0e7daf0572ab194f268e161f8c60038568fbdcec9587b9260b112d34b5bbd9caccb6d2acb2815418359d7a3969684fa37b1027e332c37b6ebd29270dca88535f178fd10c402b380b9197cefb1358da4aecfb21affd3f3c991f12459f4816a9e0adf94f2b6cbe36c41d29cea24535f8145ba029de893bfae71ed1eea5ac087bc90d0027d75bf5b9addf7d79eb7cb71aeede3222b200f626632bd9981d110b84d933383"
+    },
+    {
+      "name": "binary",
+      "kind": "funds",
+      "role": "owner",
+      "memo": "0x00ff800011",
+      "ciphertext": "0x010256b328b30c8bf5839e24058747879408bdb36241dc9c2e7c619faa12b29209670707070707070707070707070707070708080808080808080808080822a505b086bc749a1e65218db68cfaafdf8ee55a1a76a2c44fdf3f08e2a4875ec53fc60321e52376c890fd9c7a12ec6ca17e9916bcba8c45fd5c2b24f3a8a634ddca5b9d9cde45441163bb9c33c6274e2fa3ad41ea47bce44b03826c2323d5c2227bca937e2de0cb"
+    },
+    {
+      "name": "binary",
+      "kind": "credit",
+      "role": "owner",
+      "memo": "0x00ff800011",
+      "ciphertext": "0x820256b328b30c8bf5839e24058747879408bdb36241dc9c2e7c619faa12b29209670707070707070707070707070707070708080808080808080808080882dac18b1a8dc5bb6453504f9f2ecb0fe0dc40d33ea485040104a5528bcf434474ef71a5423c8769a96ddcd6cfefb3853eb977b5ffc0072432e1ef6c8ba5eb9c67046d6b717ceb27711dbd38db7ed30d710036a5224a224fb9821edb00c2551fc6caad5791087c7dc5eaa319b1b0a34f3cb5dd87f490357a439791515aeb4660f8aaa02629ceb85b8a1c377f2a655479bdf9a316bdeb4a7eedef773b42088aa70d9f39591489339c171c571531fb2ae9822511e4ebe2a36c16e55de4d7a38ca74dc8788468a362857d615cfcf8df2f65b0d27bf5c68355fa2f2c436a7f8914d73adaac2d432d82b09da7073dfd685752204d3fec8167699d4e6da3e5b88232455638b72ac5683ee96ee035fd9bd0f28793860a276854b4eff1408b75e15f8bdaf928b859ed60ed234e76d96812661d609b715b0fd7759ed867644ba645f8480f5f87e83ad5c1b415dc5788ee9eec7098797d9450831699cdaf65800bdc4f4db1ffa3911d953296340fbbe723bfa67d63ec7d47f547523ee8b2c104c0e867928859894bcc5b1929efa725c5d920293ee2357b6fc502b74f9cd62232ff58059180e570421f9100d6fe422e039d95"
+    },
+    {
+      "name": "binary",
+      "kind": "credit",
+      "role": "spender",
+      "memo": "0x00ff800011",
+      "ciphertext": "0x820256b328b30c8bf5839e24058747879408bdb36241dc9c2e7c619faa12b292096707070707070707070707070707070707080808080808080808080808537b2a7a92b05ca58e36d773618a27fcc9de7a69629ee9225af8082dd076252530ca837c88edd08b66f8059eb341621e8d23692c2e134481655f0afcffab1611bc7ed369a929072cbbc8fe4e235d88099cbd950fcdddd8d95498c6b13e89bfa0b0616d49b84402de8d675494ff79d9cfe2150059d99627358b80b03c1e1e034b958f535de7c9d5c526dcb60ba7f8d3c59ebde4320ee9f76609dc5ab902ca4bb0a448123658845f5f627bbddd451df9314757e3b3a484447276cc74aa7b07b9f9a13bdb1db67497a10da59b96bb9bd7d3f9600d8b0e76a8c14a96a44f9be7b48d1e8c1e85fd4b411517a09e7fdf28675342cacec2e8694398aa991d6599d6343cd191828c2961feeea235273bc0a7b5ae55da968f07c0e7daf0572ab194f268e161f8c60038568fbdcec9587b9260b112d34b5bbd9caccb6d2acb2815418359d7a3969684fa37b1027e332c37b6ebd29270dca88535f178fd10c402b380b9197cefb1358da4aecfb21affd3f3c991f12459f4816a9e0adf94f2b6cbe36c41d29cea24535f8145ba029de893bfae71ed1eea5ac087bc90c7022fef5c3ee2a8f2a7edffdd4ca8c31f0637e596c2dc"
+    },
+    {
+      "name": "maximum",
+      "kind": "funds",
+      "role": "owner",
+      "memo": "0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+      "ciphertext": "0x010256b328b30c8bf5839e24058747879408bdb36241dc9c2e7c619faa12b29209670707070707070707070707070707070708080808080808080808080822a505b086bc749a1e65218db68cfaafdf8ee55a1a76a2c44fdf3f08e2a4875ec53fc60321e52376c890fd9c7a12ec6ca17e9916bcba8c45fd5c2b24f3a8a634ddca5b9d9cde45441163bb9c33c6274e2ea4ad4114c5bff17b6f3a8070e357c45a53a8d6b8bc8c0cd40538f7c4bb62be1bcd3bc2248d97c0f3d78e7e360057b45fc1244a5bf31a3fbfefe8916fd90df225ecd7d95425fa050c18d5ce69a9fe1ec9e332ec4671b5c0cc2d1b80254d96ec929114d7dcace2217ccdfff2f8f7ecd6b7bb578a47d8317a60b833c612c2e040c8e3a589c9ed38e76dd2c15df1a00bd3c29465f8895308610e1df3b4eee82c626ad6f1df815788a2749dd9267ce2179741bdf01e65cebc11fe7b995f67c3b737c02fd9a43230c4def165e1fca632c0b0cef48121c825d353c2be3f791802733784d19138965bdaa81f43708d0b58b00eecc5e9ac310790381f5d90a729c6c8c13b7f3a1855e9bf22cb53c53ee10ffcd0d396ae"
+    },
+    {
+      "name": "maximum",
+      "kind": "credit",
+      "role": "owner",
+      "memo": "0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+      "ciphertext": "0x820256b328b30c8bf5839e24058747879408bdb36241dc9c2e7c619faa12b29209670707070707070707070707070707070708080808080808080808080882dac18b1a8dc5bb6453504f9f2ecb0fe0dc40d33ea485040104a5528bcf434474ef71a5423c8769a96ddcd6cfefb3853eb977b5ffc0072432e1ef6c8ba5eb9c67046d6b717ceb27711dbd38db7ed30d710036a5224a224fb9821edb00c2551fc6caad5791087c7dc5eaa319b1b0a34f3cb5dd87f490357a439791515aeb4660f8aaa02629ceb85b8a1c377f2a655479bdf9a316bdeb4a7eedef773b42088aa70d9f39591489339c171c571531fb2ae9822511e4ebe2a36c16e55de4d7a38ca74dc8788468a362857d615cfcf8df2f65b0d27bf5c68355fa2f2c436a7f8914d73adaac2d432d82b09da7073dfd685752204d3fec8167699d4e6da3e5b88232455638b72ac5683ee96ee035fd9bd0f28793860a276854b4eff1408b75e15f8bdaf928b859ed60ed234e76d96812661d609b715b0fd7759ed867644ba645f8480f5f87e83ad5c1b415dc5788ee9eec7098797d9450831699cdaf65800bdc4f4db1ffa3911d953296340fbbe723bfa67d63ec7d47f547523ee8b2c104c0e867928859894bcc5b1929efa725c5d920293ee2357b6fc502b6489cd6dcb0fc4df5c4d4764055ad90b465c5a4534185c227ae7c7f95edb780dbe53096ae9459c1b62a50c50f3cb542147889c7e05fcaa76c4042a0a652e2ccbb3ca064fecb553fc7bebc33523cbe0f7c8c63ec5bb79f83523e761201b1f8aa23a2891a108e51fd5801313fa10825a9afbacd114e281adbecbf4a82246080e3a9909558aa32c9e504d96640fcfd6c54247af3e1b758c80b0bc59c750553eab0a76dfb6e76b40cab0b2979b442d44694c8035a975b83a837297dccffa7c214d3b7e8130e62bd33ea58ba61d6e9e8ec734267800869486f841ff67aaf9b52c05df05a51deeb2ab29e392ef8ae7de54b1112e3250fad3957c70d4581507868c9a9c66f5d026050b5f6e0eb4b8ab64cb23b3f34c5"
+    },
+    {
+      "name": "maximum",
+      "kind": "credit",
+      "role": "spender",
+      "memo": "0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+      "ciphertext": "0x820256b328b30c8bf5839e24058747879408bdb36241dc9c2e7c619faa12b292096707070707070707070707070707070707080808080808080808080808537b2a7a92b05ca58e36d773618a27fcc9de7a69629ee9225af8082dd076252530ca837c88edd08b66f8059eb341621e8d23692c2e134481655f0afcffab1611bc7ed369a929072cbbc8fe4e235d88099cbd950fcdddd8d95498c6b13e89bfa0b0616d49b84402de8d675494ff79d9cfe2150059d99627358b80b03c1e1e034b958f535de7c9d5c526dcb60ba7f8d3c59ebde4320ee9f76609dc5ab902ca4bb0a448123658845f5f627bbddd451df9314757e3b3a484447276cc74aa7b07b9f9a13bdb1db67497a10da59b96bb9bd7d3f9600d8b0e76a8c14a96a44f9be7b48d1e8c1e85fd4b411517a09e7fdf28675342cacec2e8694398aa991d6599d6343cd191828c2961feeea235273bc0a7b5ae55da968f07c0e7daf0572ab194f268e161f8c60038568fbdcec9587b9260b112d34b5bbd9caccb6d2acb2815418359d7a3969684fa37b1027e332c37b6ebd29270dca88535f178fd10c402b380b9197cefb1358da4aecfb21affd3f3c991f12459f4816a9e0adf94f2b6cbe36c41d29cea24535f8145ba029de893bfae71ed1eea5ac087bc91c0022f11de3df7a885f0662166c482026f810dd5d6e51c57806785597d0c237eb90fcf4f40373d934ebf45c017286a09c9e684c8614d7db5e876d4fa77916876d71762a7e8c91297dace80058ababc8d060c1653bcf37f3b92ed77c5d873dd92a93057c8d3cb35507335651f1471813200b97f3616d3617b28109ede3c80675388ce656844d9486e393e46bcb41d532f5d20bae3f3ca9e54c6e7f39cf390781d98017c3c93db71117471f0cc303a296ab3c4cfc6619e321b400a305ed2bb543f5acd88cc71c2bc511bf3d818a2e5fe861e15e1d5e096624e7d1520c2f55e152204660181f4b0cea353fa784509df726524827f82636fe8ce4d75496530ad03d7d29714499deb228cbea8f24296aff850c70c"
+    }
+  ],
+  "creditStateCases": [
+    {
+      "name": "unlimited-tracks-actual-usage",
+      "drawAmount": "30",
+      "timestamp": "2000000000",
+      "expected": {
+        "singleLimit": "0",
+        "dailyLimit": "0",
+        "monthlyLimit": "0",
+        "availableCredit": "0",
+        "unlimited": true,
+        "lastDay": "23149",
+        "dailySpent": "40",
+        "lastMonth": "761",
+        "monthlySpent": "50",
+        "totalSpent": "30"
+      },
+      "reject": false,
+      "fields": {
+        "singleLimit": "0",
+        "dailyLimit": "0",
+        "monthlyLimit": "0",
+        "lastDay": "23149",
+        "dailySpent": "10",
+        "lastMonth": "761",
+        "monthlySpent": "20",
+        "availableCredit": "0",
+        "unlimited": true
+      }
+    },
+    {
+      "name": "lowered-daily-limit-freezes-period",
+      "drawAmount": "1",
+      "timestamp": "2000000000",
+      "reject": true,
+      "fields": {
+        "singleLimit": "50",
+        "dailyLimit": "5",
+        "monthlyLimit": "90",
+        "lastDay": "23149",
+        "dailySpent": "10",
+        "lastMonth": "761",
+        "monthlySpent": "20",
+        "availableCredit": "1000",
+        "unlimited": false
+      }
+    },
+    {
+      "name": "lowered-monthly-limit-freezes-period",
+      "drawAmount": "1",
+      "timestamp": "2000000000",
+      "reject": true,
+      "fields": {
+        "singleLimit": "50",
+        "dailyLimit": "60",
+        "monthlyLimit": "15",
+        "lastDay": "23149",
+        "dailySpent": "10",
+        "lastMonth": "761",
+        "monthlySpent": "20",
+        "availableCredit": "1000",
+        "unlimited": false
+      }
+    },
+    {
+      "name": "lowered-daily-limit-next-day",
+      "drawAmount": "3",
+      "timestamp": "2000086400",
+      "expected": {
+        "singleLimit": "50",
+        "dailyLimit": "5",
+        "monthlyLimit": "90",
+        "availableCredit": "997",
+        "unlimited": false,
+        "lastDay": "23150",
+        "dailySpent": "3",
+        "lastMonth": "761",
+        "monthlySpent": "23",
+        "totalSpent": "3"
+      },
+      "reject": false,
+      "fields": {
+        "singleLimit": "50",
+        "dailyLimit": "5",
+        "monthlyLimit": "90",
+        "lastDay": "23149",
+        "dailySpent": "10",
+        "lastMonth": "761",
+        "monthlySpent": "20",
+        "availableCredit": "1000",
+        "unlimited": false
+      }
+    },
+    {
+      "name": "lowered-monthly-limit-next-month",
+      "drawAmount": "3",
+      "timestamp": "2001196800",
+      "expected": {
+        "singleLimit": "50",
+        "dailyLimit": "60",
+        "monthlyLimit": "15",
+        "availableCredit": "997",
+        "unlimited": false,
+        "lastDay": "23163",
+        "dailySpent": "3",
+        "lastMonth": "762",
+        "monthlySpent": "3",
+        "totalSpent": "3"
+      },
+      "reject": false,
+      "fields": {
+        "singleLimit": "50",
+        "dailyLimit": "60",
+        "monthlyLimit": "15",
+        "lastDay": "23149",
+        "dailySpent": "10",
+        "lastMonth": "761",
+        "monthlySpent": "20",
+        "availableCredit": "1000",
+        "unlimited": false
+      }
+    },
+    {
+      "name": "unlimited-u128-counters",
+      "drawAmount": "1",
+      "timestamp": "2000000000",
+      "expected": {
+        "singleLimit": "0",
+        "dailyLimit": "0",
+        "monthlyLimit": "0",
+        "availableCredit": "0",
+        "unlimited": true,
+        "lastDay": "23149",
+        "dailySpent": "170141183460469231731687303715884105732",
+        "lastMonth": "761",
+        "monthlySpent": "170141183460469231731687303715884105734",
+        "totalSpent": "1"
+      },
+      "reject": false,
+      "fields": {
+        "singleLimit": "0",
+        "dailyLimit": "0",
+        "monthlyLimit": "0",
+        "lastDay": "23149",
+        "dailySpent": "170141183460469231731687303715884105731",
+        "lastMonth": "761",
+        "monthlySpent": "170141183460469231731687303715884105733",
+        "availableCredit": "0",
+        "unlimited": true
+      }
+    },
+    {
+      "name": "u128-counter-overflow",
+      "drawAmount": "1",
+      "timestamp": "2000000000",
+      "reject": true,
+      "fields": {
+        "singleLimit": "0",
+        "dailyLimit": "0",
+        "monthlyLimit": "0",
+        "lastDay": "23149",
+        "dailySpent": "340282366920938463463374607431768211455",
+        "lastMonth": "761",
+        "monthlySpent": "20",
+        "availableCredit": "1000",
+        "unlimited": false
+      }
+    },
+    {
+      "name": "zero-period-requires-zero-spent",
+      "drawAmount": "1",
+      "timestamp": "2000000000",
+      "reject": true,
+      "fields": {
+        "singleLimit": "0",
+        "dailyLimit": "0",
+        "monthlyLimit": "0",
+        "lastDay": "0",
+        "dailySpent": "1",
+        "lastMonth": "761",
+        "monthlySpent": "20",
+        "availableCredit": "1000",
+        "unlimited": false
+      }
+    },
+    {
+      "name": "single-limit-applies-to-full-balance",
+      "drawAmount": "100",
+      "timestamp": "2000000000",
+      "reject": true,
+      "fields": {
+        "singleLimit": "99",
+        "dailyLimit": "0",
+        "monthlyLimit": "0",
+        "lastDay": "23149",
+        "dailySpent": "10",
+        "lastMonth": "761",
+        "monthlySpent": "20",
+        "availableCredit": "1000",
+        "unlimited": false
+      }
+    }
+  ]
+}

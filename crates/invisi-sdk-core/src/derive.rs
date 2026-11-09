@@ -1,16 +1,16 @@
-//! 派生函数 — 所有 commitment / nullifier 的同一来源 (single source of truth).
+//! Shared raw commitment and nullifier derivation primitives.
 //!
-//! 所有函数都是 "raw" 形式: 输入 master_key 等明文字节, 不与 Keychain 交互.
-//! iOS/Android bridge 层负责从 Keychain/Keystore 读 masterKey 后传入.
+//! Callers supply raw key material; these functions do not access secure storage.
+//! Native bridges obtain master keys from platform secure storage.
 //!
-//! 与协议哈希链对齐: `../protocol-docs/01-protocol/1.2-commitment.md`.
+//! Hash ordering follows the protocol commitment definitions.
 
-use super::domain::{D_NKEY, D_IDENT, D_PAY, D_NULL, D_CHANGE_NKEY};
+use super::domain::{D_CHANGE_NKEY, D_IDENT, D_NKEY, D_NULL, D_PAY};
 use super::error::{Error, Result};
 use super::poseidon::h;
 
-/// 把 ≤32 字节的输入右对齐 (zero-pad) 成 32 字节 field element.
-/// 例: [u8; 16] → [0; 16] ++ [u8; 16]
+/// Right-align at most 32 bytes in a zero-padded field word.
+/// A 16-byte input receives 16 leading zero bytes.
 fn pad_to_32(input: &[u8]) -> [u8; 32] {
     assert!(input.len() <= 32, "pad_to_32 input must be ≤ 32 bytes");
     let mut out = [0u8; 32];
@@ -20,20 +20,23 @@ fn pad_to_32(input: &[u8]) -> [u8; 32] {
 
 /// nullifierKey = Poseidon2(D_NKEY, masterKey, invoiceId_field).
 ///
-/// 与 protocol-docs/01-protocol/1.2-commitment.md:26-46 的哈希链对齐.
-/// 入参 master_key 由 bridge 层从 Keychain 读取后传入.
+/// The invoice identifier is encoded as a field word.
+/// The caller supplies the master key from secure storage.
 pub fn derive_nullifier_key(master_key: &[u8; 32], invoice_id: &[u8; 16]) -> [u8; 32] {
     let inv = pad_to_32(invoice_id);
     h(D_NKEY, &[master_key, &inv])
 }
 
 /// identityCommitment = Poseidon2(D_IDENT, nullifierKey, receivingAddress_field).
-pub fn compute_identity_commitment(nullifier_key: &[u8; 32], receiving_address: &[u8; 20]) -> [u8; 32] {
+pub fn compute_identity_commitment(
+    nullifier_key: &[u8; 32],
+    receiving_address: &[u8; 20],
+) -> [u8; 32] {
     let addr = pad_to_32(receiving_address);
     h(D_IDENT, &[nullifier_key, &addr])
 }
 
-/// 把 u64 chain_id 编码成 32 字节 field (右对齐 big-endian).
+/// Encode the chain ID as a right-aligned big-endian field word.
 fn chain_id_to_field(chain_id: u64) -> [u8; 32] {
     let mut out = [0u8; 32];
     out[24..].copy_from_slice(&chain_id.to_be_bytes());
@@ -42,7 +45,7 @@ fn chain_id_to_field(chain_id: u64) -> [u8; 32] {
 
 /// paymentCommitment = Poseidon2(D_PAY, chainId, identityCommitment, token, amount, nonce).
 ///
-/// 协议 1.2-commitment.md:42 定义. 付款方算并写入链上事件; 收款方从事件里取 nonce 反推.
+/// Payers publish the nonce in the on-chain event so recipients can recompute it.
 pub fn compute_payment_commitment(
     chain_id: u64,
     identity_commitment: &[u8; 32],
@@ -58,8 +61,8 @@ pub fn compute_payment_commitment(
 
 /// paymentNullifier = Poseidon2(D_NULL, chainId, nullifierKey, token, amount, nonce).
 ///
-/// 协议 1.3-nullifier.md:8-30. **不变式 (1.3:17-23): 输出 ≠ 0** — 零值是 batch_settle 电路
-/// 里的 padding 槽位标记. 一旦碰撞出零, 协议视为 invoiceId 复用攻击, 必须立即报错.
+/// Zero is reserved for padding slots in settlement circuits.
+/// A zero nullifier must therefore be rejected.
 pub fn compute_payment_nullifier(
     nullifier_key: &[u8; 32],
     chain_id: u64,
@@ -77,7 +80,7 @@ pub fn compute_payment_nullifier(
     Ok(out)
 }
 
-/// changeCommitment（隐藏支付找零）。对齐电路 shielded_payment/main.nr:71-72：
+/// Shielded payment change commitment, matching the circuit hash ordering:
 ///   change_rcv        = Poseidon2(D_IDENT, change_nullifier_key, change_receiving_address)
 ///   change_commitment = Poseidon2(D_PAY, chain_id, change_rcv, token, change_amount, change_nonce)
 pub fn compute_change_commitment(
@@ -94,10 +97,10 @@ pub fn compute_change_commitment(
 
 /// changeNullifierKey = Poseidon2(D_CHANGE_NKEY, masterKey, paymentCommitment).
 ///
-/// 盲支付找零派生：付款方用本笔 paymentCommitment 作盐、复用 payment nonce，
-/// 使服务端（SPEC-190）可确定性重算并对账。与既有 derive_nullifier_key 同构，
-/// 仅换域为 D_CHANGE_NKEY、盐从 invoiceId 换为 32 字节 paymentCommitment
-/// （已是 field element，无需 pad_to_32）。
+/// Use the payment commitment as the change-key salt.
+/// This permits deterministic reconstruction and reconciliation.
+/// The change domain separates this key from invoice-derived keys.
+/// The commitment is already a field word and needs no padding.
 pub fn derive_change_nullifier_key(
     master_key: &[u8; 32],
     payment_commitment: &[u8; 32],

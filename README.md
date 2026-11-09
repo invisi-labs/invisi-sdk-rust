@@ -101,10 +101,12 @@ off the UI thread.
 and owned JSON output. Release every output with `invisi_wallet_free`. Swift can call the
 C ABI; Android can forward it from JNI. React Native uses `@invisi-labs/native-wallet`
 for JSON transport. Platform binaries and the consuming App are separate integrations.
-Existing invoice/database `privacy_*` C symbols remain for the current App bridge and are
-distinct from the current Note/Credit business models.
-
-The workspace also retains the existing App integration: `invisi-sdk-payer` builds approve/pay-open/pay-blind calldata, and the core invoice APIs use canonical 32-byte nonces. Core exports `derive_nullifier_key`, `derive_change_nullifier_key`, `compute_identity_commitment`, `compute_payment_commitment`, `compute_payment_nullifier`, and `compute_change_commitment`. Corresponding `privacy_*` C exports remain in the FFI crate alongside native wallet requests. The SDK facade exposes the calldata builders through `invisi_sdk::payer`.
+The C ABI exports only `invisi_wallet_execute_batch` and `invisi_wallet_free`.
+Its methods are `wallet.public`, `wallet.detect`, `wallet.decryptNote`,
+`wallet.decryptCredit` and `wallet.authorize`, using the same dispatcher and wire
+messages as the SDK. Note commitments and nullifiers bind both chain ID and
+Protocol address. Native hosts use the current Protocol/runtime preparation APIs
+for Shield, transact and Credit; ERC20 approval is explicit runtime data.
 
 ## Examples and verification
 

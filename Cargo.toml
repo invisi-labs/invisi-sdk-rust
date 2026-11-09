@@ -15,7 +15,6 @@ name = "invisi_sdk"
 
 [dependencies]
 invisi-sdk-core = { path = "crates/invisi-sdk-core" }
-invisi-sdk-payer = { path = "crates/invisi-sdk-payer" }
 invisi-sdk-protocol = { path = "crates/invisi-sdk-protocol" }
 invisi-sdk-prover = { path = "crates/invisi-sdk-prover" }
 invisi-sdk-rpc = { path = "crates/invisi-sdk-rpc" }

@@ -1,6 +1,50 @@
 use invisi_sdk_ffi::{invisi_wallet_execute_batch, invisi_wallet_free};
 use serde_json::Value;
 use std::ffi::CStr;
+
+fn execute(key: &[u8], requests: &Value) -> Value {
+    let bytes = serde_json::to_vec(requests).unwrap();
+    unsafe {
+        let output =
+            invisi_wallet_execute_batch(key.as_ptr(), key.len(), bytes.as_ptr(), bytes.len());
+        assert!(!output.is_null());
+        let response = serde_json::from_slice(CStr::from_ptr(output).to_bytes()).unwrap();
+        invisi_wallet_free(output);
+        response
+    }
+}
+
+#[test]
+fn ffi_executes_current_shared_wallet_messages() {
+    let fixtures: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/wallet-wire-vectors.json"
+    ))
+    .unwrap();
+    let key = hex::decode(
+        fixtures["privateKey"]
+            .as_str()
+            .unwrap()
+            .trim_start_matches("0x"),
+    )
+    .unwrap();
+    for case in fixtures["cases"].as_array().unwrap() {
+        assert_eq!(
+            execute(&key, &serde_json::json!([case["request"]])),
+            serde_json::json!([case["response"]])
+        );
+    }
+    let mut request = fixtures["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|case| case["request"]["method"] == "wallet.decryptNote")
+        .unwrap()["request"]
+        .clone();
+    request["params"]["context"]["protocolAddress"] = serde_json::json!("4661");
+    let response = execute(&key, &serde_json::json!([request]));
+    assert!(response[0]["error"]["code"].is_string());
+    assert!(response[0]["result"].is_null());
+}
 #[test]
 fn ffi_validates_pointers_and_owns_its_result() {
     unsafe {

@@ -3,27 +3,12 @@
 
 use ark_bn254::Fr;
 
-use crate::field::{bytes_to_field, field_to_bytes_be, u64_to_field};
 use crate::poseidon_constants::{internal_diag, round_constants, FULL_ROUNDS, PARTIAL_ROUNDS, T};
 
 const POSEIDON2_RATE: usize = 3;
 const HALF_FULL: usize = FULL_ROUNDS / 2;
 
-/// Domain-separated hash: prepend `domain` field to inputs, then sponge.
-///
-pub fn h(domain: u64, inputs: &[&[u8; 32]]) -> [u8; 32] {
-    let mut fr_inputs: Vec<Fr> = Vec::with_capacity(1 + inputs.len());
-    fr_inputs.push(u64_to_field(domain));
-    for input in inputs {
-        fr_inputs.push(bytes_to_field(*input));
-    }
-    let result = hash(&fr_inputs);
-    field_to_bytes_be(result)
-}
-
-/// Raw sponge hash (no domain prepending). Mirrors nexus `Poseidon2Hash([]*big.Int)`.
-///
-/// Used by alignment tests + advanced callers. Most clients should use [`h`].
+/// Raw Poseidon2 sponge; protocol callers validate fields through the Note/Credit models.
 ///
 /// Sponge semantics (mirror Noir main.nr poseidon2_sponge_hash exactly):
 ///   - iv = fr(len) * 2^64; state = [0, 0, 0, iv]
@@ -145,5 +130,52 @@ fn mat_mul_internal(input: &mut [Fr; T], diag: &[Fr; T]) {
     for i in 0..T {
         input[i] *= diag[i];
         input[i] += sum;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hash as raw_hash;
+    use ark_bn254::Fr;
+
+    fn fr_from_hex(s: &str) -> Fr {
+        use ark_ff::PrimeField;
+        let bytes = hex::decode(s).expect("hex");
+        Fr::from_be_bytes_mod_order(&bytes)
+    }
+
+    #[test]
+    fn protocol_vector_hash2_one_two() {
+        let inputs = [Fr::from(1u64), Fr::from(2u64)];
+        let got = raw_hash(&inputs);
+        let want = fr_from_hex("038682aa1cb5ae4e0a3f13da432a95c77c5c111f6f030faf9cad641ce1ed7383");
+        assert_eq!(
+            got, want,
+            "hash(1,2) MUST match Aztec Poseidon2 / Noir circuit / bb.js"
+        );
+    }
+
+    #[test]
+    fn protocol_vector_hash4_one_two_three_four() {
+        let inputs = [
+            Fr::from(1u64),
+            Fr::from(2u64),
+            Fr::from(3u64),
+            Fr::from(4u64),
+        ];
+        let got = raw_hash(&inputs);
+        let want = fr_from_hex("130bf204a32cac1f0ace56c78b731aa3809f06df2731ebcf6b3464a15788b1b9");
+        assert_eq!(got, want, "hash(1,2,3,4) MUST match Aztec Poseidon2");
+    }
+
+    #[test]
+    fn protocol_vector_hash2_zero_zero() {
+        let inputs = [Fr::from(0u64), Fr::from(0u64)];
+        let got = raw_hash(&inputs);
+        let want = fr_from_hex("0b63a53787021a4a962a452c2921b3663aff1ffd8d5510540f8e659e782956f1");
+        assert_eq!(
+            got, want,
+            "hash(0,0) MUST match Aztec Poseidon2 (zero-zero edge case)"
+        );
     }
 }

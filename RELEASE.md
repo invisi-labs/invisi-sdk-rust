@@ -42,3 +42,50 @@ behavior, or platform-specific dynamic-library compatibility. The real source pr
 test remains explicitly ignored unless its pinned external assets and executables
 are configured. Publishing, if separately authorized, must follow the same dependency
 order and wait for each preceding registry version to become available.
+
+
+## Publish from GitHub Actions
+
+The seven packages retain the `invisi-sdk` names and version `1.2.0`.
+Publishing runs in [Release Rust SDK](https://github.com/invisi-lab/invisi-sdk-rust/actions/workflows/release.yml)
+on a pushed `vMAJOR.MINOR.PATCH` tag, or a manual dispatch naming an existing tag.
+The checked-out commit must match that tag; all seven public package versions and
+exact sibling requirements must match it. Fork repositories and dirty checkouts
+are rejected. Rust/Cargo is pinned to 1.94.0 so retries produce the same archive format.
+
+Before the first release, a repository administrator must configure one secret:
+
+1. Sign in to [crates.io API tokens](https://crates.io/settings/tokens) using the account that will own the seven new crates.
+2. Create an API token with endpoint scopes **`publish-new`** and **`publish-update`**. Because these seven names are not registered yet, a token restricted to existing crate ownership cannot bootstrap this release. Use a short expiry; revoke or narrow it after the first release.
+3. Open [the repository Actions secret form](https://github.com/invisi-lab/invisi-sdk-rust/settings/secrets/actions/new), name the secret `CARGO_REGISTRY_TOKEN`, and paste the token into the secret value there. Never put it in source, workflow inputs, logs, or chat.
+
+No local `cargo login` or local `cargo publish` is required. The workflow checks
+for the secret before expensive validation and gives a direct setup link if it is
+missing. Initial registration uses this API token; [crates.io trusted publishing](https://blog.rust-lang.org/2025/07/11/crates-io-development-update-2025-07/) can be configured after the crates exist and ownership is established. [Scoped API tokens](https://blog.rust-lang.org/2023/06/23/improved-api-tokens-for-crates-io/) support endpoint permissions and expiration.
+
+After configuring the secret, push the approved release commit and its `v1.2.0`
+tag. Do not create or push the release tag before the secret is ready. A workflow
+dispatch can retry the same existing tag after an interrupted run; it must not
+move the tag or change its source to bypass a registry conflict.
+
+Before the first registry write, the workflow runs release-helper regression
+tests, English and module-boundary checks, formatting, clippy, debug/release
+workspace tests, native export validation, an example, and isolated package/archive
+tests. External native Noir/BB cases still require their explicit assets and are
+not silently represented as CI coverage.
+
+The publishing helper packages each crate from the clean **tagged checkout** with
+normal Cargo verification, authenticates its `.cargo_vcs_info.json` commit and
+package identity, and publishes in dependency order: primitives, protocol, prover,
+RPC, SDK, Session, FFI. It checks crates.io metadata, the sparse index, and the
+downloaded archive against the exact tagged local archive's SHA-256 before moving
+to the next crate. HTTP 429/transient failures and indexing delays use bounded
+retries. It never overwrites or yanks a version, and skips an existing version only
+when it is not yanked and its checksum matches exactly. A conflict fails the job.
+Archives from earlier local `/tmp` validation runs are never used as release identity.
+
+Only after all seven registrations verify does the workflow create the GitHub
+release, attaching the exact archives and `invisi-release-checksums.json`. The
+report is also retained as a workflow artifact. An already-existing GitHub release
+is preserved on retry. A partial registry release can be resumed from the same tag;
+immutable published versions cannot be rolled back by editing the workflow.

@@ -15,10 +15,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    if env::var("BROADCASTER_CONFIG").is_ok() || env::args().any(|a| a == "--submit") {
-        return Err("aggregate Broadcaster submission is unsupported".into());
-    }
-
     let deployment: ProtocolDeployment =
         serde_json::from_slice(&fs::read(env::var("DEPLOYMENT_JSON")?)?)?;
     let ethereum = EthereumChain::new(HttpTransport::new(&env::var("ETH_RPC_URL")?)?);
@@ -38,24 +34,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         env::var("TO_BLOCK").ok().map(|s| s.parse()).transpose()?,
     )?;
 
-    // Only the native host can unlock the account and decrypt these candidates.
-    println!(
-        "Native discovery requests: {}",
-        serde_json::to_string(pending.wallet_requests())?
-    );
-    let responses: Vec<sdk::WalletResponse> = if pending.wallet_requests().is_empty() {
-        Vec::new()
-    } else {
-        eprintln!(
-            "Execute the discovery array in your native host, then paste its response JSON array:"
-        );
-        let mut response_json = String::new();
-        std::io::stdin().read_line(&mut response_json)?;
-        serde_json::from_str(&response_json)?
-    };
+    // The application decryptor returns plaintext; the SDK checks openings against chain data.
+    pending.decrypt(&invisi_sdk_examples::AppDecryptor)?;
 
-    // Canonical receipts, commitments and membership are checked before any input is selected.
-    pending.apply_wallet_responses(&responses)?;
     let discovered = discovery.snapshot()?;
 
     let count: usize = env::var("AGGREGATE_MEMBERS")
@@ -87,7 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let recipient = Wallet::from_address(&env::var("RECIPIENT_ADDRESS")?)?;
     let mut members = Vec::new();
-    for (index, input) in inputs.into_iter().enumerate() {
+    for input in inputs {
         let output = sdk::NoteOutput::for_recipient(
             chain.context(),
             token,
@@ -110,27 +91,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
 
         // Each member needs its own approval before its recursive proof can enter the aggregate.
-        let request = prepared.export_wallet_request(format!("aggregate-member-{index}"))?;
-        println!(
-            "Native wallet requests: {}",
-            serde_json::to_string(std::slice::from_ref(&request))?
-        );
-        eprintln!(
-            "Approve this member in your native host and paste its one-line response JSON array:"
-        );
-        let mut response_json = String::new();
-        std::io::stdin().read_line(&mut response_json)?;
-        let responses: Vec<sdk::WalletResponse> = serde_json::from_str(&response_json)?;
-        wallet.accept_batch(std::slice::from_ref(&request), &responses)?;
-        let response = responses
-            .iter()
-            .find(|response| response.id == request.id)
-            .ok_or("missing wallet response")?;
-
-        // Recursive proofs carry the verified member statement into the final aggregate.
+        let request = prepared.export_wallet_authorization()?;
+        let signature = invisi_sdk_examples::sign_authorization(&request)?;
         members.push(
             prepared
-                .with_wallet_response(&request, response)?
+                .with_wallet_signature(&signature)?
                 .prove(&prover, true)?,
         );
     }

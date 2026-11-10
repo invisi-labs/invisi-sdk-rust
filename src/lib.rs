@@ -2,12 +2,14 @@
 pub use invisi_sdk_core::*;
 pub use invisi_sdk_protocol::{interfaces, protocol};
 pub use invisi_sdk_prover::prover;
+pub use invisi_sdk_rpc::provenance_client;
 pub use invisi_sdk_rpc::{broadcaster, rpc};
 pub use invisi_sdk_runtime::sdk;
 pub use invisi_sdk_session::session;
-pub use invisi_sdk_rpc::provenance_client;
 
 pub use invisi_sdk_rpc::provenance_recovery;
 pub use invisi_sdk_session::provenance_store;
 
 pub use invisi_sdk_rpc::provenance_tracking;
+
+pub use invisi_sdk_rpc::provenance_packet;

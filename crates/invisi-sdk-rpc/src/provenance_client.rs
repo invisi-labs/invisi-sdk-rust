@@ -1,4 +1,4 @@
-//! 仅传输公开来源证据的 JSON-RPC 客户端，独立于 Note 花费流程。
+//! Public Source JSON-RPC transport, independent of payment execution.
 use alloy_primitives::U256;
 use invisi_sdk_core::provenance::{
     assert_certificate_trust, parse_integer, ProofBundle, ProofSidecar, RootCertificate,
@@ -7,6 +7,7 @@ use invisi_sdk_core::provenance::{
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+pub const DEFAULT_ENDPOINT: &str = "https://provenance.invisipay.fi";
 pub struct ProvenanceClient {
     endpoint: String,
     pub trust: TrustContext,
@@ -15,6 +16,11 @@ pub struct ProvenanceClient {
 }
 impl ProvenanceClient {
     pub fn new(endpoint: &str, trust: TrustContext) -> Result<Self, String> {
+        let endpoint = if endpoint.is_empty() {
+            DEFAULT_ENDPOINT
+        } else {
+            endpoint
+        };
         let url = reqwest::Url::parse(endpoint).map_err(|e| e.to_string())?;
         if !["https", "http"].contains(&url.scheme())
             || url.host_str().is_none()
@@ -58,6 +64,7 @@ impl ProvenanceClient {
         let r = env["result"].clone();
         if [
             "provenance_evaluateTransaction",
+            "provenance_submitSourceProof",
             "provenance_submitProof",
             "provenance_getProofJob",
             "provenance_getTracking",
@@ -78,7 +85,6 @@ impl ProvenanceClient {
         for (k, n) in [
             ("chainId", U256::from(self.trust.scope.chain_id)),
             ("protocolAddress", self.trust.scope.protocol_address),
-            ("policyId", self.trust.scope.policy_id),
         ] {
             let value = scope[k].as_str().ok_or("missing provenance scope")?;
             if parse_integer(value, 256).map_err(|e| e.to_string())? != n {
@@ -106,17 +112,13 @@ impl ProvenanceClient {
         if let Some(v) = r.get("signingKeyId") {
             let key = parse_integer(v.as_str().ok_or("invalid key id")?, 256)
                 .map_err(|e| e.to_string())?;
-            if method != "provenance_getPolicy" && !self.trust.signing_keys.contains_key(&key) {
+            if method != "provenance_getRules" && !self.trust.signing_keys.contains_key(&key) {
                 return Err("untrusted signing key".into());
             }
         }
         Ok(r)
     }
-    fn query(&self, mut q: Value) -> Value {
-        q["policyId"] = json!(format!(
-            "0x{}",
-            hex::encode(self.trust.scope.policy_id.to_be_bytes::<32>())
-        ));
+    fn query(&self, q: Value) -> Value {
         q
     }
     pub fn get_version(&self) -> Result<Value, String> {
@@ -125,11 +127,8 @@ impl ProvenanceClient {
     pub fn get_status(&self) -> Result<Value, String> {
         self.call("provenance_getStatus", Some(self.query(json!({}))))
     }
-    pub fn get_policy(&self) -> Result<Value, String> {
-        self.call("provenance_getPolicy", Some(self.query(json!({}))))
-    }
-    pub fn get_policies(&self, q: Value) -> Result<Value, String> {
-        self.call("provenance_getPolicies", Some(q))
+    pub fn get_rules(&self) -> Result<Value, String> {
+        self.call("provenance_getRules", Some(self.query(json!({}))))
     }
     pub fn get_roots(&self, q: Value) -> Result<Value, String> {
         let r = self.call("provenance_getRoots", Some(self.query(q)))?;
@@ -202,6 +201,27 @@ impl ProvenanceClient {
         self.call(
             "provenance_evaluateTransaction",
             Some(self.query(json!({"data":data,"proofSidecars":wire_sidecars}))),
+        )
+    }
+    pub fn submit_source_proof(
+        &self,
+        data: Value,
+        proof_sidecars: &[ProofSidecar],
+    ) -> Result<Value, String> {
+        invisi_sdk_core::provenance::assert_public_submission(&data).map_err(|e| e.to_string())?;
+        for sidecar in proof_sidecars {
+            parse_integer(&sidecar.operation_index, 32).map_err(|e| e.to_string())?;
+            invisi_sdk_core::provenance::validate_proof_bundle(&sidecar.proof_bundle, &self.trust)
+                .map_err(|e| e.to_string())?;
+        }
+        let wire = proof_sidecars
+            .iter()
+            .map(invisi_sdk_core::provenance::proof_sidecar_to_wire)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        self.call(
+            "provenance_submitSourceProof",
+            Some(self.query(json!({"data":data,"proofSidecars":wire}))),
         )
     }
     pub fn submit_proof(
@@ -335,7 +355,6 @@ impl ProvenanceClient {
                 for (k, n) in [
                     ("chainId", U256::from(self.trust.scope.chain_id)),
                     ("protocolAddress", self.trust.scope.protocol_address),
-                    ("policyId", self.trust.scope.policy_id),
                 ] {
                     if read(&item["scope"][k])? != n {
                         return Err("leaf scope mismatch".into());
@@ -385,7 +404,6 @@ mod tests {
             scope: Scope {
                 chain_id: 1,
                 protocol_address: U256::from(2),
-                policy_id: U256::from(3),
             },
             chain_generation: 4,
             provider_id: U256::from(5),
@@ -399,7 +417,7 @@ mod tests {
     }
     fn server_checked(
         result: Value,
-        expected_policy: Option<U256>,
+        expected_scope: Option<U256>,
     ) -> (String, std::thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -414,20 +432,15 @@ mod tests {
                 let body = request.split("\r\n\r\n").nth(1).unwrap();
                 let query: Value = serde_json::from_str(body).unwrap();
                 assert_eq!(query["method"], "provenance_getTracking");
-                let policy =
-                    parse_integer(result["scope"]["policyId"].as_str().unwrap(), 256).unwrap();
                 assert_eq!(
                     query["params"],
-                    json!([{"policyId":format!("0x{}",hex::encode(policy.to_be_bytes::<32>())),"trackingId":result["tracking"]["id"]}])
+                    json!([{"trackingId":result["tracking"]["id"]}])
                 );
             }
-            if let Some(policy) = expected_policy {
+            if expected_scope.is_some() {
                 let body = request.split("\r\n\r\n").nth(1).unwrap();
                 let query: Value = serde_json::from_str(body).unwrap();
-                assert_eq!(
-                    query["params"],
-                    json!([{ "policyId": format!("0x{}", hex::encode(policy.to_be_bytes::<32>())) }])
-                );
+                assert_eq!(query["params"], json!([{}]));
             }
             let body = json!({"jsonrpc":"2.0","id":1,"result":result}).to_string();
             write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
@@ -435,15 +448,14 @@ mod tests {
         (endpoint, task)
     }
     #[test]
-    fn metadata_selects_pinned_policy_and_rejects_another_scope() {
+    fn metadata_rejects_another_scope() {
         for policy in [3u64, 7] {
             for method in ["provenance_getVersion", "provenance_getStatus"] {
                 for wrong in [false, true] {
-                    let mut context = trust();
-                    context.scope.policy_id = U256::from(policy);
-                    let response_policy = if wrong { 9 } else { policy };
+                    let context = trust();
+                    let response_chain = if wrong { "9" } else { "1" };
                     let (endpoint, task) = server_checked(
-                        json!({"scope":{"chainId":"1","protocolAddress":"2","policyId":response_policy.to_string()},"chainGeneration":"4"}),
+                        json!({"scope":{"chainId":response_chain,"protocolAddress":"2"},"chainGeneration":"4"}),
                         Some(U256::from(policy)),
                     );
                     let client = ProvenanceClient::new(&endpoint, context).unwrap();
@@ -464,7 +476,7 @@ mod tests {
             let mut context = trust();
             context.chain_generation = 2;
             let (endpoint, task) = server(
-                json!({"scope":{"chainId":"1","protocolAddress":"2","policyId":"3"},"chainGeneration":"2","providerId":"5","signingKeyId":"6","manifestSha256":"a".repeat(64),"status":status}),
+                json!({"scope":{"chainId":"1","protocolAddress":"2"},"chainGeneration":"2","providerId":"5","signingKeyId":"6","manifestSha256":"a".repeat(64),"status":status}),
             );
             let client = ProvenanceClient::new(&endpoint, context).unwrap();
             let result =
@@ -486,15 +498,14 @@ mod tests {
             "stale_generation",
             "unknown",
         ] {
-            let mut context = trust();
-            context.scope.policy_id = U256::from(7);
+            let context = trust();
             let id = "a".repeat(48);
             let mut tracking = json!({"id":id,"status":status,"expiresAt":"1","operationDigest":format!("0x{:064x}",9)});
             if status == "recognized" {
                 tracking["matched"] = json!({"txHash":format!("0x{:064x}",1),"blockHash":format!("0x{:064x}",2),"operationIndex":"0"});
             }
             let (endpoint, task) = server_checked(
-                json!({"scope":{"chainId":"1","protocolAddress":"2","policyId":"7"},"chainGeneration":"4","providerId":"5","signingKeyId":"6","manifestSha256":"a".repeat(64),"tracking":tracking}),
+                json!({"scope":{"chainId":"1","protocolAddress":"2"},"chainGeneration":"4","providerId":"5","signingKeyId":"6","manifestSha256":"a".repeat(64),"tracking":tracking}),
                 None,
             );
             let c = ProvenanceClient::new(&endpoint, context).unwrap();
@@ -511,7 +522,7 @@ mod tests {
     fn public_transport_and_scope_fence() {
         for generation in ["4", "9"] {
             let (endpoint, task) = server(
-                json!({"scope":{"chainId":"1","protocolAddress":"2","policyId":"3"},"chainGeneration":generation}),
+                json!({"scope":{"chainId":"1","protocolAddress":"2"},"chainGeneration":generation}),
             );
             let c = ProvenanceClient::new(&endpoint, trust()).unwrap();
             assert_eq!(c.get_status().is_ok(), generation == "4");
@@ -531,11 +542,11 @@ mod tests {
     fn policy_history_does_not_trust_reported_current_key() {
         for method in ["policy", "status"] {
             let (endpoint, task) = server(
-                json!({"scope":{"chainId":"1","protocolAddress":"2","policyId":"3"},"chainGeneration":"4","providerId":"5","signingKeyId":"7","manifestSha256":"a".repeat(64),"keyRotations":[]}),
+                json!({"scope":{"chainId":"1","protocolAddress":"2"},"chainGeneration":"4","providerId":"5","signingKeyId":"7","manifestSha256":"a".repeat(64),"keyRotations":[]}),
             );
             let c = ProvenanceClient::new(&endpoint, trust()).unwrap();
             if method == "policy" {
-                assert!(c.get_policy().is_ok());
+                assert!(c.get_rules().is_ok());
                 assert!(!c.trust.signing_keys.contains_key(&U256::from(7)));
             } else {
                 assert!(c.get_status().is_err());
@@ -546,7 +557,7 @@ mod tests {
     #[test]
     fn missing_preflight_identity_fails_closed() {
         let (endpoint, task) = server(
-            json!({"scope":{"chainId":"1","protocolAddress":"2","policyId":"3"},"chainGeneration":"4","broadcastDecision":"allow"}),
+            json!({"scope":{"chainId":"1","protocolAddress":"2"},"chainGeneration":"4","broadcastDecision":"allow"}),
         );
         let c = ProvenanceClient::new(&endpoint, trust()).unwrap();
         assert!(c

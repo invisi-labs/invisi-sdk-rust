@@ -229,7 +229,6 @@ fn provenance_recovery_live() {
         scope: Scope {
             chain_id: n(text(scope, "chainId")).to(),
             protocol_address: n(text(scope, "protocolAddress")),
-            policy_id: n(text(scope, "policyId")),
         },
         chain_generation: n(text(&fixture, "chainGeneration")).to(),
         provider_id: n(text(&fixture, "providerId")),
@@ -246,7 +245,7 @@ fn provenance_recovery_live() {
     let intent = FrozenProvenanceIntent {
         chain_id: text(scope, "chainId").into(),
         protocol_address: text(scope, "protocolAddress").into(),
-        policy_id: text(scope, "policyId").into(),
+
         token_address: text(&recovery, "tokenAddress").into(),
         operation_index: text(&recovery, "operationIndex").into(),
         operation_digest: text(&recovery, "operationDigest").into(),

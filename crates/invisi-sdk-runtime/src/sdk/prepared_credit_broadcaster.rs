@@ -9,7 +9,7 @@ impl PreparedCredit {
     pub fn reattach_provenance(mut self, capability: Arc<PreparedProvenance>) -> Result<Self> {
         capability.validate(
             self.context,
-            self.broadcaster.as_ref().and_then(|s| s.policy),
+            self.broadcaster.as_ref().and_then(|s| s.provenance_mode()),
         )?;
         self.provenance = Some(capability);
         Ok(self)
@@ -62,6 +62,9 @@ impl PreparedCredit {
         relay: Arc<dyn PreparedBroadcaster>,
         options: &BroadcasterOptions,
     ) -> Result<Self> {
+        if options.max_fee_amount.is_none_or(|cap| cap == U256::ZERO) {
+            return Err("positive maximum broadcaster fee required".into());
+        }
         if self.phase != Phase::Prepared
             || chain.context() != self.context
             || options.max_fee_rounds == 0
@@ -71,7 +74,7 @@ impl PreparedCredit {
         let config = relay.configuration();
         config.validate().map_err(|e| e.to_string())?;
         if let Some(cap) = &self.provenance {
-            cap.validate(self.context, relay.required_policy())?;
+            cap.validate(self.context, relay.provenance_mode())?;
         }
         let runtime = Invisi {
             chain: chain.clone(),
@@ -81,12 +84,19 @@ impl PreparedCredit {
             .reprice
             .as_ref()
             .ok_or("original Credit business preparation required for explicit repricing")?;
-        let mut fee = relay.fee(self.token, None)?;
-        for _ in 0..options.max_fee_rounds {
+        let mut fee = invisi_sdk_rpc::broadcaster::Fee {
+            fee_recipient: config.fee_recipient,
+            fee_amount: "1".into(),
+            max_gas: "1".into(),
+        };
+        for round in 0..options.max_fee_rounds {
             if fee.fee_recipient != config.fee_recipient {
                 return Err("Credit relay fee recipient mismatch".into());
             }
             let amount = decimal(&json!(fee.fee_amount))?;
+            if options.max_fee_amount.is_some_and(|cap| amount > cap) {
+                return Err("broadcaster fee exceeds maximum".into());
+            }
             let f = Fee {
                 recipient: fee.fee_recipient,
                 amount,
@@ -121,7 +131,10 @@ impl PreparedCredit {
             };
             let data = candidate.broadcaster_intent()?.data;
             let next = relay.fee(self.token, Some(&data))?;
-            if next.fee_amount != fee.fee_amount || next.fee_recipient != fee.fee_recipient {
+            if round == 0
+                || next.fee_amount != fee.fee_amount
+                || next.fee_recipient != fee.fee_recipient
+            {
                 fee = next;
                 continue;
             }
@@ -138,37 +151,34 @@ impl PreparedCredit {
                 protocol: word_address(self.context.protocol_address)?,
                 signer: config.quote_signer,
             };
-            invisi_sdk_rpc::broadcaster::verify_quote_for_policy(
+            invisi_sdk_rpc::broadcaster::verify_quote_for_provenance(
                 quote.signed(),
                 &trust,
                 &data,
                 block.timestamp,
-                relay.required_policy(),
+                relay.provenance_mode(),
             )
             .map_err(|e| e.to_string())?;
-            if quote.signed().provenance_tracking.is_some() {
-                return Err("Credit lifecycle must not receive Note source tracking".into());
-            }
             chain.canonical(&block)?;
             candidate.broadcaster = Some(PreparedBroadcasterState {
                 endpoint: config.endpoint,
                 signer: config.quote_signer,
                 fee_recipient: config.fee_recipient,
-                policy: relay.required_policy(),
                 quote: quote.signed().clone(),
                 intent_hash: request_hash(&data).map_err(|e| e.to_string())?,
                 sidecars: Vec::new(),
-                tracking: None,
+                attempted: false,
+                submission_id: None,
+                submitted_data: Vec::new(),
             });
             return Ok(candidate);
         }
         Err("Credit relay fee convergence budget exceeded".into())
     }
     pub fn submit_broadcaster(
-        &self,
+        &mut self,
         chain: &dyn ChainState,
         relay: &dyn PreparedBroadcaster,
-        id: &str,
     ) -> Result<invisi_sdk_rpc::broadcaster::Status> {
         let state = self
             .broadcaster
@@ -178,11 +188,42 @@ impl PreparedCredit {
         if config.endpoint != state.endpoint
             || config.quote_signer != state.signer
             || config.fee_recipient != state.fee_recipient
-            || relay.required_policy() != state.policy
             || !state.sidecars.is_empty()
-            || state.tracking.is_some()
         {
             return Err("saved Credit relay context mismatch".into());
+        }
+        if state.attempted {
+            let state = state.clone();
+            if let Some(id) = &state.submission_id {
+                if let Some(status) = relay.lookup_status(id)? {
+                    if &status.id != id {
+                        return Err("broadcaster submission ID mismatch".into());
+                    }
+                    return Ok(status);
+                }
+            }
+            let quote = VerifiedQuote::authenticate(
+                state.quote.clone(),
+                Trust {
+                    chain_id: self.context.chain_id,
+                    protocol: word_address(self.context.protocol_address)?,
+                    signer: state.signer,
+                },
+                &state.submitted_data,
+                0,
+                state.provenance_mode(),
+            )
+            .map_err(|e| e.to_string())?;
+            let result = relay.submit(&state.submitted_data, &quote, &[])?;
+            if state
+                .submission_id
+                .as_ref()
+                .is_some_and(|id| id != &result.id)
+            {
+                return Err("broadcaster submission ID mismatch".into());
+            }
+            self.broadcaster.as_mut().unwrap().submission_id = Some(result.id.clone());
+            return Ok(result);
         }
         let data = self.calldata(chain, Address::ZERO)?.data;
         if request_hash(&data).map_err(|e| e.to_string())? != state.intent_hash {
@@ -198,10 +239,16 @@ impl PreparedCredit {
             },
             &data,
             block.timestamp,
-            state.policy,
+            state.provenance_mode(),
         )
         .map_err(|e| e.to_string())?;
+        relay.submission_requirements(&quote)?;
         chain.canonical(&block)?;
-        relay.submit(&data, &quote, id, &[])
+        let state = self.broadcaster.as_mut().unwrap();
+        state.attempted = true;
+        state.submitted_data = data.clone();
+        let result = relay.submit(&data, &quote, &[])?;
+        self.broadcaster.as_mut().unwrap().submission_id = Some(result.id.clone());
+        Ok(result)
     }
 }

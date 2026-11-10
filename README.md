@@ -22,42 +22,22 @@ Dependencies flow from core to protocol/prover, then RPC and runtime, then Sessi
 Protocol DTOs live below RPC so receipt decoding does not create a dependency cycle.
 Native hosts that only need wallet cryptography depend on core or FFI directly.
 
-## Wallet boundary
+## Public Wallet and application capabilities
 
-`invisi_sdk::sdk::Wallet` contains public identity and receiving keys only. Session
-configuration contains no executor, viewing key or authorization callback. The App/Vault
-executes explicit requests and returns responses. Managed and stateless preparation use
-the same transcript:
+`Wallet` stores public owner and receiving material. Applications provide delivery decryption and ordinary EIP-712 signing; the SDK never needs an account private key or wallet transport.
 
 ```rust,ignore
-let request = prepared.export_wallet_request("payment-authorization")?;
-let requests = [request];
-// Send the serialized array to the native host and read its response array.
-wallet.accept_batch(&requests, &native_responses)?;
-let response = native_responses.iter().find(|r| r.id == requests[0].id)
-    .ok_or("missing wallet response")?;
-let authorized = prepared.with_wallet_response(&requests[0], response)?;
+let request = prepared.export_wallet_authorization()?;
+let signature = app_sign_typed_data(&request.typed_data)?;
+let authorized = prepared.with_wallet_signature(&signature)?;
 let ready = authorized.prove(&prover, false)?;
 let call = ready.calldata(&chain, caller)?;
-// EVM transaction signing is a separate host operation after calldata exists.
+// The application separately signs and submits the final EVM transaction.
 ```
 
-Wallet methods are `wallet.public`, `wallet.detect`, `wallet.decryptNote`,
-`wallet.decryptCredit`, and `wallet.authorize`. Integers use canonical decimal strings;
-bytes use lowercase `0x` hex. IDs are printable ASCII, 1–128 bytes. Native responses are
-checked against the retained request, identity, signatures, contexts and financial
-commitments. Public material never includes spending, viewing or detection private keys.
-Decrypted financial data and transient proving witnesses may return to the business SDK.
+`EvmSigningRequest` includes standard typed data and its digest. Signature attachment recovers and verifies the owner against the final frozen Note/Credit statement, then derives the transient proving authorization. Funding and public Credit revocation use their own EVM authorization contracts.
 
-The explicit native API `wallet::execute_batch(account_key, requests)` takes a host-owned key
-as a function argument. It never obtains a key from the JSON request or persists it.
-The host owns unlock, consent, key access and clearing its original key buffers.
-Batches permit at most 1024 items and 16 MiB of total JSON in each direction. All requests
-must have unique IDs and the same owner; the native core validates the entire batch before
-execution. Empty batches return empty arrays. Responses may arrive in any order; SDK
-acceptance rejects missing, duplicated, unknown or incorrectly bound responses. The C ABI
-exposes `invisi_wallet_execute_batch` with a length-delimited JSON array input.
-Request IDs correlate responses; chain replay rules and host approval policy are separate.
+`delivery::DeliveryDecryptor` is the application callback boundary. Its Note and Credit methods receive encrypted delivery bytes and public scope; they return plaintext bytes or `None` for an unrelated recipient. `Wallet::decrypt_note` / `decrypt_credit` authenticate returned openings, roles and receiving keys. Errors abort without committing inventory changes. No JSON wallet request/response bridge is needed by normal application flows.
 
 ## Note and Credit
 
@@ -75,14 +55,7 @@ consumption, revocation, balances, allowance and public funding/revocation autho
 
 ## Synchronization and storage
 
-Session refresh returns an opaque staged handle with serializable `wallet_requests`.
-The host returns a direct response array. Each response has `version`, `id`, `ownerAddress`,
-`method`, and exactly one `result` or `error: {code}`. Only `WALLET_NOT_RECIPIENT`
-skips a candidate; other errors abort without state changes.
-Apply rechecks canonical data and atomically commits through a revision CAS. Unlock or
-transport failures leave the work pending. Oversized staged refreshes fail without writes;
-select a smaller block range to remain within the native batch limits. Inventory and Credit
-role state remain separate.
+Session refresh returns an opaque staged handle. Call `pending.decrypt(&app_decryptor)` to authenticate candidates and atomically commit the checked inventory through a revision CAS. Reconciliation uses the same callback. Decryption and canonical-chain failures leave the checkpoint unchanged; `None` skips only an unrelated recipient. Inventory and Credit role state remain separate.
 
 `EncryptedWalletStore` binds AES-GCM records to scope and revision. Hosts can supply an
 atomic encrypted-record backend; the `sqlite` feature supplies persistent SQLite with
@@ -127,4 +100,4 @@ No release, push or App migration is performed by these commands.
 
 ## Optional Provenance tracking
 
-The independent [Provenance module](PROVENANCE.md) keeps source recognition separate from protocol spendability. Ordinary direct prepare/prove/export never requires Source or Broadcaster; the App independently chooses source evaluation before sending or source proof submission after confirmation. Explicit `with_broadcaster` for Notes and all four Credit operations delegates policy preflight to Broadcaster, retains the verified quote/tracking and submits the frozen context. Managed retries persist their first ID and query the relay journal before any fresh attempt, including after restart with Source offline or absent. See the normal [Note](examples/03-note/transfer.rs) and [Credit](examples/04-credit/create.rs) examples. App integration, account signing and nonce reservations remain host-owned.
+The independent [Provenance module](PROVENANCE.md) keeps Source recognition separate from protocol settlement. Ready private Note payments expose `prove_provenance`, `precheck_provenance`, and independent `submit_provenance` with an optional transaction hash. Rebuilding Source evidence preserves the existing payment. Broadcaster estimates fees separately from its final signed quote, advertises Source requirements, and assigns opaque server submission IDs. Managed retries retain the exact request and the returned server ID. See the parallel [Broadcaster examples](examples/07-broadcaster) and ordinary [Note](examples/03-note/transfer.rs) and [Credit](examples/04-credit/create.rs) flows. Apps supply ordinary signing and delivery decryption.

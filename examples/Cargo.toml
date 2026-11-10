@@ -15,6 +15,7 @@ serde_json = "1"
 hex = "0.4"
 zeroize = "1"
 sha2 = "0.10"
+k256 = { version = "0.13", features = ["ecdsa"] }
 tempfile = "3"
 
 [features]
@@ -85,3 +86,13 @@ required-features = ["sqlite"]
 name = "revoke-credit-session"
 path = "05-session/credit-revoke.rs"
 required-features = ["sqlite"]
+
+[[bin]]
+name = "prepare-and-broadcast"
+path = "07-broadcaster/01-prepare-and-broadcast.rs"
+[[bin]]
+name = "pre-submit-provenance"
+path = "07-broadcaster/02-pre-submit-provenance.rs"
+[[bin]]
+name = "recover-and-submit-provenance"
+path = "07-broadcaster/03-recover-and-submit-provenance.rs"

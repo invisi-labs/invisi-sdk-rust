@@ -31,11 +31,9 @@ pub struct SignedQuote {
     pub quote: Quote,
     pub signature: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provenance_policy_id: Option<B256>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_hash_format: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provenance_tracking: Option<crate::provenance_tracking::Tracking>,
+    pub provenance_required: Option<bool>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Intent {
@@ -153,34 +151,31 @@ pub fn quote_digest(quote: &Quote, trust: &Trust) -> Result<B256> {
     Ok(keccak256(message))
 }
 pub fn verify_quote(signed: &SignedQuote, trust: &Trust, data: &[u8], now: u64) -> Result<()> {
-    verify_quote_for_policy(signed, trust, data, now, None)
+    verify_quote_for_provenance(signed, trust, data, now, None)
 }
-pub fn verify_quote_for_policy(
+pub fn verify_quote_for_provenance(
     signed: &SignedQuote,
     trust: &Trust,
     data: &[u8],
     now: u64,
-    policy: Option<B256>,
+    provenance: Option<()>,
 ) -> Result<()> {
+    if signed.provenance_required == Some(false)
+        || (provenance.is_some() && signed.provenance_required != Some(true))
+    {
+        return Err(Error::Invalid("invalid broadcaster provenance metadata"));
+    }
     let base = request_hash(data)?;
-    let hash = match policy {
-        Some(policy)
-            if policy != B256::ZERO
-                && signed.provenance_policy_id == Some(policy)
-                && signed.request_hash_format.as_deref() == Some(REQUEST_HASH_FORMAT) =>
-        {
-            B256::from(provenance_intent_hash(
-                base.0,
-                U256::from_be_bytes(policy.0),
-            ))
+    let hash = if signed.provenance_required == Some(true) {
+        if signed.request_hash_format.as_deref() != Some(REQUEST_HASH_FORMAT) {
+            return Err(Error::Invalid("broadcaster provenance format mismatch"));
         }
-        None if signed.provenance_policy_id.is_none()
-            && signed.request_hash_format.is_none()
-            && signed.provenance_tracking.is_none() =>
-        {
-            base
+        B256::from(provenance_intent_hash(base.0))
+    } else {
+        if signed.request_hash_format.is_some() {
+            return Err(Error::Invalid("unexpected broadcaster provenance metadata"));
         }
-        _ => return Err(Error::Invalid("broadcaster provenance policy mismatch")),
+        base
     };
     verify_quote_with_hash(signed, trust, data, now, hash)
 }
@@ -271,9 +266,9 @@ impl VerifiedQuote {
         trust: Trust,
         data: &[u8],
         now: u64,
-        policy: Option<B256>,
+        provenance: Option<()>,
     ) -> Result<Self> {
-        verify_quote_for_policy(&signed, &trust, data, now, policy)?;
+        verify_quote_for_provenance(&signed, &trust, data, now, provenance)?;
         Ok(Self { signed, trust })
     }
     pub fn signed(&self) -> &SignedQuote {
@@ -310,7 +305,7 @@ pub struct Status {
 pub struct BroadcasterClient<T: RpcTransport> {
     configuration: Configuration,
     rpc: JsonRpc<T>,
-    required_policy: Option<B256>,
+    provenance_mode: Option<()>,
 }
 impl BroadcasterClient<HttpTransport> {
     pub fn connect(configuration: Configuration) -> Result<Self> {
@@ -325,33 +320,110 @@ impl<T: RpcTransport> BroadcasterClient<T> {
         Ok(Self {
             configuration,
             rpc: JsonRpc::new(transport),
-            required_policy: None,
+            provenance_mode: None,
         })
     }
-    pub fn with_provenance_policy(mut self, policy: B256) -> Result<Self> {
-        if policy == B256::ZERO {
-            return Err(Error::Invalid("nonzero provenance policy required"));
-        }
-        self.required_policy = Some(policy);
-        Ok(self)
+    pub fn with_provenance_mode(mut self) -> Self {
+        self.provenance_mode = Some(());
+        self
     }
-    pub fn required_policy(&self) -> Option<B256> {
-        self.required_policy
+    pub fn provenance_mode(&self) -> Option<()> {
+        self.provenance_mode
+    }
+    pub fn supports_token(&self, token: Address, chain_id: u64, protocol: Address) -> Result<bool> {
+        if token == Address::ZERO {
+            return Err(Error::Invalid("nonzero token required"));
+        }
+        let value = self.rpc.call(
+            "broadcaster_getTokenSupport",
+            json!([{"tokenAddress":token}]),
+        )?;
+        let supported = value["supported"]
+            .as_bool()
+            .ok_or(Error::Invalid("invalid token support"))?;
+        let halted = value["submissionHalted"]
+            .as_bool()
+            .ok_or(Error::Invalid("invalid token support"))?;
+        if value["apiVersion"] != "v1"
+            || value["protocolVersion"] != "1"
+            || decimal(&value["chainId"])? != U256::from(chain_id)
+            || value["protocol"]
+                .as_str()
+                .and_then(|v| v.parse::<Address>().ok())
+                != Some(protocol)
+            || value["sender"]
+                .as_str()
+                .and_then(|v| v.parse::<Address>().ok())
+                != Some(self.configuration.quote_signer)
+            || value["feeRecipient"]
+                .as_str()
+                .and_then(|v| v.parse::<Address>().ok())
+                != Some(self.configuration.fee_recipient)
+            || value["tokenAddress"]
+                .as_str()
+                .and_then(|v| v.parse::<Address>().ok())
+                != Some(token)
+            || value["provenance"]["enabled"].as_bool().is_none()
+        {
+            return Err(Error::Invalid("invalid token support identity"));
+        }
+        Ok(supported && !halted)
+    }
+    pub fn submission_requirements(&self, quote: &VerifiedQuote) -> Result<bool> {
+        let value = self.rpc.call("broadcaster_getStatus", json!([]))?;
+        let p = &value["provenance"];
+        let required = p["enabled"]
+            .as_bool()
+            .ok_or(Error::Invalid("invalid broadcaster service status"))?;
+        if value["apiVersion"] != "v1"
+            || value["protocolVersion"] != "1"
+            || decimal(&value["chainId"])? != U256::from(quote.trust.chain_id)
+            || value["protocol"]
+                .as_str()
+                .and_then(|v| v.parse::<Address>().ok())
+                != Some(quote.trust.protocol)
+            || value["sender"]
+                .as_str()
+                .and_then(|v| v.parse::<Address>().ok())
+                != Some(self.configuration.quote_signer)
+            || value["feeRecipient"]
+                .as_str()
+                .and_then(|v| v.parse::<Address>().ok())
+                != Some(self.configuration.fee_recipient)
+            || value["submissionHalted"] != false
+            || required != (quote.signed.provenance_required == Some(true))
+            || (required
+                && (p["requestHashFormat"] != REQUEST_HASH_FORMAT
+                    || p["trackingRequired"] != true
+                    || p["trackingSupported"] != true))
+        {
+            return Err(Error::Invalid(
+                "broadcaster requirements changed or invalid; obtain a new quote",
+            ));
+        }
+        Ok(required)
     }
     pub fn configuration(&self) -> &Configuration {
         &self.configuration
+    }
+    pub fn estimate_quote(&self, data: &[u8]) -> Result<Fee> {
+        let intent = decode_intent(data)?;
+        self.fee(intent.token, Some(data))
     }
     pub fn fee(&self, token: Address, data: Option<&[u8]>) -> Result<Fee> {
         if token == Address::ZERO {
             return Err(Error::Invalid("nonzero fee token required"));
         }
-        let mut params = json!({"token":token});
-        if let Some(data) = data {
-            params["data"] = json!(format!("0x{}", hex::encode(data)));
-        }
-        let fee: Fee =
-            serde_json::from_value(self.rpc.call("broadcaster_getFee", json!([params]))?)
-                .map_err(|_| Error::Invalid("invalid broadcaster fee"))?;
+        let data = data.ok_or(Error::Invalid(
+            "public calldata required for broadcaster estimate",
+        ))?;
+        decode_intent(data)?;
+        let params = json!({"data":format!("0x{}", hex::encode(data))});
+        let fee: Fee = serde_json::from_value(
+            self.rpc
+                .call("broadcaster_estimateQuote", json!([params]))?,
+        )
+        .map_err(|_| Error::Invalid("invalid broadcaster fee"))?;
         let amount = decimal(&json!(fee.fee_amount))?;
         let gas = decimal(&json!(fee.max_gas))?;
         if fee.fee_recipient != self.configuration.fee_recipient
@@ -382,18 +454,18 @@ impl<T: RpcTransport> BroadcasterClient<T> {
         now: u64,
         sidecars: &[ProofSidecar],
     ) -> Result<VerifiedQuote> {
-        if self.required_policy.is_none() && !sidecars.is_empty() {
+        if self.provenance_mode.is_none() && !sidecars.is_empty() {
             return Err(Error::Invalid("unexpected proof sidecars"));
         }
         decode_intent(data)?;
-        let wire = sidecars
+        let _wire = sidecars
             .iter()
             .map(invisi_sdk_core::provenance::proof_sidecar_to_wire)
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|_| Error::Invalid("invalid proof sidecar"))?;
         let signed: SignedQuote = serde_json::from_value(self.rpc.call(
             "broadcaster_getQuote",
-            json!([{"data":format!("0x{}",hex::encode(data)), "proofSidecars":wire}]),
+            json!([{"data":format!("0x{}",hex::encode(data))}]),
         )?)
         .map_err(|_| Error::Invalid("invalid signed broadcaster quote"))?;
         let trust = Trust {
@@ -401,30 +473,23 @@ impl<T: RpcTransport> BroadcasterClient<T> {
             protocol,
             signer: self.configuration.quote_signer,
         };
-        verify_quote_for_policy(&signed, &trust, data, now, self.required_policy)?;
+        verify_quote_for_provenance(&signed, &trust, data, now, self.provenance_mode)?;
         if signed.quote.fee_recipient != self.configuration.fee_recipient {
             return Err(Error::Invalid("unregistered quote fee recipient"));
         }
         Ok(VerifiedQuote { signed, trust })
     }
-    pub fn submit(
-        &self,
-        data: &[u8],
-        verified: &VerifiedQuote,
-        idempotency_key: &str,
-    ) -> Result<Status> {
-        self.submit_with_sidecars(data, verified, idempotency_key, &[])
+    pub fn submit(&self, data: &[u8], verified: &VerifiedQuote) -> Result<Status> {
+        self.submit_with_sidecars(data, verified, &[])
     }
     pub fn submit_with_sidecars(
         &self,
         data: &[u8],
         verified: &VerifiedQuote,
-        idempotency_key: &str,
         sidecars: &[ProofSidecar],
     ) -> Result<Status> {
-        validate_id(idempotency_key)?;
         decode_intent(data)?;
-        if self.required_policy.is_none() && !sidecars.is_empty() {
+        if verified.signed.provenance_required != Some(true) && !sidecars.is_empty() {
             return Err(Error::Invalid("unexpected proof sidecars"));
         }
         let wire = sidecars
@@ -434,12 +499,13 @@ impl<T: RpcTransport> BroadcasterClient<T> {
             .map_err(|_| Error::Invalid("invalid proof sidecar"))?;
         let mut trust = verified.trust.clone();
         trust.signer = self.configuration.quote_signer;
-        verify_quote_for_policy(&verified.signed, &trust, data, 0, self.required_policy)?;
+        verify_quote_for_provenance(&verified.signed, &trust, data, 0, self.provenance_mode)?;
         if verified.signed.quote.fee_recipient != self.configuration.fee_recipient {
             return Err(Error::Invalid("unregistered quote fee recipient"));
         }
-        let status:Status=serde_json::from_value(self.rpc.call("broadcaster_submitTransaction",json!([{"data":format!("0x{}",hex::encode(data)),"quote":verified.signed.quote,"signature":verified.signed.signature,"idempotencyKey":idempotency_key,"proofSidecars":wire}]))?).map_err(|_|Error::Invalid("invalid broadcaster status"))?;
-        check_status(status, idempotency_key)
+        let status:Status=serde_json::from_value(self.rpc.call("broadcaster_submitTransaction",json!([{"data":format!("0x{}",hex::encode(data)),"quote":verified.signed.quote,"signature":verified.signed.signature,"proofSidecars":wire}]))?).map_err(|_|Error::Invalid("invalid broadcaster status"))?;
+        validate_id(&status.id)?;
+        Ok(status)
     }
     pub fn lookup_status(&self, id: &str) -> Result<Option<Status>> {
         match self.status(id) {
@@ -459,7 +525,7 @@ impl<T: RpcTransport> BroadcasterClient<T> {
     }
 }
 fn validate_id(id: &str) -> Result<()> {
-    if id.is_empty() || id.len() > 128 || !id.is_ascii() || id.bytes().any(|b| b < 32 || b == 127) {
+    if id.is_empty() || id.len() > 256 {
         return Err(Error::Invalid("invalid broadcaster id"));
     }
     Ok(())

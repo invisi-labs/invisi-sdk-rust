@@ -81,16 +81,25 @@ fn client_verifies_registered_quote_and_submit_status_correlation() {
     use serde_json::{json, Value};
     struct Transport {
         signed: Value,
+        service: Value,
     }
     impl RpcTransport for Transport {
         fn send(&self, r: &Value) -> Result<Value> {
             let result = match r["method"].as_str().unwrap() {
                 "broadcaster_getQuote" => self.signed.clone(),
-                "broadcaster_getFee" => {
+                "broadcaster_getStatus" => self.service.clone(),
+                "broadcaster_getTokenSupport" => {
+                    let mut v = self.service.clone();
+                    v["tokenAddress"] = r["params"][0]["tokenAddress"].clone();
+                    v["supported"] = json!(true);
+                    v
+                }
+                "broadcaster_estimateQuote" => {
                     json!({"feeRecipient":self.signed["quote"]["feeRecipient"],"feeAmount":"1","maxGas":"21000"})
                 }
                 "broadcaster_submitTransaction" => {
-                    json!({"id":r["params"][0]["idempotencyKey"],"state":"pending"})
+                    assert!(r["params"][0].get("idempotencyKey").is_none());
+                    json!({"id":"server-owned","state":"pending"})
                 }
                 "broadcaster_getTransactionStatus" => {
                     json!({"id":"substituted","state":"confirmed"})
@@ -113,26 +122,53 @@ fn client_verifies_registered_quote_and_submit_status_correlation() {
             .parse()
             .unwrap(),
     };
+    let service = json!({"apiVersion":"v1","protocolVersion":"1","chainId":"56","protocol":row["trust"]["protocol"],"sender":configuration.quote_signer,"feeRecipient":configuration.fee_recipient,"submissionHalted":false,"provenance":{"enabled":false}});
     let client = BroadcasterClient::new(
-        configuration,
+        configuration.clone(),
         Transport {
             signed: json!({"quote":row["quote"],"signature":row["signature"]}),
+            service: service.clone(),
         },
     )
     .unwrap();
     let protocol = row["trust"]["protocol"].as_str().unwrap().parse().unwrap();
     let verified = client.quote(&data, 56, protocol, 0).unwrap();
-    assert_eq!(
-        client
-            .fee(verified.signed().quote.token, None)
-            .unwrap()
-            .fee_amount,
-        "1"
-    );
-    assert_eq!(
-        client.submit(&data, &verified, "operation-1").unwrap().id,
-        "operation-1"
-    );
+    assert!(!client.submission_requirements(&verified).unwrap());
+    assert!(client
+        .supports_token(verified.signed().quote.token, 56, protocol)
+        .unwrap());
+    for (field, value) in [
+        ("chainId", json!("57")),
+        ("sender", json!(Address::ZERO)),
+        ("submissionHalted", json!(true)),
+        (
+            "provenance",
+            json!({"enabled":true,"requestHashFormat":"invisi-broadcaster-provenance-intent-v1","trackingRequired":true,"trackingSupported":true}),
+        ),
+    ] {
+        let mut bad = service.clone();
+        bad[field] = value;
+        let changed = BroadcasterClient::new(
+            configuration.clone(),
+            Transport {
+                signed: json!({"quote":row["quote"],"signature":row["signature"]}),
+                service: bad,
+            },
+        )
+        .unwrap();
+        assert!(changed.submission_requirements(&verified).is_err());
+        if field != "provenance" {
+            assert!(
+                changed
+                    .supports_token(verified.signed().quote.token, 56, protocol)
+                    .is_err()
+                    || !changed
+                        .supports_token(verified.signed().quote.token, 56, protocol)
+                        .unwrap()
+            );
+        }
+    }
+    assert_eq!(client.estimate_quote(&data).unwrap().fee_amount, "1");
+    assert_eq!(client.submit(&data, &verified).unwrap().id, "server-owned");
     assert!(client.status("operation-1").is_err());
-    assert!(client.submit(&data, &verified, "").is_err());
 }

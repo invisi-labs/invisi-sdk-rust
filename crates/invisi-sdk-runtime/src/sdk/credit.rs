@@ -630,6 +630,23 @@ impl PreparedCredit {
         };
         auth_words(self.context, operation, capacity, words)
     }
+    pub fn export_wallet_authorization(&self) -> Result<EvmSigningRequest> {
+        if ![Phase::Prepared, Phase::Authorized].contains(&self.phase) {
+            return Err("Credit operation is not awaiting authorization".into());
+        }
+        let (operation, _, capacity) = self.operation()?;
+        let words = self.public_inputs()?;
+        wallet_authorization_request(self.context, operation, capacity, &words[..words.len() - 2])
+    }
+    pub fn with_wallet_signature(mut self, signature: &[u8]) -> Result<Self> {
+        self.authorization = Some(accept_wallet_signature(
+            self.wallet.owner,
+            &self.export_wallet_authorization()?,
+            signature,
+        )?);
+        self.phase = Phase::Authorized;
+        Ok(self)
+    }
     pub fn export_wallet_request(&self, id: impl Into<String>) -> Result<WalletRequest> {
         if ![Phase::Prepared, Phase::Authorized].contains(&self.phase) {
             return Err("Credit operation is not awaiting authorization".into());
@@ -1042,6 +1059,12 @@ impl PreparedCredit {
             }
         }
     }
+    pub fn export_revocation_signing_request(&self) -> Result<EvmSigningRequest> {
+        Ok(EvmSigningRequest {
+            typed_data: self.export_revocation_authorization()?,
+            digest: self.revocation_digest()?,
+        })
+    }
     pub fn export_revocation_authorization(&self) -> Result<Value> {
         let CreditPlan::Revoke {
             owner,
@@ -1151,7 +1174,10 @@ mod lifecycle_tests {
             .with_broadcaster(
                 chain,
                 std::sync::Arc::new(RejectedRelay),
-                &BroadcasterOptions::default()
+                &BroadcasterOptions {
+                    max_fee_amount: Some(U256::from(100)),
+                    ..Default::default()
+                }
             )
             .is_err());
         assert_eq!(prepared.phase(), Phase::Prepared);
@@ -1166,7 +1192,13 @@ mod lifecycle_tests {
                 fee_recipient: Address::repeat_byte(4),
             }
         }
-        fn required_policy(&self) -> Option<B256> {
+        fn submission_requirements(
+            &self,
+            q: &invisi_sdk_rpc::broadcaster::VerifiedQuote,
+        ) -> Result<bool> {
+            Ok(q.signed().provenance_required == Some(true))
+        }
+        fn provenance_mode(&self) -> Option<()> {
             None
         }
         fn fee(&self, _: Address, _: Option<&[u8]>) -> Result<invisi_sdk_rpc::broadcaster::Fee> {
@@ -1186,7 +1218,6 @@ mod lifecycle_tests {
             &self,
             _: &[u8],
             _: &invisi_sdk_rpc::broadcaster::VerifiedQuote,
-            _: &str,
             _: &[crate::provenance::ProofSidecar],
         ) -> Result<invisi_sdk_rpc::broadcaster::Status> {
             panic!("no submit")
@@ -1260,7 +1291,14 @@ mod lifecycle_tests {
             };
             assert!(restarted.reprice.is_some());
             let prepared = restarted
-                .with_broadcaster(chain.clone(), relay.clone(), &BroadcasterOptions::default())
+                .with_broadcaster(
+                    chain.clone(),
+                    relay.clone(),
+                    &BroadcasterOptions {
+                        max_fee_amount: Some(U256::from(100)),
+                        ..Default::default()
+                    },
+                )
                 .unwrap();
             assert!(original.broadcaster_state().is_none());
             assert_eq!(relay.fees.load(std::sync::atomic::Ordering::SeqCst), 3);
@@ -1270,7 +1308,6 @@ mod lifecycle_tests {
                 .is_err());
             let saved = prepared.broadcaster_state().unwrap();
             assert!(saved.sidecars.is_empty());
-            assert!(saved.tracking.is_none());
             assert_eq!(saved.quote.quote.fee_amount, "2");
             if let (
                 CreditPlan::Draw {
@@ -1356,8 +1393,8 @@ mod lifecycle_tests {
                 .restore(proved.wallet(), Some(&SyntheticCreditBackend))
                 .unwrap();
             match restored {
-                journal::ManagedPrepared::Credit(v) => {
-                    v.submit_broadcaster(chain.as_ref(), relay.as_ref(), "credit-restart")
+                journal::ManagedPrepared::Credit(mut v) => {
+                    v.submit_broadcaster(chain.as_ref(), relay.as_ref())
                         .unwrap();
                 }
                 _ => panic!("Credit"),
@@ -1400,8 +1437,14 @@ mod lifecycle_tests {
                 fee_recipient: Address::repeat_byte(4),
             }
         }
-        fn required_policy(&self) -> Option<B256> {
-            Some(B256::repeat_byte(7))
+        fn submission_requirements(
+            &self,
+            q: &invisi_sdk_rpc::broadcaster::VerifiedQuote,
+        ) -> Result<bool> {
+            Ok(q.signed().provenance_required == Some(true))
+        }
+        fn provenance_mode(&self) -> Option<()> {
+            Some(())
         }
         fn fee(&self, _: Address, _: Option<&[u8]>) -> Result<invisi_sdk_rpc::broadcaster::Fee> {
             let n = self.fees.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1427,7 +1470,7 @@ mod lifecycle_tests {
                 protocol,
                 signer: self.configuration().quote_signer,
             };
-            let policy = self.required_policy().unwrap();
+            let policy = self.provenance_mode().unwrap();
             let quote = Quote {
                 token: i.token,
                 fee_recipient: i.fee_recipient,
@@ -1436,7 +1479,6 @@ mod lifecycle_tests {
                 max_gas: "100000".into(),
                 request_hash: B256::from(crate::provenance::provenance_intent_hash(
                     request_hash(data).unwrap().0,
-                    U256::from_be_bytes(policy.0),
                 )),
             };
             let (sig, r) = k256::ecdsa::SigningKey::from_slice(&secret(7))
@@ -1449,9 +1491,9 @@ mod lifecycle_tests {
                 SignedQuote {
                     quote,
                     signature: hex(&bytes),
-                    provenance_policy_id: Some(policy),
+
                     request_hash_format: Some(REQUEST_HASH_FORMAT.into()),
-                    provenance_tracking: None,
+                    provenance_required: Some(true),
                 },
                 trust,
                 data,
@@ -1464,22 +1506,21 @@ mod lifecycle_tests {
             &self,
             data: &[u8],
             quote: &invisi_sdk_rpc::broadcaster::VerifiedQuote,
-            id: &str,
             sidecars: &[crate::provenance::ProofSidecar],
         ) -> Result<invisi_sdk_rpc::broadcaster::Status> {
             assert!(sidecars.is_empty());
-            invisi_sdk_rpc::broadcaster::verify_quote_for_policy(
+            invisi_sdk_rpc::broadcaster::verify_quote_for_provenance(
                 quote.signed(),
                 quote.trust(),
                 data,
                 0,
-                self.required_policy(),
+                self.provenance_mode(),
             )
             .map_err(|e| e.to_string())?;
             self.submits
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(invisi_sdk_rpc::broadcaster::Status {
-                id: id.into(),
+                id: "server-owned".into(),
                 state: invisi_sdk_rpc::broadcaster::StatusState::Pending,
                 transaction_hash: None,
             })
@@ -1698,12 +1739,18 @@ mod lifecycle_tests {
                 .collect::<Vec<_>>(),
             expected
         );
-        let q = prepared.export_wallet_request(label).unwrap();
+        let request = prepared.export_wallet_authorization().unwrap();
         let scalar = if label == "credit_draw_slots1" { 2 } else { 1 };
-        let r: WalletResponse =
-            serde_json::from_value(crate::wallet::execute(&secret(scalar), &q.as_value()).unwrap())
-                .unwrap();
-        (chain, prepared.with_wallet_response(&q, &r).unwrap())
+        let key = k256::ecdsa::SigningKey::from_slice(&secret(scalar)).unwrap();
+        let (signature, id) = key
+            .sign_prehash_recoverable(request.digest.as_slice())
+            .unwrap();
+        let mut bytes = signature.to_bytes().to_vec();
+        bytes.push(id.to_byte() + 27);
+        let mut wrong = request.clone();
+        wrong.digest = keccak256("different Credit intent");
+        assert!(accept_wallet_signature(prepared.wallet.owner, &wrong, &bytes).is_err());
+        (chain, prepared.with_wallet_signature(&bytes).unwrap())
     }
     fn prepared_live(
         label: &str,
@@ -1975,7 +2022,14 @@ mod revocation_tests {
             submits: std::sync::atomic::AtomicUsize::new(0),
         });
         let prepared = original
-            .with_broadcaster(chain.clone(), relay.clone(), &BroadcasterOptions::default())
+            .with_broadcaster(
+                chain.clone(),
+                relay.clone(),
+                &BroadcasterOptions {
+                    max_fee_amount: Some(U256::from(100)),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert!(original.broadcaster_state().is_none());
         assert_ne!(
@@ -2001,8 +2055,8 @@ mod revocation_tests {
             .unwrap();
         let restored = saved.restore(&owner, None).unwrap();
         match restored {
-            journal::ManagedPrepared::Credit(v) => {
-                v.submit_broadcaster(chain.as_ref(), relay.as_ref(), "revocation-restart")
+            journal::ManagedPrepared::Credit(mut v) => {
+                v.submit_broadcaster(chain.as_ref(), relay.as_ref())
                     .unwrap();
             }
             _ => panic!("Credit"),

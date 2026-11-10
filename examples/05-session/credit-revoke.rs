@@ -52,19 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         options.to_block = env::var("TO_BLOCK").ok().map(|s| s.parse()).transpose()?;
         let pending = session.refresh(options)?;
-        println!(
-            "Native discovery requests: {}",
-            serde_json::to_string(pending.wallet_requests())?
-        );
-        let responses: Vec<sdk::WalletResponse> = if pending.wallet_requests().is_empty() {
-            Vec::new()
-        } else {
-            eprintln!("Execute the discovery array in your native host, then paste its response JSON array:");
-            let mut response_json = String::new();
-            std::io::stdin().read_line(&mut response_json)?;
-            serde_json::from_str(&response_json)?
-        };
-        pending.apply_wallet_responses(&responses)?;
+        pending.decrypt(&invisi_sdk_examples::AppDecryptor)?;
     }
 
     let operation = if let Ok(id) = env::var("OPERATION_ID") {
@@ -101,19 +89,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Public revocation needs EVM owner consent, not a private circuit proof.
     if matches!(operation.phase(), sdk::Phase::Prepared) {
         if caller != session.wallet().owner_address() {
-            println!(
-                "Public EVM revocation authorization: {}",
-                serde_json::to_string_pretty(&operation.export_revocation_authorization()?)?
-            );
-            eprintln!("Sign with the owner's EVM host, then paste its 0x signature:");
-            let mut signature = String::new();
-            std::io::stdin().read_line(&mut signature)?;
-            let signature = hex::decode(
-                signature
-                    .trim()
-                    .strip_prefix("0x")
-                    .ok_or("0x signature required")?,
-            )?;
+            let request = operation.export_revocation_signing_request()?;
+            let signature = invisi_sdk_examples::sign_authorization(&request)?;
             operation = operation.with_revocation_signature(signature)?;
         }
         operation = operation.ready()?;
@@ -140,21 +117,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("Transaction is not yet canonically available.")
             }
             invisi_sdk::session::Reconciliation::Ready(pending) => {
-                println!(
-                    "Reconciliation viewing requests: {}",
-                    serde_json::to_string(pending.wallet_requests())?
-                );
-                let responses = if pending.wallet_requests().is_empty() {
-                    Vec::new()
-                } else {
-                    eprintln!(
-                        "Execute the native viewing requests, then paste the response JSON array:"
-                    );
-                    let mut response_json = String::new();
-                    std::io::stdin().read_line(&mut response_json)?;
-                    serde_json::from_str(&response_json)?
-                };
-                let applied = pending.apply_wallet_responses(&responses)?;
+                let applied = pending.decrypt(&invisi_sdk_examples::AppDecryptor)?;
+
                 println!(
                     "Reconciliation applied at canonical block {}.",
                     applied.block.number

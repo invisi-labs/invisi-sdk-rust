@@ -1,4 +1,4 @@
-//! 显式验证密钥轮换链，只扩展已固定的初始受信密钥。
+//! Authenticated signing-key rotation and historical validity intervals.
 use crate::note::{ModelError, ModelResult};
 use crate::provenance::{parse_integer, TrustContext};
 use alloy_primitives::U256;
@@ -240,7 +240,6 @@ mod tests {
             scope: Scope {
                 chain_id: 4,
                 protocol_address: U256::from(5),
-                policy_id: U256::from(3),
             },
             chain_generation: 6,
             provider_id: parse_integer(&r.provider_id, 256).unwrap(),
@@ -281,7 +280,6 @@ mod tests {
         let s = Scope {
             chain_id: 1,
             protocol_address: U256::from(1),
-            policy_id: U256::from(1),
         };
         assert!(note_opening(
             &s,

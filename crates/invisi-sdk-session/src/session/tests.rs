@@ -6,7 +6,6 @@ use crate::{
     sdk::{ChainState, TransferPreparation, WalletResponse},
 };
 use alloy_sol_types::SolEvent;
-use serde_json::json;
 use std::collections::BTreeSet;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -236,46 +235,80 @@ fn harness() -> Harness {
         commitment,
     }
 }
-fn responses(pending: &PendingWalletRefresh) -> Vec<sdk::WalletResponse> {
-    let requests: Vec<_> = pending
-        .wallet_requests()
-        .iter()
-        .map(sdk::WalletRequest::as_value)
-        .collect();
-    crate::wallet::execute_batch(&key(1), &requests)
-        .unwrap()
-        .into_iter()
-        .map(|value| serde_json::from_value(value).unwrap())
-        .collect()
+#[derive(Default)]
+struct AppDecryptor {
+    fail: bool,
+    forge: bool,
+    nonrecipient: bool,
 }
-fn nonmatch(q: &sdk::WalletRequest) -> sdk::WalletResponse {
-    serde_json::from_value(json!({"version":q.version,"id":q.id,"ownerAddress":q.owner_address,"method":q.method,"error":{"code":"WALLET_NOT_RECIPIENT"}})).unwrap()
+impl crate::delivery::DeliveryDecryptor for AppDecryptor {
+    fn decrypt_note(
+        &self,
+        envelope: &[u8],
+        context: &crate::delivery::DeliveryContext,
+        owner: U256,
+    ) -> Result<Option<Vec<u8>>> {
+        if self.fail {
+            return Err("App wallet locked".into());
+        }
+        if self.nonrecipient {
+            return Ok(None);
+        }
+        let viewing = crate::wallet::viewing_key(&key(1))?;
+        let Ok(note) = crate::delivery::decrypt_note(&*viewing, envelope, context, owner) else {
+            return Ok(None);
+        };
+        let mut plain = crate::delivery::encode_note(&note).map_err(|e| e.to_string())?;
+        if self.forge {
+            plain[47] ^= 1;
+        }
+        Ok(Some(plain.to_vec()))
+    }
+    fn decrypt_credit(
+        &self,
+        envelope: &[u8],
+        context: &crate::delivery::DeliveryContext,
+        role: CreditRole,
+        owner: U256,
+    ) -> Result<Option<Vec<u8>>> {
+        if self.fail {
+            return Err("App wallet locked".into());
+        }
+        if self.nonrecipient {
+            return Ok(None);
+        }
+        let viewing = crate::wallet::viewing_key(&key(1))?;
+        let Ok(credit) = crate::delivery::decrypt_credit(&*viewing, envelope, context, role, owner)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(
+            crate::delivery::encode_credit(&credit)
+                .map_err(|e| e.to_string())?
+                .to_vec(),
+        ))
+    }
 }
 #[test]
-fn batch_member_errors_do_not_commit_and_reordered_retries_succeed() {
+fn app_errors_do_not_commit_and_retries_succeed() {
     let h = harness();
     let pending = h.session.refresh(RefreshOptions::from_block(0)).unwrap();
-    let before = h.session.snapshot().unwrap();
-    let mut replies = responses(&pending);
-    replies[0].outcome = sdk::WalletOutcome::Error {
-        error: sdk::WalletError {
-            code: "WALLET_LOCKED".into(),
-        },
-    };
-    assert!(pending.apply_wallet_responses(&replies).is_err());
-    assert_eq!(h.session.snapshot().unwrap().revision, before.revision);
+    assert!(pending
+        .decrypt(&AppDecryptor {
+            fail: true,
+            ..Default::default()
+        })
+        .is_err());
+    assert_eq!(h.session.snapshot().unwrap().revision, 0);
     assert!(h.session.snapshot().unwrap().notes.is_empty());
-    let mut replies = responses(&pending);
-    replies.reverse();
-    pending.apply_wallet_responses(&replies).unwrap();
+    pending.decrypt(&AppDecryptor::default()).unwrap();
     assert_eq!(h.session.snapshot().unwrap().notes.len(), 1);
 }
+
 fn synced() -> Harness {
     let h = harness();
     let pending = h.session.refresh(RefreshOptions::from_block(0)).unwrap();
-    pending
-        .apply_wallet_responses(&responses(&pending))
-        .unwrap();
+    pending.decrypt(&AppDecryptor::default()).unwrap();
     h
 }
 fn transfer(h: &Harness) -> TransferPreparation {
@@ -291,18 +324,18 @@ fn transfer(h: &Harness) -> TransferPreparation {
     }
 }
 #[test]
-fn stages_native_requests_without_state_writes_and_retries_rejected_responses() {
+fn stages_without_state_writes_and_retries_app_failures() {
     let h = harness();
     let pending = h.session.refresh(RefreshOptions::from_block(0)).unwrap();
-    assert_eq!(pending.wallet_requests().len(), 1);
     assert_eq!(h.session.snapshot().unwrap().revision, 0);
-    let mut replies = responses(&pending);
-    let valid = replies.clone();
-    replies[0].id = "wrong".into();
-    assert!(pending.apply_wallet_responses(&replies).is_err());
+    assert!(pending
+        .decrypt(&AppDecryptor {
+            fail: true,
+            ..Default::default()
+        })
+        .is_err());
     assert_eq!(h.session.snapshot().unwrap().revision, 0);
-    assert!(pending.apply_wallet_responses(&[]).is_err());
-    pending.apply_wallet_responses(&valid).unwrap();
+    pending.decrypt(&AppDecryptor::default()).unwrap();
     assert_eq!(
         h.session
             .balance(sdk::word_address(h.note.token_address).unwrap())
@@ -310,35 +343,29 @@ fn stages_native_requests_without_state_writes_and_retries_rejected_responses() 
             .available,
         Some(U256::from(70))
     );
-    assert!(pending.apply_wallet_responses(&valid).is_err());
+    assert!(pending.decrypt(&AppDecryptor::default()).is_err());
 }
+
 #[test]
 fn refresh_rejects_forged_plaintext_wrong_membership_reorg_and_stale_revision() {
     let h = harness();
     let pending = h.session.refresh(RefreshOptions::from_block(0)).unwrap();
-    let mut replies = responses(&pending);
-    let result = replies[0].result_mut().unwrap();
-    let mut plain = hex::decode(
-        result["plaintext"]
-            .as_str()
-            .unwrap()
-            .trim_start_matches("0x"),
-    )
-    .unwrap();
-    plain[47] ^= 1;
-    result["plaintext"] = serde_json::json!(format!("0x{}", hex::encode(plain)));
-    assert!(pending.apply_wallet_responses(&replies).is_err());
+    assert!(pending
+        .decrypt(&AppDecryptor {
+            forge: true,
+            ..Default::default()
+        })
+        .is_err());
     assert_eq!(h.session.snapshot().unwrap().revision, 0);
-    let valid = responses(&pending);
     h.chain.reorg.store(true, Ordering::SeqCst);
-    assert!(pending.apply_wallet_responses(&valid).is_err());
+    assert!(pending.decrypt(&AppDecryptor::default()).is_err());
     h.chain.reorg.store(false, Ordering::SeqCst);
     let mut state = h.session.snapshot().unwrap();
     state.scope = Some(h.session.scope.clone());
     h.store
         .compare_and_swap(&h.session.scope.key(), 0, state)
         .unwrap();
-    assert!(pending.apply_wallet_responses(&valid).is_err());
+    assert!(pending.decrypt(&AppDecryptor::default()).is_err());
 }
 #[test]
 fn reservations_are_atomic_and_resume_invalidates_prior_handles() {
@@ -377,12 +404,12 @@ fn storage_encrypts_and_binds_scope_revision_and_ciphertext() {
 fn explicit_not_recipient_is_a_no_match_and_scope_isolation_is_enforced() {
     let h = harness();
     let pending = h.session.refresh(RefreshOptions::from_block(0)).unwrap();
-    let replies = pending
-        .wallet_requests()
-        .iter()
-        .map(nonmatch)
-        .collect::<Vec<_>>();
-    pending.apply_wallet_responses(&replies).unwrap();
+    pending
+        .decrypt(&AppDecryptor {
+            nonrecipient: true,
+            ..Default::default()
+        })
+        .unwrap();
     assert!(h.session.snapshot().unwrap().notes.is_empty());
     let other = WalletSession::connect(
         h.session.invisi.clone(),
@@ -525,15 +552,14 @@ fn exported_operations_cannot_cancel_and_reconciliation_checks_exact_transaction
         Reconciliation::Ready(v) => v,
         _ => panic!("expected canonical reconciliation"),
     };
-    assert!(pending.wallet_requests().is_empty());
-    pending.apply_wallet_responses(&[]).unwrap();
+    pending.decrypt(&AppDecryptor::default()).unwrap();
     let state = h.session.snapshot().unwrap();
     assert_eq!(state.operations[&id].status, OperationStatus::Reverted);
     assert!(state.notes[&h.commitment].reserved_by.is_none());
     assert!(state.discovery_through.is_some());
 }
 #[test]
-fn successful_canonical_shield_reconciliation_commits_only_after_explicit_native_responses() {
+fn successful_canonical_shield_reconciliation_commits_only_after_injected_app_decryption() {
     use alloy_sol_types::SolCall;
     let h = harness();
     let output =
@@ -579,13 +605,14 @@ fn successful_canonical_shield_reconciliation_commits_only_after_explicit_native
         _ => panic!("expected reconciliation"),
     };
     assert!(h.session.snapshot().unwrap().notes.is_empty());
-    let mut wrong = responses(&pending);
-    wrong[0].id = "wrong".into();
-    assert!(pending.apply_wallet_responses(&wrong).is_err());
+    assert!(pending
+        .decrypt(&AppDecryptor {
+            fail: true,
+            ..Default::default()
+        })
+        .is_err());
     assert!(h.session.snapshot().unwrap().notes.is_empty());
-    pending
-        .apply_wallet_responses(&responses(&pending))
-        .unwrap();
+    pending.decrypt(&AppDecryptor::default()).unwrap();
     let state = h.session.snapshot().unwrap();
     assert_eq!(
         state.operations[operation.id()].status,
@@ -699,10 +726,7 @@ fn credit_inventory_is_separate_and_canonical_draw_recovers_owned_successor_with
     };
     h.source.receipt.lock().unwrap().logs = vec![log(&insertion, 0), log(&created, 1)];
     let pending = h.session.refresh(RefreshOptions::from_block(0)).unwrap();
-    assert_eq!(pending.wallet_requests().len(), 2);
-    pending
-        .apply_wallet_responses(&responses(&pending))
-        .unwrap();
+    pending.decrypt(&AppDecryptor::default()).unwrap();
     let initial = h.session.snapshot().unwrap();
     assert_eq!(initial.credits.len(), 1);
     assert!(initial.notes.is_empty());
@@ -807,12 +831,12 @@ fn credit_inventory_is_separate_and_canonical_draw_recovers_owned_successor_with
         receipt.logs = vec![log(&insertion, 2), log(&draw, 3)];
     }
     let pending = h.session.refresh(RefreshOptions::from_block(0)).unwrap();
-    let no_matches = pending
-        .wallet_requests()
-        .iter()
-        .map(nonmatch)
-        .collect::<Vec<_>>();
-    pending.apply_wallet_responses(&no_matches).unwrap();
+    pending
+        .decrypt(&AppDecryptor {
+            nonrecipient: true,
+            ..Default::default()
+        })
+        .unwrap();
     let after = h.session.snapshot().unwrap();
     assert_eq!(after.credits.len(), 2);
     assert!(after.credits[&credit_key(commitment, CreditRole::Owner)].consumed);
@@ -859,16 +883,15 @@ fn credit_inventory_is_separate_and_canonical_draw_recovers_owned_successor_with
 fn concurrent_apply_has_one_winner_and_expiry_requires_canonical_unspent_inputs() {
     let h = harness();
     let pending = h.session.refresh(RefreshOptions::from_block(0)).unwrap();
-    let replies = responses(&pending);
     let barrier = std::sync::Barrier::new(2);
     let results = std::thread::scope(|scope| {
         let a = scope.spawn(|| {
             barrier.wait();
-            pending.apply_wallet_responses(&replies)
+            pending.decrypt(&AppDecryptor::default())
         });
         let b = scope.spawn(|| {
             barrier.wait();
-            pending.apply_wallet_responses(&replies)
+            pending.decrypt(&AppDecryptor::default())
         });
         [a.join().unwrap().is_ok(), b.join().unwrap().is_ok()]
     });
@@ -962,7 +985,7 @@ fn same_wallet_aggregate_externalizes_tracks_and_reconciles_member_journals_atom
         Reconciliation::Ready(v) => v,
         _ => panic!("expected group reconciliation"),
     };
-    pending.apply_wallet_responses(&[]).unwrap();
+    pending.decrypt(&AppDecryptor::default()).unwrap();
     let state = h.session.snapshot().unwrap();
     assert!(operations
         .iter()
@@ -978,9 +1001,7 @@ fn canonical_reset_keeps_uncertain_operation_inputs_reserved() {
     let mut options = RefreshOptions::from_block(0);
     options.reset = true;
     let pending = h.session.refresh(options).unwrap();
-    pending
-        .apply_wallet_responses(&responses(&pending))
-        .unwrap();
+    pending.decrypt(&AppDecryptor::default()).unwrap();
     let state = h.session.snapshot().unwrap();
     assert!(!state.invalidated);
     assert_eq!(
@@ -1009,14 +1030,12 @@ fn healthy_reset_preserves_canonical_terminal_history_and_does_not_resurrect_res
         Reconciliation::Ready(v) => v,
         _ => panic!("expected mined outcome"),
     };
-    pending.apply_wallet_responses(&[]).unwrap();
+    pending.decrypt(&AppDecryptor::default()).unwrap();
     *h.source.receipt.lock().unwrap() = original;
     let mut options = RefreshOptions::from_block(0);
     options.reset = true;
     let pending = h.session.refresh(options).unwrap();
-    pending
-        .apply_wallet_responses(&responses(&pending))
-        .unwrap();
+    pending.decrypt(&AppDecryptor::default()).unwrap();
     let state = h.session.snapshot().unwrap();
     assert_eq!(state.operations[&id].status, OperationStatus::Reverted);
     assert!(state.operations[&id].resolved_at.is_some());
@@ -1028,33 +1047,6 @@ fn healthy_reset_preserves_canonical_terminal_history_and_does_not_resurrect_res
             .available,
         Some(h.note.amount)
     );
-}
-
-#[test]
-fn oversized_staged_batches_fail_before_returning_a_handle_or_writing_state() {
-    let h = harness();
-    let receipt = h.source.receipt.lock().unwrap().clone();
-    let receipts = (0..1025u64)
-        .map(|n| {
-            let mut receipt = receipt.clone();
-            receipt.transaction_hash = sdk::field_word(U256::from(n + 1));
-            receipt
-        })
-        .collect();
-    let before = h.session.snapshot().unwrap();
-    let error = h
-        .session
-        .stage_refresh(
-            before.clone(),
-            block(10),
-            receipts,
-            RefreshOptions::from_block(0),
-            None,
-        )
-        .unwrap_err();
-    assert!(error.contains("smaller block range"));
-    assert_eq!(h.session.snapshot().unwrap().revision, before.revision);
-    assert!(h.session.snapshot().unwrap().notes.is_empty());
 }
 
 #[test]
@@ -1107,7 +1099,13 @@ fn credit_relay_context_survives_encrypted_restart_and_fences_uncertain_submissi
         attempts: std::sync::atomic::AtomicUsize::new(0),
     });
     operation
-        .with_broadcaster(relay.clone(), &sdk::BroadcasterOptions::default())
+        .with_broadcaster(
+            relay.clone(),
+            &sdk::BroadcasterOptions {
+                max_fee_amount: Some(U256::from(100)),
+                ..Default::default()
+            },
+        )
         .unwrap();
     assert!(operation.broadcaster_state().is_some());
     let encrypted = records.read(&restarted.scope.key()).unwrap().unwrap();
@@ -1130,7 +1128,7 @@ fn credit_relay_context_survives_encrypted_restart_and_fences_uncertain_submissi
     let mut operation = restarted.resume(&id, Some(&Backend)).unwrap();
     assert!(operation.broadcaster_state().is_some());
     assert!(operation
-        .submit_broadcaster(relay.as_ref(), "stable-credit")
+        .submit_broadcaster(relay.as_ref())
         .unwrap_err()
         .contains("uncertain"));
     assert_eq!(relay.attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -1140,37 +1138,30 @@ fn credit_relay_context_survives_encrypted_restart_and_fences_uncertain_submissi
         restarted.snapshot().unwrap().operations[&id]
             .broadcaster_id
             .as_deref(),
-        Some("stable-credit")
+        Some(id.as_str())
     );
     h.chain
         .height
         .store(200, std::sync::atomic::Ordering::SeqCst);
-    assert!(operation
-        .submit_broadcaster(relay.as_ref(), "different-credit")
-        .unwrap_err()
-        .contains("retry ID"));
     assert_eq!(
-        operation
-            .submit_broadcaster(relay.as_ref(), "stable-credit")
-            .unwrap()
-            .id,
-        "stable-credit"
+        operation.submit_broadcaster(relay.as_ref()).unwrap().id,
+        "server-owned"
     );
     relay
         .lookup_mode
         .store(1, std::sync::atomic::Ordering::SeqCst);
     assert!(operation
-        .submit_broadcaster(relay.as_ref(), "stable-credit")
+        .submit_broadcaster(relay.as_ref())
         .unwrap_err()
         .contains("offline"));
     relay
         .lookup_mode
         .store(2, std::sync::atomic::Ordering::SeqCst);
-    assert!(operation
-        .submit_broadcaster(relay.as_ref(), "stable-credit")
-        .unwrap_err()
-        .contains("deadline"));
-    assert_eq!(relay.attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        operation.submit_broadcaster(relay.as_ref()).unwrap().id,
+        "server-owned"
+    );
+    assert_eq!(relay.attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
 }
 struct SessionCreditRelay {
     lookup_mode: std::sync::atomic::AtomicUsize,
@@ -1199,7 +1190,13 @@ impl sdk::PreparedBroadcaster for SessionCreditRelay {
             fee_recipient: Address::repeat_byte(4),
         }
     }
-    fn required_policy(&self) -> Option<B256> {
+    fn submission_requirements(
+        &self,
+        q: &invisi_sdk_rpc::broadcaster::VerifiedQuote,
+    ) -> Result<bool> {
+        Ok(q.signed().provenance_required == Some(true))
+    }
+    fn provenance_mode(&self) -> Option<()> {
         None
     }
     fn fee(&self, _: Address, _: Option<&[u8]>) -> Result<crate::broadcaster::Fee> {
@@ -1243,9 +1240,9 @@ impl sdk::PreparedBroadcaster for SessionCreditRelay {
             SignedQuote {
                 quote,
                 signature: format!("0x{}", hex::encode(bytes)),
-                provenance_policy_id: None,
+
                 request_hash_format: None,
-                provenance_tracking: None,
+                provenance_required: None,
             },
             trust,
             data,
@@ -1258,15 +1255,22 @@ impl sdk::PreparedBroadcaster for SessionCreditRelay {
         &self,
         data: &[u8],
         quote: &crate::broadcaster::VerifiedQuote,
-        _: &str,
         sidecars: &[crate::provenance::ProofSidecar],
     ) -> Result<crate::broadcaster::Status> {
         assert!(sidecars.is_empty());
         crate::broadcaster::verify_quote(quote.signed(), quote.trust(), data, 0)
             .map_err(|e| e.to_string())?;
-        self.attempts
+        let attempt = self
+            .attempts
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Err("uncertain relay response".into())
+        if attempt == 0 {
+            return Err("uncertain relay response".into());
+        }
+        Ok(crate::broadcaster::Status {
+            id: "server-owned".into(),
+            state: crate::broadcaster::StatusState::Pending,
+            transaction_hash: None,
+        })
     }
 }
 
@@ -1294,8 +1298,14 @@ fn funds_relay_retry_reads_known_journal_even_when_inputs_are_spent() {
         lookup_mode: std::sync::atomic::AtomicUsize::new(0),
         attempts: std::sync::atomic::AtomicUsize::new(0),
     });
-    op.with_broadcaster(relay.clone(), &sdk::BroadcasterOptions::default())
-        .unwrap();
+    op.with_broadcaster(
+        relay.clone(),
+        &sdk::BroadcasterOptions {
+            max_fee_amount: Some(U256::from(100)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let request = op.export_wallet_request("funds-relay").unwrap();
     let response: sdk::WalletResponse =
         serde_json::from_value(crate::wallet::execute(&key(1), &request.as_value()).unwrap())
@@ -1306,9 +1316,7 @@ fn funds_relay_retry_reads_known_journal_even_when_inputs_are_spent() {
         .prove(&Backend, false)
         .unwrap();
     let id = op.id().to_string();
-    assert!(op
-        .submit_broadcaster(relay.as_ref(), "stable-funds")
-        .is_err());
+    assert!(op.submit_broadcaster(relay.as_ref()).is_err());
     drop(op);
     h.chain
         .spent
@@ -1320,25 +1328,22 @@ fn funds_relay_retry_reads_known_journal_even_when_inputs_are_spent() {
         .store(200, std::sync::atomic::Ordering::SeqCst);
     let mut op = h.session.resume(&id, Some(&Backend)).unwrap();
     assert_eq!(
-        op.submit_broadcaster(relay.as_ref(), "stable-funds")
-            .unwrap()
-            .id,
-        "stable-funds"
+        op.submit_broadcaster(relay.as_ref()).unwrap().id,
+        "server-owned"
     );
-    assert!(op.submit_broadcaster(relay.as_ref(), "new-funds").is_err());
     relay
         .lookup_mode
         .store(1, std::sync::atomic::Ordering::SeqCst);
     assert!(op
-        .submit_broadcaster(relay.as_ref(), "stable-funds")
+        .submit_broadcaster(relay.as_ref())
         .unwrap_err()
         .contains("offline"));
     relay
         .lookup_mode
         .store(2, std::sync::atomic::Ordering::SeqCst);
-    assert!(op
-        .submit_broadcaster(relay.as_ref(), "stable-funds")
-        .unwrap_err()
-        .contains("spendable"));
-    assert_eq!(relay.attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        op.submit_broadcaster(relay.as_ref()).unwrap().id,
+        "server-owned"
+    );
+    assert_eq!(relay.attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
 }

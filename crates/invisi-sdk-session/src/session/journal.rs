@@ -38,6 +38,8 @@ pub struct OperationRecord {
     pub call: Option<StoredCall>,
     pub externalized: bool,
     pub broadcaster_id: Option<String>,
+    #[serde(default)]
+    pub broadcaster_submission_id: Option<String>,
     pub resolved_at: Option<CanonicalBlock>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

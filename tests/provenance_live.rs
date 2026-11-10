@@ -10,7 +10,6 @@ use std::{collections::BTreeMap, time::Duration};
 struct LiveScope {
     chain_id: String,
     protocol_address: String,
-    policy_id: String,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -50,10 +49,6 @@ fn identity(r: &Value, f: &LiveTrust) {
     assert_eq!(
         n(r["scope"]["protocolAddress"].as_str().unwrap()),
         n(&f.scope.protocol_address)
-    );
-    assert_eq!(
-        n(r["scope"]["policyId"].as_str().unwrap()),
-        n(&f.scope.policy_id)
     );
     assert_eq!(r["chainGeneration"], f.chain_generation);
     assert_eq!(r["providerId"], f.provider_id);
@@ -107,7 +102,6 @@ fn provenance_live_service() {
         scope: Scope {
             chain_id: parse_integer(&f.scope.chain_id, 64).unwrap().to(),
             protocol_address: n(&f.scope.protocol_address),
-            policy_id: n(&f.scope.policy_id),
         },
         chain_generation: parse_integer(&f.chain_generation, 64).unwrap().to(),
         provider_id: n(&f.provider_id),
@@ -127,7 +121,7 @@ fn provenance_live_service() {
     let status = c.get_status().unwrap();
     identity(&status, &f);
     assert_eq!(status["workerAvailable"], true);
-    let policy = c.get_policy().unwrap();
+    let policy = c.get_rules().unwrap();
     identity(&policy, &f);
     assert_eq!(
         policy["initialSigningPublicKey"],
@@ -241,11 +235,4 @@ fn provenance_live_service() {
             "wrong {kind} pin accepted actual response"
         );
     }
-    let mut wrong = trust;
-    wrong.scope.policy_id = U256::ZERO;
-    assert!(ProvenanceClient::new(&f.endpoint, wrong)
-        .unwrap()
-        .get_version()
-        .unwrap_err()
-        .contains("POLICY_UNKNOWN"));
 }

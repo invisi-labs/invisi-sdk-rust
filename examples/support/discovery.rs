@@ -304,3 +304,48 @@ mod tests {
         assert!(select_credit_draw(&state, token, U256::from(1), 2_000_000_124).is_err());
     }
 }
+
+/// Application integration point: return decrypted delivery bytes, or None for an unrelated recipient.
+/// Replace these callbacks with your application's decryptor; no account key enters the SDK.
+pub struct AppDecryptor;
+impl invisi_sdk::delivery::DeliveryDecryptor for AppDecryptor {
+    fn decrypt_note(
+        &self,
+        _envelope: &[u8],
+        _context: &invisi_sdk::delivery::DeliveryContext,
+        _owner: U256,
+    ) -> Result<Option<Vec<u8>>> {
+        Err(
+            "Implement AppDecryptor::decrypt_note with your application's delivery decryption"
+                .into(),
+        )
+    }
+    fn decrypt_credit(
+        &self,
+        _envelope: &[u8],
+        _context: &invisi_sdk::delivery::DeliveryContext,
+        _role: CreditRole,
+        _owner: U256,
+    ) -> Result<Option<Vec<u8>>> {
+        Err(
+            "Implement AppDecryptor::decrypt_credit with your application's delivery decryption"
+                .into(),
+        )
+    }
+}
+
+/// Example application signer. Production apps can replace this with any EIP-712 capable wallet.
+pub fn sign_authorization(request: &sdk::EvmSigningRequest) -> Result<Vec<u8>> {
+    let key =
+        zeroize::Zeroizing::new(std::env::var("OWNER_PRIVATE_KEY").map_err(|e| e.to_string())?);
+    let bytes = zeroize::Zeroizing::new(
+        hex::decode(key.trim().trim_start_matches("0x")).map_err(|e| e.to_string())?,
+    );
+    let signer = k256::ecdsa::SigningKey::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let (signature, recovery) = signer
+        .sign_prehash_recoverable(request.digest.as_slice())
+        .map_err(|e| e.to_string())?;
+    let mut output = signature.to_bytes().to_vec();
+    output.push(recovery.to_byte() + 27);
+    Ok(output)
+}

@@ -5,9 +5,7 @@ use crate::{
         self, CanonicalHead, CanonicalReceipt, CanonicalTransaction, ChainReceipts,
         ChainTransactions, Membership, MembershipInput, ProtocolRpcClient, RpcTransport,
     },
-    sdk::{WalletRequest, WalletResponse, WalletResult},
 };
-use serde_json::json;
 use std::{collections::BTreeSet, sync::Mutex};
 
 /// Indexed discovery chooses candidates; receipts and membership come from independent canonical reads.
@@ -114,8 +112,7 @@ pub struct PendingWalletRefresh {
     base: WalletState,
     anchor: CanonicalBlock,
     receipts: Vec<CanonicalReceipt>,
-    candidates: BTreeMap<String, (WalletRequest, Candidate)>,
-    wallet_requests: Vec<WalletRequest>,
+    candidates: BTreeMap<String, Candidate>,
     options: RefreshOptions,
     apply_state: Mutex<ApplyState>,
     pub(crate) completion: Option<Vec<(String, u64, bool)>>,
@@ -124,7 +121,7 @@ impl std::fmt::Debug for PendingWalletRefresh {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PendingWalletRefresh")
             .field("block", &self.anchor)
-            .field("wallet_request_count", &self.wallet_requests.len())
+            .field("candidate_count", &self.candidates.len())
             .finish_non_exhaustive()
     }
 }
@@ -214,56 +211,23 @@ impl WalletSession {
                     "{}:{}:{}:funds",
                     receipt.transaction_hash, note.leaf.tree_id, note.leaf.leaf_index
                 );
-                if !keys.insert(key) {
+                if !keys.insert(key.clone()) {
                     continue;
                 }
-                let params = delivery_params(self.scope.context, &note.leaf, &note.delivery, None);
-                if let Ok(request) = self.wallet.prepare_request(
-                    uuid::Uuid::new_v4().to_string(),
-                    "wallet.decryptNote",
-                    params,
-                ) {
-                    candidates.insert(request.id.clone(), (request, Candidate::Note(note)));
-                }
+                candidates.insert(key, Candidate::Note(note));
             }
             for credit in decoded.credits {
-                for (role, index) in [(CreditRole::Owner, 0), (CreditRole::Spender, 1)] {
+                for role in [CreditRole::Owner, CreditRole::Spender] {
                     let key = format!(
                         "{}:{}:{}:{role:?}",
                         receipt.transaction_hash, credit.leaf.tree_id, credit.leaf.leaf_index
                     );
-                    if !keys.insert(key) {
+                    if !keys.insert(key.clone()) {
                         continue;
                     }
-                    let params = delivery_params(
-                        self.scope.context,
-                        &credit.leaf,
-                        &credit.deliveries[index],
-                        Some(role),
-                    );
-                    if let Ok(request) = self.wallet.prepare_request(
-                        uuid::Uuid::new_v4().to_string(),
-                        "wallet.decryptCredit",
-                        params,
-                    ) {
-                        candidates.insert(
-                            request.id.clone(),
-                            (request, Candidate::Credit(credit.clone(), role)),
-                        );
-                    }
+                    candidates.insert(key, Candidate::Credit(credit.clone(), role));
                 }
             }
-        }
-        let wallet_requests: Vec<_> = candidates.values().map(|(q, _)| q.clone()).collect();
-        if wallet_requests.len() > crate::wallet::MAX_WALLET_BATCH_ITEMS
-            || serde_json::to_vec(&wallet_requests)
-                .map_err(|e| e.to_string())?
-                .len()
-                > crate::wallet::MAX_WALLET_BATCH_JSON_BYTES
-        {
-            return Err(
-                "wallet refresh batch exceeds native limits; select a smaller block range".into(),
-            );
         }
         Ok(PendingWalletRefresh {
             session: self.clone(),
@@ -271,7 +235,6 @@ impl WalletSession {
             anchor,
             receipts,
             candidates,
-            wallet_requests,
             options,
             apply_state: Mutex::new(ApplyState::Pending),
             completion,
@@ -319,30 +282,14 @@ impl WalletSession {
         Ok((root, path))
     }
 }
-fn delivery_params(
-    context: ProtocolContext,
-    leaf: &rpc::LeafMetadata,
-    delivery: &rpc::IndexedDelivery,
-    role: Option<CreditRole>,
-) -> serde_json::Value {
-    let mut context = json!({"chainId":context.chain_id.to_string(),"protocolAddress":context.protocol_address.to_string(),"tokenAddress":sdk::address_word(leaf.token).to_string(),"outputCommitment":leaf.commitment});
-    if let Some(role) = role {
-        context["role"] = json!(if role == CreditRole::Owner {
-            "owner"
-        } else {
-            "spender"
-        });
-    }
-    json!({"envelope":format!("0x{}",hex::encode(&delivery.ciphertext)),"context":context})
-}
 impl PendingWalletRefresh {
-    pub fn wallet_requests(&self) -> &[WalletRequest] {
-        &self.wallet_requests
-    }
     pub fn block(&self) -> &CanonicalBlock {
         &self.anchor
     }
-    pub fn apply_wallet_responses(&self, responses: &[WalletResponse]) -> Result<RefreshResult> {
+    pub fn decrypt(
+        &self,
+        decryptor: &dyn crate::delivery::DeliveryDecryptor,
+    ) -> Result<RefreshResult> {
         {
             let mut status = self
                 .apply_state
@@ -353,7 +300,7 @@ impl PendingWalletRefresh {
             }
             *status = ApplyState::Applying;
         }
-        let result = self.apply(responses);
+        let result = self.apply(decryptor);
         let mut status = self
             .apply_state
             .lock()
@@ -365,37 +312,43 @@ impl PendingWalletRefresh {
         };
         result
     }
-    fn apply(&self, responses: &[WalletResponse]) -> Result<RefreshResult> {
+    fn apply(&self, decryptor: &dyn crate::delivery::DeliveryDecryptor) -> Result<RefreshResult> {
         let session = &self.session;
         if session.snapshot()?.revision != self.base.revision {
             return Err("wallet changed; prepare refresh again".into());
         }
-        let accepted = session
-            .wallet
-            .accept_batch(&self.wallet_requests, responses)?;
         let mut decoded = Vec::new();
-        for (request, result) in self.wallet_requests.iter().zip(accepted) {
-            let (_, candidate) = self
-                .candidates
-                .get(&request.id)
-                .ok_or("missing retained wallet request")?;
-            let result = match result {
-                Ok(result) => result,
-                Err(error)
-                    if error.code == "WALLET_NOT_RECIPIENT"
-                        && matches!(
-                            request.method.as_str(),
-                            "wallet.decryptNote" | "wallet.decryptCredit"
-                        ) =>
-                {
-                    continue
-                }
-                Err(error) => return Err(error.code),
+        for candidate in self.candidates.values() {
+            let leaf = match candidate {
+                Candidate::Note(v) => &v.leaf,
+                Candidate::Credit(v, _) => &v.leaf,
             };
-            let value = match (result, candidate) {
-                (WalletResult::Note(note), Candidate::Note(_)) => Decoded::Note(note),
-                (WalletResult::Credit(credit), Candidate::Credit(..)) => Decoded::Credit(credit),
-                _ => return Err("wallet response kind mismatch".into()),
+            let context = crate::delivery::DeliveryContext {
+                context: session.scope.context,
+                token_address: sdk::address_word(leaf.token),
+                output_commitment: U256::from_be_slice(leaf.commitment.as_slice()),
+            };
+            let value = match candidate {
+                Candidate::Note(note) => match session.wallet.decrypt_note(
+                    decryptor,
+                    &note.delivery.ciphertext,
+                    &context,
+                )? {
+                    Some(note) => Decoded::Note(note),
+                    None => continue,
+                },
+                Candidate::Credit(credit, role) => {
+                    let index = if *role == CreditRole::Owner { 0 } else { 1 };
+                    match session.wallet.decrypt_credit(
+                        decryptor,
+                        &credit.deliveries[index].ciphertext,
+                        &context,
+                        *role,
+                    )? {
+                        Some(state) => Decoded::Credit(state),
+                        None => continue,
+                    }
+                }
             };
             decoded.push((candidate.clone(), value));
         }

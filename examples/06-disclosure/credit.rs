@@ -5,7 +5,7 @@ use alloy_primitives::Address;
 use invisi_sdk::{
     disclosure::{Disclosure, DisclosureOutput, DisclosureRole},
     rpc::{EthereumChain, HttpTransport, ProtocolDeployment},
-    sdk::{self, Invisi, RpcChainState, Wallet},
+    sdk::{Invisi, RpcChainState, Wallet},
 };
 use std::{env, fs, sync::Arc};
 
@@ -33,24 +33,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         env::var("TO_BLOCK").ok().map(|s| s.parse()).transpose()?,
     )?;
 
-    // Only the native host can unlock the account and decrypt these candidates.
-    println!(
-        "Native discovery requests: {}",
-        serde_json::to_string(pending.wallet_requests())?
-    );
-    let responses: Vec<sdk::WalletResponse> = if pending.wallet_requests().is_empty() {
-        Vec::new()
-    } else {
-        eprintln!(
-            "Execute the discovery array in your native host, then paste its response JSON array:"
-        );
-        let mut response_json = String::new();
-        std::io::stdin().read_line(&mut response_json)?;
-        serde_json::from_str(&response_json)?
-    };
+    // The application decryptor returns plaintext; the SDK checks openings against chain data.
+    pending.decrypt(&invisi_sdk_examples::AppDecryptor)?;
 
-    // Canonical receipts, commitments and membership are checked before any input is selected.
-    pending.apply_wallet_responses(&responses)?;
     let discovered = discovery.snapshot()?;
 
     let index: usize = env::var("CREDIT_INDEX")

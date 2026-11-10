@@ -176,14 +176,9 @@ mod tests {
             &fs::read(root.join("circuits/provenance/golden-vectors.json")).unwrap(),
         )
         .unwrap();
-        let witness = golden["witnessK1"].as_object().unwrap();
-        let expected = PUBLIC_INPUTS
-            .iter()
-            .map(|k| Ok(format!("0x{}", hex::encode(word(&witness[*k])?.as_slice()))))
-            .collect::<Result<Vec<_>>>()?;
         let prover = NativeSourceProver {
             directory: std::env::var("PROVENANCE_ASSETS").unwrap().into(),
-            manifest_sha256: "f90f2ce43218de158c6392fa19e6517dda703c35823a4aa5bfc20b50788ad282"
+            manifest_sha256: "6107789c5c0d24c4130bff05da6d389336feb5ccb247c4030eae5198ab05d762"
                 .into(),
             bb_binary: std::env::var("BB_BINARY").unwrap().into(),
             timeout: Duration::from_secs(120),
@@ -193,16 +188,25 @@ mod tests {
                 timeout: Duration::from_secs(120),
             }),
         };
-        let (public, proof) = prover
-            .prove(&prover.manifest_sha256, 1, witness, &expected)
-            .map_err(|e| e.to_string())?;
-        assert_eq!(public, expected);
-        assert!(!proof.is_empty());
-        let mut changed = expected.clone();
-        changed[12] = "0x01".into();
-        assert!(prover
-            .prove(&prover.manifest_sha256, 1, witness, &changed)
-            .is_err());
+        for key in ["witnessK10SingleInput", "witnessK10CrossTree"] {
+            let witness = golden[key]
+                .as_object()
+                .ok_or("current Source K10 fixture required")?;
+            let expected = PUBLIC_INPUTS
+                .iter()
+                .map(|k| Ok(format!("0x{}", hex::encode(word(&witness[*k])?.as_slice()))))
+                .collect::<Result<Vec<_>>>()?;
+            let (public, proof) = prover
+                .prove(&prover.manifest_sha256, 10, witness, &expected)
+                .map_err(|e| e.to_string())?;
+            assert_eq!(public, expected);
+            assert!(!proof.is_empty());
+            let mut changed = expected.clone();
+            changed[10] = "0x01".into();
+            assert!(prover
+                .prove(&prover.manifest_sha256, 10, witness, &changed)
+                .is_err());
+        }
         Ok(())
     }
 }

@@ -112,14 +112,41 @@ impl Operation {
     pub fn submit_broadcaster(
         &mut self,
         relay: &dyn sdk::PreparedBroadcaster,
-        id: &str,
     ) -> Result<invisi_sdk_rpc::broadcaster::Status> {
-        if id.is_empty()
-            || id.len() > 128
-            || !id.is_ascii()
-            || id.bytes().any(|b| b < 32 || b == 127)
-        {
-            return Err("invalid broadcaster ID".into());
+        let local_id = self.id.clone();
+        let id = local_id.as_str();
+        let attempted = self
+            .current()?
+            .operations
+            .get(&self.id)
+            .ok_or("operation not found")?
+            .broadcaster_id
+            .is_some();
+        if !attempted {
+            match &mut self.prepared {
+                ManagedPrepared::Funds(v) => {
+                    v.freeze_broadcaster_evidence(self.session.invisi.chain.as_ref(), relay)?
+                }
+                ManagedPrepared::Credit(v) => {
+                    let saved = v
+                        .broadcaster_state()
+                        .ok_or("saved broadcaster context required")?;
+                    let call = v.calldata(self.session.invisi.chain.as_ref(), Address::ZERO)?;
+                    let quote = crate::broadcaster::VerifiedQuote::authenticate(
+                        saved.quote.clone(),
+                        crate::broadcaster::Trust {
+                            chain_id: self.session.scope.context.chain_id,
+                            protocol: call.to,
+                            signer: saved.signer,
+                        },
+                        &call.data,
+                        0,
+                        saved.provenance_mode(),
+                    )
+                    .map_err(|e| e.to_string())?;
+                    relay.submission_requirements(&quote)?;
+                }
+            }
         }
         let mut state = self.current()?;
         let record = state
@@ -133,7 +160,6 @@ impl Operation {
         if saved.endpoint != config.endpoint
             || saved.signer != config.quote_signer
             || saved.fee_recipient != config.fee_recipient
-            || saved.policy != relay.required_policy()
         {
             return Err("saved broadcaster configuration mismatch".into());
         }
@@ -152,7 +178,7 @@ impl Operation {
             {
                 return Err("saved broadcaster calldata mismatch".into());
             }
-            crate::broadcaster::verify_quote_for_policy(
+            crate::broadcaster::verify_quote_for_provenance(
                 &saved.quote,
                 &crate::broadcaster::Trust {
                     chain_id: self.session.scope.context.chain_id,
@@ -161,11 +187,17 @@ impl Operation {
                 },
                 &call.data,
                 0,
-                saved.policy,
+                saved.provenance_mode(),
             )
             .map_err(|e| e.to_string())?;
-            if let Some(status) = relay.lookup_status(id)? {
-                if status.id != id {
+            if let Some(status) = record
+                .broadcaster_submission_id
+                .as_deref()
+                .map(|submission_id| relay.lookup_status(submission_id))
+                .transpose()?
+                .flatten()
+            {
+                if Some(status.id.as_str()) != record.broadcaster_submission_id.as_deref() {
                     return Err("broadcaster status ID mismatch".into());
                 }
                 if let Some(hash) = status.transaction_hash {
@@ -173,6 +205,36 @@ impl Operation {
                 }
                 return Ok(status);
             }
+            let verified = crate::broadcaster::VerifiedQuote::authenticate(
+                saved.quote.clone(),
+                crate::broadcaster::Trust {
+                    chain_id: self.session.scope.context.chain_id,
+                    protocol: call.to,
+                    signer: saved.signer,
+                },
+                &call.data,
+                0,
+                saved.provenance_mode(),
+            )
+            .map_err(|e| e.to_string())?;
+            let status = relay.submit(&call.data, &verified, &saved.sidecars)?;
+            if record
+                .broadcaster_submission_id
+                .as_ref()
+                .is_some_and(|id| id != &status.id)
+            {
+                return Err("broadcaster submission ID mismatch".into());
+            }
+            let mut next = self.current()?;
+            next.operations
+                .get_mut(&self.id)
+                .ok_or("operation not found")?
+                .broadcaster_submission_id = Some(status.id.clone());
+            self.session.commit(next)?;
+            if let Some(hash) = status.transaction_hash {
+                self.track_transaction(hash)?;
+            }
+            return Ok(status);
         }
         let call = match &self.prepared {
             ManagedPrepared::Funds(v) => {
@@ -190,7 +252,7 @@ impl Operation {
         {
             return Err("frozen broadcaster intent mismatch".into());
         }
-        crate::broadcaster::verify_quote_for_policy(
+        crate::broadcaster::verify_quote_for_provenance(
             &saved.quote,
             &crate::broadcaster::Trust {
                 chain_id: self.session.scope.context.chain_id,
@@ -199,7 +261,7 @@ impl Operation {
             },
             &stored.data,
             0,
-            saved.policy,
+            saved.provenance_mode(),
         )
         .map_err(|e| e.to_string())?;
 
@@ -214,6 +276,7 @@ impl Operation {
         {
             return Err("recovered broadcaster calldata differs from frozen transaction".into());
         }
+        record.snapshot = self.prepared.snapshot()?;
         record.call = Some(stored);
         record.externalized = true;
         record.broadcaster_id = Some(id.into());
@@ -227,18 +290,43 @@ impl Operation {
         let generation = record.generation;
         self.session.commit(state)?;
         self.generation = generation;
-        let status = match &self.prepared {
+        let status = match &mut self.prepared {
             ManagedPrepared::Funds(v) => {
-                v.submit_broadcaster(self.session.invisi.chain.as_ref(), relay, id)
+                v.submit_broadcaster(self.session.invisi.chain.as_ref(), relay)
             }
             ManagedPrepared::Credit(v) => {
-                v.submit_broadcaster(self.session.invisi.chain.as_ref(), relay, id)
+                v.submit_broadcaster(self.session.invisi.chain.as_ref(), relay)
             }
         }?;
+        let mut next = self.current()?;
+        next.operations
+            .get_mut(&self.id)
+            .ok_or("operation not found")?
+            .broadcaster_submission_id = Some(status.id.clone());
+        self.session.commit(next)?;
         if let Some(hash) = status.transaction_hash {
             self.track_transaction(hash)?;
         }
         Ok(status)
+    }
+    pub fn export_wallet_authorization(&self) -> Result<sdk::EvmSigningRequest> {
+        self.current()?;
+        match &self.prepared {
+            ManagedPrepared::Funds(v) => v.export_wallet_authorization(),
+            ManagedPrepared::Credit(v) => v.export_wallet_authorization(),
+        }
+    }
+    pub fn with_wallet_signature(self, signature: &[u8]) -> Result<Self> {
+        self.current()?;
+        let prepared = match self.prepared.clone_for_stage() {
+            ManagedPrepared::Funds(v) => {
+                ManagedPrepared::Funds(v.with_wallet_signature(signature)?)
+            }
+            ManagedPrepared::Credit(v) => {
+                ManagedPrepared::Credit(v.with_wallet_signature(signature)?)
+            }
+        };
+        self.persist(prepared)
     }
     pub fn export_wallet_request(&mut self, id: impl Into<String>) -> Result<WalletRequest> {
         self.current()?;
@@ -283,6 +371,13 @@ impl Operation {
             .clone_for_stage()
             .with_revocation_signature(&*self.session.invisi.chain, signature)?;
         self.persist(prepared)
+    }
+    pub fn export_revocation_signing_request(&self) -> Result<sdk::EvmSigningRequest> {
+        self.current()?;
+        match &self.prepared {
+            ManagedPrepared::Credit(v) => v.export_revocation_signing_request(),
+            _ => Err("Credit revocation operation required".into()),
+        }
     }
     pub fn export_revocation_authorization(&self) -> Result<serde_json::Value> {
         self.current()?;
@@ -331,6 +426,7 @@ impl Operation {
         {
             return Err("recovered calldata differs from exported transaction".into());
         }
+        record.snapshot = self.prepared.snapshot()?;
         record.call = Some(stored);
         record.externalized = true;
         if record.transaction_hash.is_none() {
@@ -436,6 +532,7 @@ impl WalletSession {
                 call: None,
                 externalized: false,
                 broadcaster_id: None,
+                broadcaster_submission_id: None,
                 resolved_at: None,
             },
         );

@@ -15,6 +15,24 @@ use rand::{rngs::OsRng, RngCore};
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
+/// App-owned decryption: only Ok(None) means a nonrecipient; all operational failures reject.
+/// The App authenticates ciphertext and owns key storage, unlocking and consent.
+pub trait DeliveryDecryptor: Send + Sync {
+    fn decrypt_note(
+        &self,
+        envelope: &[u8],
+        context: &DeliveryContext,
+        owner: U256,
+    ) -> Result<Option<Vec<u8>>, String>;
+    fn decrypt_credit(
+        &self,
+        envelope: &[u8],
+        context: &DeliveryContext,
+        role: CreditRole,
+        owner: U256,
+    ) -> Result<Option<Vec<u8>>, String>;
+}
+
 pub const MAX_CIPHERTEXT_BYTES: usize = 4096;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]

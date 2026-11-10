@@ -363,6 +363,65 @@ impl Wallet {
             })
             .collect()
     }
+    /// Validate App plaintext against this wallet and the canonical output context.
+    pub fn decrypt_note(
+        &self,
+        decryptor: &dyn crate::delivery::DeliveryDecryptor,
+        envelope: &[u8],
+        context: &crate::delivery::DeliveryContext,
+    ) -> Result<Option<Note>> {
+        model(crate::delivery::validate_envelope(envelope, false))?;
+        let Some(plain) = decryptor.decrypt_note(envelope, context, address_word(self.owner))?
+        else {
+            return Ok(None);
+        };
+        if plain.len() + 78 > crate::delivery::MAX_CIPHERTEXT_BYTES {
+            return Err("plaintext exceeds resource bound".into());
+        }
+        let note = model(crate::delivery::decode_note(&plain, context))?;
+        if note.owner_address != address_word(self.owner) {
+            return Err("note recipient mismatch".into());
+        }
+        Ok(Some(note))
+    }
+    pub fn decrypt_credit(
+        &self,
+        decryptor: &dyn crate::delivery::DeliveryDecryptor,
+        envelope: &[u8],
+        context: &crate::delivery::DeliveryContext,
+        role: crate::delivery::CreditRole,
+    ) -> Result<Option<crate::delivery::CreditDeliveryState>> {
+        model(crate::delivery::validate_envelope(envelope, true))?;
+        let Some(plain) =
+            decryptor.decrypt_credit(envelope, context, role, address_word(self.owner))?
+        else {
+            return Ok(None);
+        };
+        if plain.len() + 78 > crate::delivery::MAX_CIPHERTEXT_BYTES {
+            return Err("plaintext exceeds resource bound".into());
+        }
+        let state = model(crate::delivery::decode_credit(&plain, context))?;
+        let (identity, keys) = match role {
+            crate::delivery::CreditRole::Owner => (
+                state.note.owner_wallet_identity,
+                &state.owner_receiving_keys,
+            ),
+            crate::delivery::CreditRole::Spender => (
+                state.note.spender_wallet_identity,
+                &state.spender_receiving_keys,
+            ),
+        };
+        if identity != address_word(self.owner)
+            || self
+                .receiving_keys
+                .as_ref()
+                .is_none_or(|existing| existing.viewing_public_key != keys.viewing_public_key)
+        {
+            return Err("Credit recipient or receiving snapshot mismatch".into());
+        }
+        Ok(Some(state))
+    }
+
     pub fn accept_response(&self, q: &WalletRequest, r: &WalletResponse) -> Result<WalletResult> {
         q.validate()?;
         if q.owner_address != hex(self.owner.as_slice())
@@ -1319,6 +1378,67 @@ fn authorization_params(
 ) -> Value {
     json!({"operation":operation,"capacity":capacity,"context":context_value(context),"words":words.iter().map(U256::to_string).collect::<Vec<_>>()})
 }
+pub(crate) fn wallet_authorization_request(
+    context: ProtocolContext,
+    operation: &str,
+    capacity: usize,
+    words: &[U256],
+) -> Result<EvmSigningRequest> {
+    let digest = B256::from(crate::wallet::authorization_digest(&authorization_params(
+        context, operation, capacity, words,
+    ))?);
+    let name = match operation {
+        "transact" => "Invisi.Transact.v1",
+        "create-credit" => "Invisi.CreateCredit.v4",
+        "credit-draw" => "Invisi.CreditDraw.v4",
+        "update-credit" => "Invisi.UpdateCredit.v4",
+        _ => return Err("unsupported wallet authorization operation".into()),
+    };
+    let statement_hash = keccak256((U256::from(capacity), words.to_vec()).abi_encode_params());
+    Ok(EvmSigningRequest {
+        digest,
+        typed_data: typed_data(
+            context,
+            "WalletAuthorization",
+            json!([{"name":"operation","type":"bytes32"},{"name":"statementHash","type":"bytes32"}]),
+            json!({"operation":keccak256(name),"statementHash":statement_hash}),
+        ),
+    })
+}
+pub(crate) fn accept_wallet_signature(
+    owner: Address,
+    request: &EvmSigningRequest,
+    signature: &[u8],
+) -> Result<WalletAuthorization> {
+    if !verify_eoa_signature(owner, request.digest, signature) {
+        return Err(
+            "wallet authorization signature does not match owner or frozen statement".into(),
+        );
+    }
+    let mut raw = signature.to_vec();
+    if raw.len() == 64 {
+        let parity = raw[32] >> 7;
+        raw[32] &= 0x7f;
+        raw.push(parity)
+    }
+    let parity = if raw[64] >= 27 { raw[64] - 27 } else { raw[64] };
+    let id = k256::ecdsa::RecoveryId::try_from(parity).map_err(|_| "invalid wallet recovery ID")?;
+    let sig = Signature::from_slice(&raw[..64]).map_err(|_| "invalid wallet signature")?;
+    let key = VerifyingKey::recover_from_prehash(request.digest.as_slice(), &sig, id)
+        .map_err(|_| "wallet signature recovery failed")?;
+    Ok(WalletAuthorization {
+        digest: request.digest,
+        signature: raw[..64]
+            .try_into()
+            .map_err(|_| "invalid signature length")?,
+        spending_public_key: key
+            .to_encoded_point(false)
+            .as_bytes()
+            .try_into()
+            .map_err(|_| "invalid public key length")?,
+    })
+}
+
 fn auth_words(
     context: ProtocolContext,
     operation: &str,
@@ -1410,6 +1530,31 @@ impl PreparedTransaction {
                 auth_words(self.context, "transact", c, words)
             }
         }
+    }
+    pub fn export_wallet_authorization(&self) -> Result<EvmSigningRequest> {
+        if !self.needs_authorization || ![Phase::Prepared, Phase::Authorized].contains(&self.phase)
+        {
+            return Err("operation is not awaiting wallet authorization".into());
+        }
+        let Plan::Transfer { capacity, .. } = &self.plan else {
+            return Err("no wallet authorization".into());
+        };
+        let words = self.public_inputs()?;
+        wallet_authorization_request(
+            self.context,
+            "transact",
+            *capacity,
+            &words[..words.len() - 2],
+        )
+    }
+    pub fn with_wallet_signature(mut self, signature: &[u8]) -> Result<Self> {
+        self.authorization = Some(accept_wallet_signature(
+            self.wallet.owner,
+            &self.export_wallet_authorization()?,
+            signature,
+        )?);
+        self.phase = Phase::Authorized;
+        Ok(self)
     }
     pub fn export_wallet_request(&self, id: impl Into<String>) -> Result<WalletRequest> {
         if !self.needs_authorization || ![Phase::Prepared, Phase::Authorized].contains(&self.phase)
@@ -3154,3 +3299,92 @@ pub mod prepared_broadcaster;
 pub use prepared_broadcaster::*;
 
 mod prepared_credit_broadcaster;
+
+#[cfg(test)]
+mod conventional_wallet_signature_tests {
+    use super::*;
+    fn sign(scalar: u8, digest: B256) -> Vec<u8> {
+        let mut bytes = [0u8; 32];
+        bytes[31] = scalar;
+        let key = k256::ecdsa::SigningKey::from_slice(&bytes).unwrap();
+        let (signature, id) = key.sign_prehash_recoverable(digest.as_slice()).unwrap();
+        let mut out = signature.to_bytes().to_vec();
+        out.push(id.to_byte() + 27);
+        out
+    }
+    #[test]
+    fn direct_signature_binds_owner_and_final_note_statement() {
+        let (chain, wallet, plan, _) = test_support::note_fixture_label("note5_omitted_deliveries");
+        let prepared = Invisi::new(chain).prepare_transfer(&wallet, plan).unwrap();
+        let request = prepared.export_wallet_authorization().unwrap();
+        assert_eq!(request.typed_data["primaryType"], "WalletAuthorization");
+        let signature = sign(1, request.digest);
+        let wrong = sign(2, request.digest);
+        assert!(accept_wallet_signature(wallet.owner, &request, &wrong).is_err());
+        let (other_chain, other_wallet, other_plan, _) =
+            test_support::note_fixture_label("note5_omitted_deliveries");
+        let other = Invisi::new(other_chain)
+            .prepare_transfer(&other_wallet, other_plan)
+            .unwrap();
+        assert!(other.with_wallet_signature(&wrong).is_err());
+        let (changed_chain, changed_wallet, changed_plan, _) =
+            test_support::note_fixture_label("note5_omitted_deliveries");
+        let mut changed_prepared = Invisi::new(changed_chain)
+            .prepare_transfer(&changed_wallet, changed_plan)
+            .unwrap();
+        let Plan::Transfer { params, .. } = &mut changed_prepared.plan else {
+            panic!("transfer required")
+        };
+        params.feeAmount += U256::from(1);
+        assert!(changed_prepared.with_wallet_signature(&signature).is_err());
+
+        let mut changed = request.clone();
+        changed.digest = keccak256("different frozen statement");
+        assert!(accept_wallet_signature(wallet.owner, &changed, &signature).is_err());
+        let prepared = prepared.with_wallet_signature(&signature).unwrap();
+        assert_eq!(prepared.phase, Phase::Authorized);
+        assert_eq!(
+            prepared.authorization.as_ref().unwrap().digest,
+            request.digest
+        );
+        let Plan::Transfer { capacity, .. } = &prepared.plan else {
+            panic!("transfer required")
+        };
+        let words = prepared.public_inputs().unwrap();
+        let statement = keccak256(
+            (U256::from(*capacity), words[..words.len() - 2].to_vec()).abi_encode_params(),
+        );
+        assert_eq!(
+            request.typed_data["message"]["statementHash"],
+            serde_json::to_value(statement).unwrap()
+        );
+        assert_eq!(
+            eip712_digest(
+                prepared.context,
+                keccak256(
+                    (
+                        keccak256("WalletAuthorization(bytes32 operation,bytes32 statementHash)"),
+                        keccak256("Invisi.Transact.v1"),
+                        statement
+                    )
+                        .abi_encode()
+                )
+            ),
+            request.digest
+        );
+    }
+}
+
+pub use invisi_sdk_core::provenance::{ProofContext, ProvenanceProof};
+pub fn validate_provenance_proof(
+    packet: &ProvenanceProof,
+    trust: &invisi_sdk_core::provenance::TrustContext,
+) -> Result<()> {
+    invisi_sdk_rpc::provenance_packet::validate_provenance_proof(packet, trust)
+}
+pub fn submit_provenance_proof(
+    client: &invisi_sdk_rpc::provenance_client::ProvenanceClient,
+    packet: &ProvenanceProof,
+) -> Result<Value> {
+    invisi_sdk_rpc::provenance_packet::submit_provenance_proof(client, packet)
+}

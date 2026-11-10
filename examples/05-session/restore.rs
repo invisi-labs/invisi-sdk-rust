@@ -50,21 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pending = session.refresh(options)?;
 
     // Discovery only stages work; an unlock error must leave the saved checkpoint unchanged.
-    println!(
-        "Native viewing requests: {}",
-        serde_json::to_string(pending.wallet_requests())?
-    );
-    let responses = if pending.wallet_requests().is_empty() {
-        Vec::new()
-    } else {
-        eprintln!("Execute the request array in your native host. Paste its response JSON array:");
-        let mut response_json = String::new();
-        std::io::stdin().read_line(&mut response_json)?;
-        serde_json::from_str(&response_json)?
-    };
-
-    // Revalidation and one revision CAS commit inventory and checkpoint together.
-    let refreshed = pending.apply_wallet_responses(&responses)?;
+    let refreshed = pending.decrypt(&invisi_sdk_examples::AppDecryptor)?;
 
     let token: Address = env::var("TOKEN_ADDRESS")?.parse()?;
     let balance = session.balance(token)?;

@@ -6,12 +6,10 @@ use alloy_primitives::{keccak256, U256};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const PUBLIC_INPUTS: [&str; 13] = [
+pub const PUBLIC_INPUTS: [&str; 11] = [
     "chain_id",
     "protocol_address",
     "token_address",
-    "policy_id_hi",
-    "policy_id_lo",
     "chain_generation",
     "source_count",
     "sources_digest",
@@ -22,7 +20,7 @@ pub const PUBLIC_INPUTS: [&str; 13] = [
     "binding",
 ];
 pub fn supported_capacity(k: usize) -> bool {
-    (1..=10).contains(&k) || ((20..=190).contains(&k) && k % 10 == 0)
+    [10, 20, 40, 80, 120, 160, 190].contains(&k)
 }
 pub fn parse_integer(s: &str, bits: usize) -> ModelResult<U256> {
     let (digits, base) = if let Some(v) = s.strip_prefix("0x") {
@@ -63,18 +61,10 @@ pub fn limbs(n: U256) -> [U256; 2] {
 pub struct Scope {
     pub chain_id: u64,
     pub protocol_address: U256,
-    pub policy_id: U256,
 }
 pub fn scope_hash(s: &Scope) -> ModelResult<U256> {
     positive_address(s.protocol_address, "protocol")?;
-    let [hi, lo] = limbs(s.policy_id);
-    h(&[
-        domain("Scope"),
-        U256::from(s.chain_id),
-        s.protocol_address,
-        hi,
-        lo,
-    ])
+    h(&[domain("Scope"), U256::from(s.chain_id), s.protocol_address])
 }
 pub fn recognized_leaf(scope: U256, commitment: U256) -> ModelResult<U256> {
     if commitment == U256::ZERO {
@@ -209,22 +199,20 @@ pub fn operation_digest(s: &Scope, capacity: usize, public: &[U256]) -> ModelRes
     }
     Ok(keccak256(encoded).0)
 }
-pub fn provenance_intent_hash(original: [u8; 32], policy: U256) -> [u8; 32] {
+pub fn provenance_intent_hash(original: [u8; 32]) -> [u8; 32] {
     let text = b"InvisiBroadcasterProvenanceIntentV1";
     let mut e = Vec::new();
-    e.extend(abi_word(U256::from(96)));
+    e.extend(abi_word(U256::from(64)));
     e.extend(original);
-    e.extend(abi_word(policy));
     e.extend(abi_word(U256::from(text.len())));
     e.extend(text);
-    e.resize(192, 0);
+    e.resize(160, 0);
     keccak256(e).0
 }
-const CERT_LAYOUT: [(&str, usize); 16] = [
+const CERT_LAYOUT: [(&str, usize); 15] = [
     ("certificateVersion", 1),
     ("providerId", 32),
     ("signingKeyId", 32),
-    ("policyId", 32),
     ("chainId", 8),
     ("protocolAddress", 20),
     ("chainGeneration", 8),
@@ -244,7 +232,6 @@ pub struct RootCertificate {
     pub certificate_version: String,
     pub provider_id: String,
     pub signing_key_id: String,
-    pub policy_id: String,
     pub chain_id: String,
     pub protocol_address: String,
     pub chain_generation: String,
@@ -472,14 +459,11 @@ pub fn build_witness(r: &WitnessRequest) -> ModelResult<Witness> {
         r.operation_digest,
         id,
     )?;
-    let [phi, plo] = limbs(r.scope.policy_id);
     let [ohi, olo] = limbs(r.operation_digest);
     let pub_values = [
         U256::from(r.scope.chain_id),
         r.scope.protocol_address,
         r.token_address,
-        phi,
-        plo,
         U256::from(r.chain_generation),
         U256::from(r.sources.len()),
         sd,
@@ -566,7 +550,7 @@ pub fn authenticate_manifest(bytes: &[u8], expected: &str) -> ModelResult<Manife
         || m.bb_version != "6.0.0"
         || m.depth != 32
         || m.public_inputs != PUBLIC_INPUTS
-        || m.circuits.len() != 28
+        || m.circuits.len() != 7
     {
         return Err(ModelError::Invalid("manifest identity"));
     }
@@ -598,7 +582,6 @@ pub fn assert_certificate_trust(c: &RootCertificate, t: &TrustContext) -> ModelR
     for (raw, expected) in [
         (&c.chain_id, U256::from(t.scope.chain_id)),
         (&c.protocol_address, t.scope.protocol_address),
-        (&c.policy_id, t.scope.policy_id),
         (&c.chain_generation, U256::from(t.chain_generation)),
         (&c.provider_id, t.provider_id),
     ] {
@@ -664,7 +647,7 @@ pub fn export_sidecar(
         expected.push(format!("0x{}", hex::encode(value.to_be_bytes::<32>())));
     }
     let (public, proof) = prover.prove(&identity.sha256, r.capacity, &witness, &expected)?;
-    if public.len() != 13 || proof.is_empty() || proof.len() > 65536 {
+    if public.len() != 11 || proof.is_empty() || proof.len() > 65536 {
         return Err(ModelError::Invalid("offline prover output"));
     }
     for (a, b) in public.iter().zip(&expected) {
@@ -712,7 +695,6 @@ mod tests {
             scope: Scope {
                 chain_id: n(&v["chain_id"]).to(),
                 protocol_address: n(&v["protocol_address"]),
-                policy_id: n(&v["policy_id_lo"]),
             },
             capacity: v["owners"].as_array().unwrap().len(),
             token_address: n(&v["token_address"]),
@@ -746,7 +728,6 @@ mod tests {
         let s = Scope {
             chain_id: n(&c["chainId"]).to(),
             protocol_address: n(&c["protocolAddress"]),
-            policy_id: n(&c["policyId"]),
         };
         let scope = scope_hash(&s).unwrap();
         assert_eq!(scope, n(&v["note"]["scope"]));
@@ -771,7 +752,6 @@ mod tests {
             &Scope {
                 chain_id: n(&op["chainId"]).to(),
                 protocol_address: n(&op["protocolAddress"]),
-                policy_id: U256::ZERO,
             },
             n(&op["mainCircuitCapacity"]).to(),
             &op["publicInputs"]
@@ -790,7 +770,7 @@ mod tests {
     #[test]
     fn full_witness_and_depth32_replay() {
         let v = vectors();
-        for name in ["witnessK1", "witnessK10CrossTree"] {
+        for name in ["witnessK10SingleInput", "witnessK10CrossTree"] {
             let r = request(&v[name]);
             let w = build_witness(&r).unwrap();
             for k in PUBLIC_INPUTS {
@@ -826,7 +806,7 @@ mod tests {
         let (path, root) = t.path(0).unwrap();
         assert_eq!(
             t.membership_for_commitment(
-                &request(&v["witnessK1"]).scope,
+                &request(&v["witnessK10SingleInput"]).scope,
                 n(&v["note"]["commitment"])
             )
             .unwrap()
@@ -835,20 +815,20 @@ mod tests {
             0
         );
         assert!(t
-            .membership_for_commitment(&request(&v["witnessK1"]).scope, U256::from(1))
+            .membership_for_commitment(&request(&v["witnessK10SingleInput"]).scope, U256::from(1))
             .unwrap()
             .is_none());
-        assert_eq!(root, n(&v["witnessK1"]["roots"][0]));
+        assert_eq!(root, n(&v["witnessK10SingleInput"]["roots"][0]));
         assert_eq!(
             path,
-            v["witnessK1"]["paths"][0]
+            v["witnessK10SingleInput"]["paths"][0]
                 .as_array()
                 .unwrap()
                 .iter()
                 .map(n)
                 .collect::<Vec<_>>()
         );
-        let mut r = request(&v["witnessK1"]);
+        let mut r = request(&v["witnessK10SingleInput"]);
         r.inputs[0].path[0] = U256::from(1);
         assert!(build_witness(&r).is_err());
     }
@@ -863,10 +843,10 @@ mod tests {
         value["signature"] = Value::String(format!("0x{}", cv["signatureHex"].as_str().unwrap()));
         let mut c: RootCertificate = serde_json::from_value(value).unwrap();
         let payload = root_certificate_payload(&c).unwrap();
-        assert_eq!(payload.len(), 301);
+        assert_eq!(payload.len(), 269);
         let mut empty = c.clone();
         empty.leaf_count = "0".into();
-        assert_eq!(root_certificate_payload(&empty).unwrap().len(), 301);
+        assert_eq!(root_certificate_payload(&empty).unwrap().len(), 269);
         assert_eq!(hex::encode(payload), cv["payloadHex"].as_str().unwrap());
         assert_eq!(
             hex::encode(root_certificate_message(&c).unwrap()),
@@ -892,7 +872,7 @@ mod tests {
         assert!(field(field_modulus(), "field").is_err());
         assert!(!supported_capacity(11));
         let v = vectors();
-        let mut r = request(&v["witnessK1"]);
+        let mut r = request(&v["witnessK10SingleInput"]);
         r.capacity = 2;
         r.inputs.push(r.inputs[0].clone());
         assert!(build_witness(&r).is_err());
@@ -923,7 +903,7 @@ pub fn validate_proof_bundle(b: &ProofBundle, t: &TrustContext) -> ModelResult<(
         .map_err(|_| ModelError::Invalid("capacity"))?;
     if !supported_capacity(capacity)
         || b.circuit_id != format!("provenance_k{capacity}")
-        || b.public_inputs.len() != 13
+        || b.public_inputs.len() != 11
     {
         return Err(ModelError::Invalid("circuit ABI"));
     }
@@ -939,22 +919,19 @@ pub fn validate_proof_bundle(b: &ProofBundle, t: &TrustContext) -> ModelResult<(
             Ok(n)
         })
         .collect::<ModelResult<_>>()?;
-    let [hi, lo] = limbs(t.scope.policy_id);
     if p[0] != U256::from(t.scope.chain_id)
         || p[1] != t.scope.protocol_address
-        || p[3] != hi
-        || p[4] != lo
-        || p[5] != U256::from(t.chain_generation)
-        || p[6] != U256::from(b.root_certificates.len())
-        || p[8] == U256::ZERO
-        || p[8] > U256::from(capacity)
+        || p[3] != U256::from(t.chain_generation)
+        || p[4] != U256::from(b.root_certificates.len())
         || p[6] == U256::ZERO
-        || p[6] > p[8]
+        || p[6] > U256::from(capacity)
+        || p[4] == U256::ZERO
+        || p[4] > p[6]
     {
         return Err(ModelError::Mismatch("proof scope or shape"));
     }
-    uint(p[9], 128, "operation digest high")?;
-    uint(p[10], 128, "operation digest low")?;
+    uint(p[7], 128, "operation digest high")?;
+    uint(p[8], 128, "operation digest low")?;
     let sources: Vec<Source> = b
         .root_certificates
         .iter()
@@ -968,7 +945,7 @@ pub fn validate_proof_bundle(b: &ProofBundle, t: &TrustContext) -> ModelResult<(
         })
         .collect::<ModelResult<_>>()?;
     let sd = sources_digest(t.chain_generation, &sources)?;
-    if sd != p[7] {
+    if sd != p[5] {
         return Err(ModelError::Mismatch("proof sources digest"));
     }
     let binding = binding_digest(
@@ -977,11 +954,11 @@ pub fn validate_proof_bundle(b: &ProofBundle, t: &TrustContext) -> ModelResult<(
         t.chain_generation,
         sources.len(),
         sd,
-        p[8].to(),
-        (p[9] << 128) | p[10],
-        p[11],
+        p[6].to(),
+        (p[7] << 128) | p[8],
+        p[9],
     )?;
-    if binding != p[12] {
+    if binding != p[10] {
         return Err(ModelError::Mismatch("proof binding"));
     }
     Ok(())
@@ -1107,4 +1084,24 @@ impl RecognizedTree {
         }
         Ok(None)
     }
+}
+
+/// A public recovery packet contains no Note plaintext, private witness or local proving capability.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProvenanceProof {
+    pub format: String,
+    pub data: String,
+    pub context: ProofContext,
+    pub main_circuit_capacity: usize,
+    pub public_inputs: Vec<String>,
+    pub operation_digest: String,
+    pub sidecars: Vec<ProofSidecar>,
+}
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProofContext {
+    pub chain_id: String,
+    pub protocol_address: String,
+    pub token_address: String,
 }

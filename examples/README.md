@@ -10,7 +10,7 @@ cargo run -p invisi-sdk-examples --bin transfer -- --execute
 cargo run -p invisi-sdk-examples --features sqlite --bin restore-session -- --execute
 ```
 
-`note-output` constructs an encrypted Note offline using public receiving material only. Every other binary returns before reading environment configuration, opening files or databases, contacting RPC, or accessing keys unless `--execute` is present. Without relay configuration, the transaction examples export **unsigned** EVM transactions for the host to review, sign and submit. Normal Note transfer/withdrawal and all four Credit operations can instead use a registered Broadcaster; `--submit` explicitly sends only after the public relay context is saved. There is no standalone Provenance walkthrough.
+`note-output` constructs an encrypted Note offline using public receiving material only. Every other binary returns before opening configuration, files, databases, keys or network unless `--execute` is present. Examples 01–06 export unsigned EVM transactions for the application to review, sign and submit. Broadcaster and independent Source proof flows live in `07-broadcaster`.
 
 ## Files
 
@@ -20,33 +20,25 @@ cargo run -p invisi-sdk-examples --features sqlite --bin restore-session -- --ex
 | `02-note` | `note-output`, `shield` | Offline encrypted Note construction; public ERC20 funding into an encrypted Note |
 | `03-note` | `transfer`, `withdraw`, `aggregate` | Located Note inputs, external wallet authorization, proving, unsigned calldata |
 | `04-credit` | `create-credit`, `draw-credit`, `update-credit`, `revoke-credit` | Available spending authority, distinct payer draws, policy updates, public EVM revocation |
-| `05-session` | `restore-session`, `send-session`, `create-credit-session`, `draw-credit-session`, `update-credit-session`, `revoke-credit-session` | Encrypted SQLite inventory, native viewing responses, managed operations and recovery |
+| `05-session` | `restore-session`, `send-session`, `create-credit-session`, `draw-credit-session`, `update-credit-session`, `revoke-credit-session` | Encrypted SQLite inventory, application decryption callbacks, managed operations and recovery |
 | `06-disclosure` | `disclose-note`, `disclose-credit` | Explicit financial opening exports and independent commitment checks |
 
 ## Public Wallet initialization
 
-Use `Wallet::from_address(receiving_address)` when the host already supplies a complete receiving address. Otherwise resolve the owner's public profile through the native host. The host owns account selection, unlock and keys; the SDK retains only public material.
+Use `Wallet::from_address(receiving_address)` with a complete public receiving address. The SDK retains only public owner and receiving material. The application owns account selection, delivery decryption and EVM signing.
+
+Private Note/Credit authorization uses ordinary EIP-712 signing:
 
 ```rust
-use invisi_sdk::sdk::{Wallet, WalletResponse};
-use serde_json::json;
-
-let owner = Wallet::from_owner(owner_address)?;
-let request = owner.prepare_request("public-profile", "wallet.public", json!({}))?;
-let requests = [request];
-
-// Send this JSON array through the application's native bridge and receive its response array.
-let requests_json = serde_json::to_string(&requests)?;
-let responses: Vec<WalletResponse> = serde_json::from_str(&responses_json)?;
-owner.accept_batch(&requests, &responses)?;
-let response = responses.iter()
-    .find(|item| item.id == requests[0].id)
-    .ok_or("missing public-profile response")?;
-let wallet = Wallet::from_response(&requests[0], response)?;
-println!("Receiving address: {}", wallet.address()?);
+let request = prepared.export_wallet_authorization()?;
+// Your EIP-712 wallet signs request.typed_data; request.digest is the same signing hash.
+let signature = invisi_sdk_examples::sign_authorization(&request)?;
+let authorized = prepared.with_wallet_signature(&signature)?;
 ```
 
-`owner_address` is the selected public EVM owner; `responses_json` is returned by your native bridge after executing `requests_json`. No private key crosses this boundary.
+`support/discovery.rs::sign_authorization` is application example code. It reads `OWNER_PRIVATE_KEY` and uses k256 to produce a standard 65-byte EVM signature. The SDK receives the signature, recovers the signer and checks the owner and frozen statement. Production applications can replace this helper with their wallet provider. Transaction signing remains a separate application step.
+
+`support/discovery.rs::AppDecryptor` is an explicit integration placeholder. Implement its `decrypt_note` and `decrypt_credit` callbacks using your application's delivery decryption; return `None` for a different recipient and an error on decryption failure. The SDK receives plaintext bytes and independently authenticates the financial opening against the chain. The placeholder returns an integration error if a candidate needs decryption; examples using discovery require this adapter to be implemented.
 
 ## Public live configuration
 
@@ -60,6 +52,7 @@ export WALLET_ADDRESS='your complete 0i receiving address'
 export TOKEN_ADDRESS='0x...'
 export CALLER_ADDRESS='0x...'
 export DEADLINE='explicit future Unix seconds'
+export OWNER_PRIVATE_KEY='0x...application example signing key...'
 ```
 
 `DEPLOYMENT_JSON` contains independently trusted deployment pins, not a response accepted blindly from the indexed service:
@@ -77,7 +70,7 @@ export DEADLINE='explicit future Unix seconds'
 
 Replace the displayed addresses and hash with the actual deployment. Registration additionally requires a `registry` entry with the same `address`, `runtimeCodeHash`, `fromBlock` fields. Session examples also set `PROTOCOL_RPC_URL` to the indexed service's `/v1` URL. SDK preparation checks the Ethereum chain and pinned protocol runtime.
 
-Use complete receiving addresses for `WALLET_ADDRESS`, `RECIPIENT_ADDRESS`, and `SPENDER_ADDRESS` wherever encrypted delivery or change is needed. No live scenario accepts an account private key. A printed wallet request array must be approved and executed by your own native host, which owns account selection, key custody and unlock. Paste its one-line JSON response array into the waiting program. Preparation remains alive while the host responds, so randomized outputs and their frozen authorization context remain unchanged.
+Use complete receiving addresses for `WALLET_ADDRESS`, `RECIPIENT_ADDRESS` and `SPENDER_ADDRESS` wherever encrypted delivery or change is needed. `OWNER_PRIVATE_KEY` is used only by the application example signer for private Note/Credit authorization; it must match the selected wallet owner. Do not send account keys to the SDK.
 
 Proving scenarios require real matching tools and pinned release assets:
 
@@ -93,7 +86,7 @@ The executor implements the documented `NoirCli` interface (`--artifact-path`, `
 
 Set `AMOUNT` to integer token base units, `RECIPIENT_ADDRESS` for transfers, and `WITHDRAWAL_ADDRESS` for withdrawals. `shield` uses direct funding, so `CALLER_ADDRESS` must equal the public wallet owner and the payer must already have sufficient ERC20 balance and allowance to the protocol. Approval requirements are explicit SDK data; no scenario submits an approval implicitly.
 
-Transfer, withdrawal, aggregate, draw, update and disclosure examples automatically discover earlier deposits and grants through `PROTOCOL_RPC_URL`. Discovery starts at the trusted deployment block by default; optional `FROM_BLOCK` and `TO_BLOCK` bound the range. Each main prints a native viewing request array, reads the host response array, and applies canonical receipt, financial opening, membership, spent and revocation checks before selecting inputs. No private input or Merkle-path files are required. If a range exceeds native batch bounds, narrow it explicitly; no candidates are silently dropped.
+Transfer, withdrawal, aggregate, draw, update and disclosure examples discover earlier deposits and grants through `PROTOCOL_RPC_URL`. Discovery starts at the trusted deployment block by default; optional `FROM_BLOCK` and `TO_BLOCK` bound the range. Each main calls `pending.decrypt(&AppDecryptor)` and applies canonical receipt, opening, membership, spent and revocation checks before selecting inputs. No private input or Merkle-path files are required. Decryption errors leave the saved checkpoint unchanged.
 
 Transfers and withdrawals choose enough available Notes for `AMOUNT`. `aggregate` selects `AGGREGATE_MEMBERS` Notes (default two; supported values one, two or five), authorizes each member externally and proves the aggregate. Run the earlier shield/deposit scenario enough times to supply those Notes and wait for indexing.
 
@@ -111,7 +104,7 @@ Draws use `AMOUNT` and automatically select spender-role grants while respecting
 
 Choose a future expiry and deadline for your chain. Increases and decreases are mutually exclusive; updates preserve gross usage. Creation, update and revocation fees in these examples are zero. A draw also uses zero fee, so its ordinary Note receives the full debit.
 
-Revocation uses `GRANT_SHARD` and `GRANT_SLOT`. Direct calls require the owner as `CALLER_ADDRESS`. For a relay, the example exports public EIP-712 data and waits for an EVM signature from the host. It verifies the signature through the configured chain before exporting calldata. This is distinct from private circuit wallet authorization.
+Revocation uses `GRANT_SHARD` and `GRANT_SLOT`. Direct calls require the owner as `CALLER_ADDRESS`. For another caller, the example exports public EIP-712 data and signs it with the application `OWNER_PRIVATE_KEY` helper. It verifies the signature through the configured chain before exporting calldata. This is distinct from private circuit wallet authorization.
 
 ## Persistent sessions
 
@@ -129,7 +122,7 @@ Run `restore-session` to discover candidates, authenticate canonical receipts an
 
 Run `send-session` with `AMOUNT`, `RECIPIENT_ADDRESS` and `DEADLINE` to refresh earlier deposits automatically and select unreserved Notes and prepare a managed transfer. Keep the printed operation ID. Set `OPERATION_ID` on a later run to resume that exact operation with saved proof verification. Once your host has signed and submitted the exported transaction, set `HOST_TRANSACTION_HASH` on a resumed run to track and reconcile the explicit hash. The example never interprets exporting calldata as chain confirmation.
 
-The managed Credit binaries use the same encrypted store and refresh/native request-array exchange. They retain operation IDs, reserve inputs, export unsigned host transactions, and support `OPERATION_ID` + `HOST_TRANSACTION_HASH` recovery and canonical reconciliation just like `send-session`. Use a separate database per owner/spender wallet, with the same wallet and storage key when resuming. The examples reject saved operations of a different kind. Resume with the binary that created the operation; do not set `OPERATION_ID` for a new operation.
+The managed Credit binaries use the same encrypted store and explicit application decryption callbacks. They retain operation IDs, reserve inputs, export unsigned host transactions, and support `OPERATION_ID` + `HOST_TRANSACTION_HASH` recovery and canonical reconciliation just like `send-session`. Use a separate database per owner/spender wallet, with the same wallet and storage key when resuming. The examples reject saved operations of a different kind. Resume with the binary that created the operation; do not set `OPERATION_ID` for a new operation.
 
 ```sh
 # Owner grants authority; spender draws it into a recipient Note.
@@ -163,26 +156,10 @@ cargo run -p invisi-sdk-examples --bin note-output
 
 Run the other binaries without `--execute` to inspect their guard behavior without configuring services.
 
-## Provenance
+## Broadcaster and independent Source proofs
 
-Normal [`03-note/transfer.rs`](03-note/transfer.rs) and [`withdraw.rs`](03-note/withdraw.rs) install Provenance through optional `SOURCE_CONFIG`, then call `with_broadcaster` before wallet approval/main proving. Their flat call order stays visible; the SDK handles source roots, bounded leaf replay and private witness/proof internally. Broadcaster performs the source evaluation and returns `provenanceTracking` in the quote; the SDK binds it to the exact digest and independently reads the same task through its pinned Source client. No SDK evaluate call is made in this relay path. A changed fee plan obtains fresh source evidence; failed fee/quote/cancellation leaves the original preparation usable.
+See `07-broadcaster` for fee-frozen prepared quotation, ready transaction proving and broadcaster submission. Example 02 takes `PREPARED_SNAPSHOT` plus local prover/Source configuration, prints the complete public packet and submits it before the transaction. Example 03 reads only `SOURCE_PROOF_JSON` plus public pins in flat environment settings to validate and resubmit before or after chain confirmation; it needs no private wallet state, proof generator or transaction hash. Ordinary examples 01–06 have no optional Broadcaster mode or Source availability requirement.
 
-Copy `source.example.json` and `broadcaster.example.json` outside the checkout and replace public pins/paths from trusted operator deployment configuration. `SOURCE_CONFIG` points to the source configuration, including the reviewed manifest hash, local asset root, pinned provider/signing key and local Noir/BB executable paths. It contains no account secret or opening. Synchronize source assets with `python3 scripts/sync-provenance.py ../invisi-protocol`. Existing `PROVER_ASSETS`, `BB_BINARY` and `NOIR_EXECUTOR` configure main proving separately. `BROADCASTER_CONFIG` points to the registered HTTPS endpoint, quote signer and fee recipient; optional `BROADCASTER_POLICY_ID` explicitly pins its required policy. For Note examples the source configuration supplies that policy if the explicit setting is absent; inconsistent settings fail closed.
+Broadcaster uses separate `estimateQuote` and `getQuote` requests. Its server assigns submission IDs; applications retain those IDs and the exact final request. Source uses its official default endpoint or an explicitly configured trusted endpoint, with bounded checkpoint replay and locally verified proof generation. No policy ID or mandatory transaction hash is part of the public Source packet. See [PROVENANCE.md](../PROVENANCE.md) for the full contract and assets.
 
-With relay configuration, set stable `BROADCAST_ID` and a new `BROADCAST_RECORD` path. The examples exclusively create and sync this public calldata/quote/sidecar/tracking record before possible submission. Add `--submit` to send; otherwise they stop with a saved verified context. Ensure the locally selected inputs cover the final fee; insufficient selected balance requires explicit preparation/selection, never an automatic resend. For durable inventory/input reservations use the existing encrypted WalletSession `Operation::with_broadcaster` and `submit_broadcaster`; flat examples keep discovery state in memory and do not connect the App.
-
-After the actual transaction is mined, run the same Note binary with `--execute --confirm`, `TRANSACTION_HASH` and the same record/configuration. This branch skips discovery/preparation/proving, verifies primary deployment/calldata/receipt/canonical block, waits for the retained automatic tracking ID and checks exact operation recognition. Unknown, expired or stale tracking cannot silently submit a payment or source proof. Reorgs require authenticated reconciliation and explicit local reproof. A receiver still independently checks signed roots and output membership.
-
-All four existing `04-credit` files use highlevel `with_broadcaster` before native approval/main proving (or before EVM revocation consent). They call `submit_broadcaster` only after retaining the final public context. Credit lifecycle calls do not need a private Note source proof. Draw keeps gross payer/grant accounting while rebuilding and encrypting the recipient Note for gross debit minus the final relay fee. `getFee` is the authoritative token-support check; errors stop without consent/proving or an automatic direct-path fallback. Aggregate Broadcaster submission is explicitly rejected.
-
-```sh
-cargo run -p invisi-sdk-examples --bin transfer -- --execute --submit
-cargo run -p invisi-sdk-examples --bin transfer -- --execute --confirm
-cargo run -p invisi-sdk-examples --bin revoke-credit -- --execute --submit
-```
-
-The reusable `prover::NativeSourceProver` checks its separate manifest/artifact/VK pins, runs local Noir and BB with bounded execution, compares all public inputs and independently verifies the returned proof. Its opt-in real local test is `cargo test -p invisi-sdk-prover real_local_source_proof_is_independently_verified -- --ignored`, with `INVISI_PROTOCOL_ROOT`, `PROVENANCE_ASSETS`, `NOIR_EXECUTOR` and `BB_BINARY` pointing to the authenticated local release/tools.
-
-Direct protocol send and off-chain source proof submission remain independent SDK steps. With no relay configuration, the examples retain their ordinary unsigned host flow; Source availability/recognition is not a prerequisite for preparing or exporting that direct transaction. The App may independently evaluate source evidence before sending or submit it after primary confirmation.
-
-Managed `Operation::with_broadcaster` supports all four Credit operations. The encrypted journal stores the first broadcaster ID/call/context before sending. Same-ID retries query the relay journal first, including after expiry/spend or Source downtime; only an explicit unknown request permits a freshly validated same-body attempt. A different ID is rejected and lookup outages never automatically resend. Wallet completion still requires canonical primary reconciliation.
+Example 01 uses `BROADCASTER_ENDPOINT`, `BROADCASTER_QUOTE_SIGNER`, `BROADCASTER_FEE_RECIPIENT` and a positive `MAX_FEE_AMOUNT`. Source trust uses `SOURCE_CHAIN_ID`, `SOURCE_PROTOCOL_ADDRESS`, `SOURCE_GENERATION`, `SOURCE_PROVIDER_ID`, `SOURCE_SIGNING_KEY_ID` and `SOURCE_SIGNING_PUBLIC_KEY`; `SOURCE_ENDPOINT` defaults to the official service. Local Source proving additionally requires `SOURCE_ASSET_ROOT`, `BB_BINARY` and `NOIR_EXECUTOR`. Example 03 takes the public packet in `SOURCE_PROOF_JSON`, without opening those proving assets. Examples print outputs and never create record/configuration files.

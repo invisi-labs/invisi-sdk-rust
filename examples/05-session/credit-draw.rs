@@ -65,19 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         options.to_block = env::var("TO_BLOCK").ok().map(|s| s.parse()).transpose()?;
         let pending = session.refresh(options)?;
-        println!(
-            "Native discovery requests: {}",
-            serde_json::to_string(pending.wallet_requests())?
-        );
-        let responses: Vec<sdk::WalletResponse> = if pending.wallet_requests().is_empty() {
-            Vec::new()
-        } else {
-            eprintln!("Execute the discovery array in your native host, then paste its response JSON array:");
-            let mut response_json = String::new();
-            std::io::stdin().read_line(&mut response_json)?;
-            serde_json::from_str(&response_json)?
-        };
-        pending.apply_wallet_responses(&responses)?;
+        pending.decrypt(&invisi_sdk_examples::AppDecryptor)?;
     }
 
     let operation = if let Ok(id) = env::var("OPERATION_ID") {
@@ -136,31 +124,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Operation ID: {}", operation.id());
     let mut operation = operation;
 
-    // Restored, verified proofs can skip approval and proving; unfinished plans still need native
-    // consent.
+    // Restored verified proofs can skip approval and proving.
     if matches!(
         operation.phase(),
         sdk::Phase::Prepared | sdk::Phase::Authorized
     ) {
-        let request = operation.export_wallet_request("session-credit-draw-example")?;
-        println!(
-            "Native wallet requests: {}",
-            serde_json::to_string(std::slice::from_ref(&request))?
-        );
-        eprintln!("Approve through your native host and paste its one-line response JSON array:");
-        let mut response_json = String::new();
-        std::io::stdin().read_line(&mut response_json)?;
-        let responses: Vec<sdk::WalletResponse> = serde_json::from_str(&response_json)?;
-        session
-            .wallet()
-            .accept_batch(std::slice::from_ref(&request), &responses)?;
-        let response = responses
-            .iter()
-            .find(|response| response.id == request.id)
-            .ok_or("missing wallet response")?;
-
+        let request = operation.export_wallet_authorization()?;
+        let signature = invisi_sdk_examples::sign_authorization(&request)?;
         operation = operation
-            .with_wallet_response(response)?
+            .with_wallet_signature(&signature)?
             .prove(&prover, false)?;
     }
 
@@ -185,21 +157,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("Transaction is not yet canonically available.")
             }
             invisi_sdk::session::Reconciliation::Ready(pending) => {
-                println!(
-                    "Reconciliation viewing requests: {}",
-                    serde_json::to_string(pending.wallet_requests())?
-                );
-                let responses = if pending.wallet_requests().is_empty() {
-                    Vec::new()
-                } else {
-                    eprintln!(
-                        "Execute the native viewing requests, then paste the response JSON array:"
-                    );
-                    let mut response_json = String::new();
-                    std::io::stdin().read_line(&mut response_json)?;
-                    serde_json::from_str(&response_json)?
-                };
-                let applied = pending.apply_wallet_responses(&responses)?;
+                let applied = pending.decrypt(&invisi_sdk_examples::AppDecryptor)?;
+
                 println!(
                     "Reconciliation applied at canonical block {}.",
                     applied.block.number

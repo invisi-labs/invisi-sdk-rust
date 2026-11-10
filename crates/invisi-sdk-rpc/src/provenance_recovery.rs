@@ -27,7 +27,6 @@ type Result<T> = std::result::Result<T, String>;
 pub struct FrozenProvenanceIntent {
     pub chain_id: String,
     pub protocol_address: String,
-    pub policy_id: String,
     pub token_address: String,
     pub operation_index: String,
     pub operation_digest: String,
@@ -284,7 +283,6 @@ impl RecoveryCoordinator<'_> {
         let t = self.trust;
         if number(&i.chain_id, 64)? != U256::from(t.scope.chain_id)
             || number(&i.protocol_address, 160)? != t.scope.protocol_address
-            || number(&i.policy_id, 256)? != t.scope.policy_id
             || r.manifest_sha256 != t.manifest_sha256
         {
             return Err("recovery scope mismatch".into());
@@ -306,11 +304,11 @@ impl RecoveryCoordinator<'_> {
             return Err("recovery operation index mismatch".into());
         }
         let p = &r.sidecar.proof_bundle.public_inputs;
-        if p.len() != 13
+        if p.len() != 11
             || number(&p[2], 160)? != number(&i.token_address, 160)?
-            || ((number(&p[9], 128)? << 128) | number(&p[10], 128)?)
+            || ((number(&p[7], 128)? << 128) | number(&p[8], 128)?)
                 != number(&i.operation_digest, 256)?
-            || number(&p[8], 32)? != U256::from(i.input_nullifiers.len())
+            || number(&p[6], 32)? != U256::from(i.input_nullifiers.len())
         {
             return Err("recovery statement mismatch".into());
         }
@@ -326,7 +324,7 @@ impl RecoveryCoordinator<'_> {
             .iter()
             .map(|n| number(n, 256))
             .collect::<Result<Vec<_>>>()?;
-        if input_digest(&ns).map_err(|e| e.to_string())? != number(&p[11], 254)? {
+        if input_digest(&ns).map_err(|e| e.to_string())? != number(&p[9], 254)? {
             return Err("recovery nullifiers digest mismatch".into());
         }
         let mut trust = self.trust.clone();
@@ -897,7 +895,6 @@ mod tests {
             scope: invisi_sdk_core::provenance::Scope {
                 chain_id: number(&intent.chain_id, 64).unwrap().to(),
                 protocol_address: number(&intent.protocol_address, 160).unwrap(),
-                policy_id: number(&intent.policy_id, 256).unwrap(),
             },
             chain_generation: 1,
             provider_id: number(v["providerId"].as_str().unwrap(), 256).unwrap(),

@@ -1112,6 +1112,8 @@ pub struct PreparedTransaction {
     pub(crate) needs_authorization: bool,
     pub(crate) target: String,
     pub(crate) provenance: Option<Arc<PreparedProvenance>>,
+    pub(crate) provenance_data: Option<Vec<u8>>,
+    pub(crate) provenance_packet: Arc<std::sync::Mutex<Option<ProvenanceProof>>>,
     pub(crate) broadcaster: Option<PreparedBroadcasterState>,
     pub(crate) reprice: Option<RepriceTemplate>,
 }
@@ -1245,6 +1247,8 @@ impl Invisi {
             needs_authorization: false,
             target: "evm".into(),
             provenance: self.provenance.clone(),
+            provenance_data: None,
+            provenance_packet: Default::default(),
             broadcaster: None,
             reprice: Some(template),
         })
@@ -1356,6 +1360,8 @@ impl Invisi {
             needs_authorization,
             target: "evm".into(),
             provenance: self.provenance.clone(),
+            provenance_data: None,
+            provenance_packet: Default::default(),
             broadcaster: None,
             reprice: Some(template),
         })
@@ -2988,9 +2994,6 @@ impl PreparedTransaction {
                 outputs,
                 funding,
             } => {
-                if params.feeAmount == U256::ZERO {
-                    return Err("prepare final broadcaster fee before quoting".into());
-                }
                 let mut funding = funding.clone();
                 funding.signature = Bytes::new();
                 Ok(contract.call(&InvisiProtocol::shieldCall {
@@ -3012,9 +3015,6 @@ impl PreparedTransaction {
                 funding,
                 ..
             } => {
-                if params.feeAmount == U256::ZERO {
-                    return Err("prepare final broadcaster fee before quoting".into());
-                }
                 let mut funding = funding.clone();
                 funding.signature = Bytes::new();
                 Ok(contract.call(&InvisiProtocol::transact_0Call {

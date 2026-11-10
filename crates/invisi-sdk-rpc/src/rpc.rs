@@ -1,4 +1,5 @@
 //! Versioned indexed RPC and independent Ethereum reads. Indexed records are never proof of ownership.
+mod broadcaster_discovery;
 mod client;
 mod transport;
 mod types;

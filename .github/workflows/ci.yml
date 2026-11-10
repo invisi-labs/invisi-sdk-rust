@@ -17,3 +17,4 @@ jobs:
       - run: cargo build --locked -p invisi-sdk-ffi --release
       - run: python3 scripts/check-native-exports.py target/release/libinvisi_sdk_ffi.so
       - run: cargo run -p invisi-sdk-examples --bin note-output
+      - run: python3 scripts/check-release.py --work-dir "${{ runner.temp }}/invisi-release"

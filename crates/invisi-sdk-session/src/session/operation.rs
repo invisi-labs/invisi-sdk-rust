@@ -14,6 +14,24 @@ pub struct Operation {
     prepared: ManagedPrepared,
     requests: BTreeMap<String, WalletRequest>,
 }
+fn bind_provenance_call(
+    record: &OperationRecord,
+    value: sdk::PreparedTransaction,
+) -> Result<sdk::PreparedTransaction> {
+    let saved = record.snapshot.provenance_calldata()?;
+    let data = if let Some(call) = &record.call {
+        if saved.as_ref().is_some_and(|data| data != &call.data) {
+            return Err("saved provenance final calldata mismatch".into());
+        }
+        Some(call.data.clone())
+    } else {
+        saved
+    };
+    match data {
+        Some(data) => value.with_provenance_calldata(data),
+        None => Ok(value),
+    }
+}
 impl std::fmt::Debug for Operation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Operation")
@@ -354,6 +372,58 @@ impl Operation {
             .with_wallet_response(&request, response)?;
         self.persist(prepared)
     }
+    pub fn export_provenance_proof(&self) -> Result<Option<sdk::ProvenanceProof>> {
+        self.session.recover_provenance_proof(&self.id)
+    }
+    pub fn prove_provenance(&mut self) -> Result<sdk::ProvenanceProof> {
+        self.prove_provenance_inner(false)
+    }
+    pub fn reprove_provenance(&mut self) -> Result<sdk::ProvenanceProof> {
+        self.prove_provenance_inner(true)
+    }
+    fn prove_provenance_inner(&mut self, reprove: bool) -> Result<sdk::ProvenanceProof> {
+        // Cached public evidence remains useful after the operation is consumed.
+        if !reprove {
+            if let Some(packet) = self.export_provenance_proof()? {
+                return Ok(packet);
+            }
+        }
+        let mut state = self.session.snapshot()?;
+        let record = state
+            .operations
+            .get(&self.id)
+            .ok_or("operation not found")?;
+        if record.generation != self.generation {
+            return Err("stale operation handle".into());
+        }
+        if state.invalidated {
+            return Err("wallet requires canonical resync".into());
+        }
+        let staged = match self.prepared.clone_for_stage() {
+            ManagedPrepared::Funds(value) => {
+                ManagedPrepared::Funds(bind_provenance_call(record, value)?)
+            }
+            other => other,
+        };
+        let packet = match &staged {
+            ManagedPrepared::Funds(v) => {
+                if reprove {
+                    v.reprove_provenance(&*self.session.invisi.chain)?
+                } else {
+                    v.prove_provenance(&*self.session.invisi.chain)?
+                }
+            }
+            ManagedPrepared::Credit(_) => return Err("private Note transaction required".into()),
+        };
+        let record = state
+            .operations
+            .get_mut(&self.id)
+            .ok_or("operation not found")?;
+        record.snapshot.update_provenance_proof(&staged)?;
+        self.session.commit(state)?;
+        self.prepared = staged;
+        Ok(packet)
+    }
     pub fn prove(self, backend: &dyn Prover, recursive: bool) -> Result<Self> {
         self.current()?;
         let prepared = self.prepared.clone_for_stage().prove(backend, recursive)?;
@@ -439,6 +509,15 @@ impl Operation {
         self.generation = record.generation;
         self.session.commit(state)?;
         Ok(call)
+    }
+    pub fn estimate_gas<G: crate::rpc::ChainGas>(
+        &mut self,
+        gas: &G,
+        caller: Address,
+    ) -> Result<U256> {
+        let call = self.calldata(caller)?;
+        gas.estimate_gas(self.session.scope.context.chain_id, caller, &call)
+            .map_err(|e| e.to_string())
     }
     pub fn track_transaction(&mut self, hash: B256) -> Result<()> {
         if hash == B256::ZERO {
@@ -683,6 +762,49 @@ impl WalletSession {
             deadline,
             fee,
         )?))
+    }
+    /// Recovers the public proof packet, including for completed operations, without resuming spending.
+    pub fn recover_provenance_proof(&self, id: &str) -> Result<Option<sdk::ProvenanceProof>> {
+        let state = self.snapshot()?;
+        let record = state.operations.get(id).ok_or("operation not found")?;
+        let prepared = record.snapshot.restore(&self.wallet, None)?;
+        match prepared {
+            ManagedPrepared::Funds(v) => {
+                let cap = self
+                    .invisi
+                    .provenance
+                    .clone()
+                    .ok_or("trusted provenance capability required")?;
+                bind_provenance_call(record, v)?
+                    .reattach_provenance(cap)?
+                    .export_provenance_proof()
+            }
+            ManagedPrepared::Credit(_) => Err("private Note transaction required".into()),
+        }
+    }
+    /// Refreshes Source evidence after restart while preserving terminal payment state.
+    pub fn reprove_provenance_proof(&self, id: &str) -> Result<sdk::ProvenanceProof> {
+        let mut state = self.snapshot()?;
+        if state.invalidated {
+            return Err("wallet requires canonical resync".into());
+        }
+        let record = state.operations.get_mut(id).ok_or("operation not found")?;
+        let prepared = record.snapshot.restore(&self.wallet, None)?;
+        let ManagedPrepared::Funds(value) = prepared else {
+            return Err("private Note transaction required".into());
+        };
+        let cap = self
+            .invisi
+            .provenance
+            .clone()
+            .ok_or("trusted provenance capability required")?;
+        let value = bind_provenance_call(record, value)?.reattach_provenance(cap)?;
+        let packet = value.reprove_provenance(&*self.invisi.chain)?;
+        record
+            .snapshot
+            .update_provenance_proof(&ManagedPrepared::Funds(value))?;
+        self.commit(state)?;
+        Ok(packet)
     }
     pub fn resume(&self, id: &str, backend: Option<&dyn Prover>) -> Result<Operation> {
         let mut state = self.snapshot()?;

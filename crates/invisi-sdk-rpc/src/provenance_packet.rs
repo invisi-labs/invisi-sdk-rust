@@ -168,10 +168,8 @@ mod tests {
     };
     use std::collections::BTreeMap;
     fn fixture() -> (ProvenanceProof, TrustContext) {
-        let golden: Value = serde_json::from_str(include_str!(
-            "../../invisi-sdk-core/src/provenance-testdata/golden-vectors.json"
-        ))
-        .unwrap();
+        let golden: Value =
+            serde_json::from_str(include_str!("../testdata/golden-vectors.json")).unwrap();
         let mut fields = golden["certificate"]["fields"].clone();
         for value in fields.as_object_mut().unwrap().values_mut() {
             *value = json!(value.to_string())

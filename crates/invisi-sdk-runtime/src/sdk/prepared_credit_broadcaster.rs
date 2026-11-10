@@ -84,12 +84,8 @@ impl PreparedCredit {
             .reprice
             .as_ref()
             .ok_or("original Credit business preparation required for explicit repricing")?;
-        let mut fee = invisi_sdk_rpc::broadcaster::Fee {
-            fee_recipient: config.fee_recipient,
-            fee_amount: "1".into(),
-            max_gas: "1".into(),
-        };
-        for round in 0..options.max_fee_rounds {
+        let mut fee = relay.fee(self.token, Some(&self.broadcaster_intent()?.data))?;
+        for _round in 0..options.max_fee_rounds {
             if fee.fee_recipient != config.fee_recipient {
                 return Err("Credit relay fee recipient mismatch".into());
             }
@@ -131,10 +127,14 @@ impl PreparedCredit {
             };
             let data = candidate.broadcaster_intent()?.data;
             let next = relay.fee(self.token, Some(&data))?;
-            if round == 0
-                || next.fee_amount != fee.fee_amount
-                || next.fee_recipient != fee.fee_recipient
+            let next_amount = decimal(&json!(next.fee_amount))?;
+            if next.fee_recipient != config.fee_recipient
+                || next_amount == U256::ZERO
+                || options.max_fee_amount.is_some_and(|cap| next_amount > cap)
             {
+                return Err("broadcaster fee exceeds maximum or recipient changed".into());
+            }
+            if next_amount > amount {
                 fee = next;
                 continue;
             }

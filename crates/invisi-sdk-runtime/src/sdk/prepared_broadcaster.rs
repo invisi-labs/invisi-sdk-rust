@@ -22,6 +22,20 @@ pub struct PreparedProvenance {
     pub prover: Arc<dyn OfflineProver + Send + Sync>,
     pub budgets: SourceReplayBudgets,
 }
+struct ClientOnlyProver;
+impl OfflineProver for ClientOnlyProver {
+    fn prove(
+        &self,
+        _: &str,
+        _: usize,
+        _: &source::Witness,
+        _: &[String],
+    ) -> crate::note::ModelResult<(Vec<String>, Vec<u8>)> {
+        Err(crate::note::ModelError::Invalid(
+            "local provenance proving resources required",
+        ))
+    }
+}
 /// This file-backed configuration contains public pins and local executable/asset paths only.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -46,6 +60,26 @@ fn default_source_endpoint() -> String {
     invisi_sdk_rpc::provenance_client::DEFAULT_ENDPOINT.into()
 }
 impl PreparedProvenance {
+    /// Attaches public trust pins for cached proof recovery without local proving assets.
+    pub fn client_only(client: Arc<ProvenanceClient>) -> Self {
+        Self {
+            client,
+            manifest: ManifestIdentity {
+                sha256: String::new(),
+                manifest: source::Manifest {
+                    family: String::new(),
+                    target: String::new(),
+                    noir_version: String::new(),
+                    bb_version: String::new(),
+                    depth: 0,
+                    public_inputs: Vec::new(),
+                    circuits: Vec::new(),
+                },
+            },
+            prover: Arc::new(ClientOnlyProver),
+            budgets: SourceReplayBudgets::default(),
+        }
+    }
     pub fn from_local_configuration(c: LocalProvenanceConfiguration) -> Result<Self> {
         if c.timeout_seconds == 0 || c.threads == 0 {
             return Err("positive local prover options required".into());
@@ -216,7 +250,7 @@ impl PreparedProvenance {
         let t = &self.client.trust;
         if t.scope.chain_id != context.chain_id
             || t.scope.protocol_address != context.protocol_address
-            || t.manifest_sha256 != self.manifest.sha256
+            || (!self.manifest.sha256.is_empty() && t.manifest_sha256 != self.manifest.sha256)
         {
             return Err("provenance capability deployment/provenance/manifest mismatch".into());
         }
@@ -274,13 +308,9 @@ impl PreparedTransaction {
             chain: chain.clone(),
             provenance: self.provenance.clone(),
         };
-        let mut fee = RelayFee {
-            fee_recipient: config.fee_recipient,
-            fee_amount: "1".into(),
-            max_gas: "1".into(),
-        };
+        let mut fee = relay.fee(self.token, Some(&self.broadcaster_intent()?.data))?;
         let mut final_candidate = None;
-        for round in 0..options.max_fee_rounds {
+        for _round in 0..options.max_fee_rounds {
             let amount = decimal(&json!(fee.fee_amount))?;
             if options.max_fee_amount.is_some_and(|cap| amount > cap) {
                 return Err("broadcaster fee exceeds maximum".into());
@@ -316,10 +346,14 @@ impl PreparedTransaction {
             }
             let data = candidate.broadcaster_intent()?.data;
             let next = relay.fee(self.token, Some(&data))?;
-            if round > 0
-                && next.fee_amount == fee.fee_amount
-                && next.fee_recipient == fee.fee_recipient
+            let next_amount = decimal(&json!(next.fee_amount))?;
+            if next.fee_recipient != config.fee_recipient
+                || next_amount == U256::ZERO
+                || options.max_fee_amount.is_some_and(|cap| next_amount > cap)
             {
+                return Err("broadcaster fee exceeds maximum or recipient changed".into());
+            }
+            if amount >= next_amount {
                 final_candidate = Some(candidate);
                 break;
             }
@@ -576,12 +610,100 @@ impl PreparedTransaction {
         self.broadcaster.as_mut().unwrap().submission_id = Some(result.id.clone());
         Ok(result)
     }
+    /// Exports the public packet without reading the chain or invoking a prover.
+    pub fn export_provenance_proof(&self) -> Result<Option<source::ProvenanceProof>> {
+        let packet = self
+            .provenance_packet
+            .lock()
+            .map_err(|_| "provenance cache lock poisoned")?
+            .clone();
+        if let Some(packet) = &packet {
+            self.validate_cached_provenance(packet)?;
+        }
+        Ok(packet)
+    }
     pub fn prove_provenance(&self, chain: &dyn ChainState) -> Result<source::ProvenanceProof> {
+        if let Some(packet) = self.export_provenance_proof()? {
+            self.validate_cached_provenance(&packet)?;
+            return Ok(packet);
+        }
+        self.reprove_provenance(chain)
+    }
+    fn validate_cached_provenance(&self, packet: &source::ProvenanceProof) -> Result<()> {
         let cap = self
             .provenance
             .as_ref()
             .ok_or("trusted provenance capability required")?;
-        let data = self.provenance_calldata()?;
+        invisi_sdk_rpc::provenance_packet::validate_provenance_proof(packet, &cap.client.trust)?;
+        self.validate_cached_native_statement(packet)
+    }
+    fn validate_cached_native_statement(&self, packet: &source::ProvenanceProof) -> Result<()> {
+        if self
+            .provenance_data
+            .as_ref()
+            .is_some_and(|data| packet.data != hex(data))
+        {
+            return Err("cached provenance final calldata mismatch".into());
+        }
+        let data = hex::decode(
+            packet
+                .data
+                .strip_prefix("0x")
+                .ok_or("0x calldata required")?,
+        )
+        .map_err(|e| e.to_string())?;
+        let call =
+            InvisiProtocol::transact_0Call::abi_decode(&data, true).map_err(|e| e.to_string())?;
+        let Plan::Transfer {
+            params,
+            outputs,
+            funding,
+            capacity,
+            ..
+        } = &self.plan
+        else {
+            return Err("private Note transaction required".into());
+        };
+        let expected = abi::TransactRequest {
+            params: params.clone(),
+            deliveries: outputs.iter().map(|v| v.delivery.clone()).collect(),
+            funding: funding.clone(),
+        };
+        let public = self
+            .public_inputs()?
+            .iter()
+            .map(|v| hex(&v.to_be_bytes::<32>()))
+            .collect::<Vec<_>>();
+        if call.abi_encode() != data
+            || call.r.abi_encode() != expected.abi_encode()
+            || packet.public_inputs != public
+            || packet.main_circuit_capacity != *capacity
+        {
+            return Err("cached provenance native statement mismatch".into());
+        }
+        Ok(())
+    }
+    /// Replaces cached evidence only after fresh proving and local validation succeed.
+    pub fn reprove_provenance(&self, chain: &dyn ChainState) -> Result<source::ProvenanceProof> {
+        let cap = self
+            .provenance
+            .as_ref()
+            .ok_or("trusted provenance capability required")?;
+        let data = if let Some(data) = &self.provenance_data {
+            data.clone()
+        } else if self.proof.is_some() {
+            self.provenance_calldata()?
+        } else {
+            let packet = self
+                .provenance_packet
+                .lock()
+                .map_err(|_| "provenance cache lock poisoned")?
+                .clone()
+                .ok_or("ready transaction proof required for provenance")?;
+            // Fresh Source rules may intentionally invalidate the old evidence, but never its retained native statement.
+            self.validate_cached_native_statement(&packet)?;
+            hex::decode(packet.data.trim_start_matches("0x")).map_err(|e| e.to_string())?
+        };
         let (sidecar, digest) = self.build_source_sidecar(chain, cap)?;
         let capacity = match &self.plan {
             Plan::Transfer { capacity, .. } => *capacity,
@@ -605,7 +727,46 @@ impl PreparedTransaction {
             sidecars: vec![sidecar],
         };
         invisi_sdk_rpc::provenance_packet::validate_provenance_proof(&packet, &cap.client.trust)?;
+        *self
+            .provenance_packet
+            .lock()
+            .map_err(|_| "provenance cache lock poisoned")? = Some(packet.clone());
         Ok(packet)
+    }
+    /// Retains an authoritative final call for Source-only recovery without granting normal proof export.
+    pub fn with_provenance_calldata(mut self, data: Vec<u8>) -> Result<Self> {
+        let call =
+            InvisiProtocol::transact_0Call::abi_decode(&data, true).map_err(|e| e.to_string())?;
+        let Plan::Transfer {
+            params,
+            outputs,
+            funding,
+            ..
+        } = &self.plan
+        else {
+            return Err("private Note transaction required".into());
+        };
+        let expected = abi::TransactRequest {
+            params: params.clone(),
+            deliveries: outputs.iter().map(|v| v.delivery.clone()).collect(),
+            funding: funding.clone(),
+        };
+        if call.abi_encode() != data
+            || call.r.abi_encode() != expected.abi_encode()
+            || call._0.is_empty()
+        {
+            return Err("retained provenance calldata mismatch".into());
+        }
+        self.provenance_data = Some(data);
+        if let Some(packet) = self
+            .provenance_packet
+            .lock()
+            .map_err(|_| "provenance cache lock poisoned")?
+            .as_ref()
+        {
+            self.validate_cached_native_statement(packet)?;
+        }
+        Ok(self)
     }
     fn provenance_calldata(&self) -> Result<Vec<u8>> {
         if self.target != "evm" {
@@ -649,6 +810,10 @@ impl PreparedTransaction {
             self.context,
             self.broadcaster.as_ref().and_then(|s| s.provenance_mode()),
         )?;
+        if cap.manifest.sha256.is_empty() || cap.manifest.sha256 != cap.client.trust.manifest_sha256
+        {
+            return Err("local provenance proving resources required".into());
+        }
         let (main_capacity, nfs) = match &self.plan {
             Plan::Transfer {
                 capacity, params, ..
@@ -891,6 +1056,235 @@ fn replay_sources(
 mod tests {
     use super::super::{test_support::note_fixture, *};
     use super::*;
+    fn cache_word(n: U256) -> String {
+        hex(&n.to_be_bytes::<32>())
+    }
+    fn cache_split(n: B256) -> [U256; 2] {
+        [U256::from_be_slice(&n[..16]), U256::from_be_slice(&n[16..])]
+    }
+    fn cached_packet_fixture() -> (source::ProvenanceProof, source::TrustContext) {
+        let golden: Value = serde_json::from_str(include_str!(
+            "../../testdata/provenance-golden-vectors.json"
+        ))
+        .unwrap();
+        let mut fields = golden["certificate"]["fields"].clone();
+        for value in fields.as_object_mut().unwrap().values_mut() {
+            *value = json!(value.to_string())
+        }
+        fields["signature"] = json!(format!(
+            "0x{}",
+            golden["certificate"]["signatureHex"]
+                .as_str()
+                .unwrap()
+                .trim_start_matches("0x")
+        ));
+        let certificate: RootCertificate = serde_json::from_value(fields).unwrap();
+        let spki = hex::decode(
+            golden["certificate"]["publicKeySpkiHex"]
+                .as_str()
+                .unwrap()
+                .trim_start_matches("0x"),
+        )
+        .unwrap();
+        let key: [u8; 32] = spki[spki.len() - 32..].try_into().unwrap();
+        let trust = source::TrustContext {
+            scope: source::Scope {
+                chain_id: 4,
+                protocol_address: U256::from(5),
+            },
+            chain_generation: 6,
+            provider_id: U256::from(1),
+            signing_keys: BTreeMap::from([(U256::from(2), key)]),
+            signing_key_validity: BTreeMap::new(),
+            manifest_sha256: "a".repeat(64),
+        };
+        let request = abi::TransactRequest {
+            params: abi::CrossTreeTransactParams {
+                token: Address::from_slice(&U256::from(2).to_be_bytes::<32>()[12..]),
+                sources: vec![abi::InputSource {
+                    treeId: U256::from(1),
+                    merkleRoot: B256::from(U256::from(11).to_be_bytes::<32>()),
+                }],
+                nullifiers: vec![B256::from(U256::from(12).to_be_bytes::<32>())],
+                noteCommitments: vec![],
+                withdrawalAddress: Address::from_slice(&U256::from(10).to_be_bytes::<32>()[12..]),
+                withdrawalAmount: U256::from(1),
+                deadline: U256::from(100),
+                feeRecipient: Address::ZERO,
+                feeAmount: U256::ZERO,
+            },
+            deliveries: vec![],
+            funding: abi::FundingParams {
+                amount: U256::ZERO,
+                payer: Address::ZERO,
+                sigNonce: U256::ZERO,
+                deadline: U256::ZERO,
+                signature: Bytes::new(),
+                permit: crate::protocol::IMetaTx::TokenPermit {
+                    deadline: U256::ZERO,
+                    v: 0,
+                    r: B256::ZERO,
+                    s: B256::ZERO,
+                },
+            },
+        };
+        // The fixed native statement is independent of the decoder. Only ZK proof bytes are mocked; the certificate uses a signed cross-SDK vector.
+        let mut words = vec![4, 5, 2, 1, 0, 1, 1, 11, 12]
+            .into_iter()
+            .map(U256::from)
+            .collect::<Vec<_>>();
+        words.extend(cache_split(keccak256(
+            (request.deliveries.clone(),).abi_encode_params(),
+        )));
+        words.extend([10, 1, 100, 0, 0, 0, 0].map(U256::from));
+        let auth=invisi_sdk_core::wallet::authorization_digest(&json!({"operation":"transact","capacity":1,"context":{"chainId":"4","protocolAddress":"5"},"words":words.iter().map(U256::to_string).collect::<Vec<_>>()})).unwrap();
+        words.extend(cache_split(B256::from(auth)));
+        let digest = source::operation_digest(&trust.scope, 1, &words).unwrap();
+        let digest_value = U256::from_be_bytes(digest);
+        let sd = source::sources_digest(
+            6,
+            &[Source {
+                tree_id: 8,
+                root: U256::from(10),
+                leaf_count: 9,
+            }],
+        )
+        .unwrap();
+        let nd = source::input_digest(&[U256::from(12)]).unwrap();
+        let limbs = source::limbs(digest_value);
+        let binding = source::binding_digest(
+            source::scope_hash(&trust.scope).unwrap(),
+            U256::from(2),
+            6,
+            1,
+            sd,
+            1,
+            digest_value,
+            nd,
+        )
+        .unwrap();
+        let pi = [
+            U256::from(4),
+            U256::from(5),
+            U256::from(2),
+            U256::from(6),
+            U256::from(1),
+            sd,
+            U256::from(1),
+            limbs[0],
+            limbs[1],
+            nd,
+            binding,
+        ]
+        .map(cache_word)
+        .to_vec();
+        let packet = source::ProvenanceProof {
+            format: "invisi-provenance-submission-v1".into(),
+            data: format!(
+                "0x{}",
+                hex::encode(
+                    InvisiProtocol::transact_0Call {
+                        _0: Bytes::from(vec![1, 2]),
+                        r: request
+                    }
+                    .abi_encode()
+                )
+            ),
+            context: source::ProofContext {
+                chain_id: "4".into(),
+                protocol_address: "0x0000000000000000000000000000000000000005".into(),
+                token_address: "0x0000000000000000000000000000000000000002".into(),
+            },
+            main_circuit_capacity: 1,
+            public_inputs: words.into_iter().map(cache_word).collect(),
+            operation_digest: cache_word(digest_value),
+            sidecars: vec![ProofSidecar {
+                operation_index: "0".into(),
+                proof_bundle: source::ProofBundle {
+                    format: "invisi-provenance-proof-v1".into(),
+                    circuit_id: "provenance_k10".into(),
+                    manifest_sha256: trust.manifest_sha256.clone(),
+                    target: "evm".into(),
+                    public_inputs: pi,
+                    proof: "0x0102".into(),
+                    root_certificates: vec![certificate],
+                },
+            }],
+        };
+        (packet, trust)
+    }
+    #[test]
+    fn cached_public_packet_is_local_and_failed_reproof_preserves_it() {
+        let (chain, wallet, params, _) = note_fixture();
+        let (packet, trust) = cached_packet_fixture();
+        let call = InvisiProtocol::transact_0Call::abi_decode(
+            &hex::decode(packet.data.trim_start_matches("0x")).unwrap(),
+            true,
+        )
+        .unwrap();
+        let mut prepared = Invisi::new(chain.clone())
+            .prepare_transfer(&wallet, params)
+            .unwrap();
+        prepared.context = ProtocolContext {
+            chain_id: 4,
+            protocol_address: U256::from(5),
+        };
+        prepared.token = call.r.params.token;
+        prepared.plan = Plan::Transfer {
+            params: call.r.params,
+            inputs: vec![],
+            outputs: vec![],
+            funding: call.r.funding,
+            capacity: 1,
+        };
+        prepared.provenance = Some(Arc::new(PreparedProvenance {
+            client: Arc::new(ProvenanceClient::new("http://127.0.0.1:1", trust).unwrap()),
+            manifest: source::authenticate_manifest(
+                include_bytes!("../../provenance/manifest.json"),
+                "6107789c5c0d24c4130bff05da6d389336feb5ccb247c4030eae5198ab05d762",
+            )
+            .unwrap(),
+            prover: Arc::new(NoProver),
+            budgets: SourceReplayBudgets::default(),
+        }));
+        *prepared.provenance_packet.lock().unwrap() = Some(packet.clone());
+        // No main proof is installed: cache reuse must use only its public statement.
+        assert!(prepared.proof.is_none());
+        assert_eq!(
+            prepared.prove_provenance(chain.as_ref()).unwrap().data,
+            packet.data
+        );
+        let before = serde_json::to_value(prepared.export_provenance_proof().unwrap()).unwrap();
+        assert!(prepared.reprove_provenance(chain.as_ref()).is_err());
+        assert_eq!(
+            serde_json::to_value(prepared.export_provenance_proof().unwrap()).unwrap(),
+            before
+        );
+        let snapshot = journal::ManagedPrepared::snapshot_funds(&prepared)
+            .snapshot()
+            .unwrap();
+        let saved = serde_json::to_value(snapshot).unwrap();
+        assert_eq!(saved["provenancePacket"]["data"], packet.data);
+        let mut original = saved.clone();
+        original.as_object_mut().unwrap().remove("provenancePacket");
+        original["ready"] = json!(true);
+        let mut retained: journal::PreparedSnapshot =
+            serde_json::from_value(original.clone()).unwrap();
+        retained
+            .update_provenance_proof(&journal::ManagedPrepared::snapshot_funds(&prepared))
+            .unwrap();
+        let mut updated = serde_json::to_value(retained).unwrap();
+        assert_eq!(
+            updated.as_object_mut().unwrap().remove("provenancePacket"),
+            Some(saved["provenancePacket"].clone())
+        );
+        assert_eq!(updated, original);
+
+        let mut wrong = packet.clone();
+        wrong.public_inputs[0] = "0x01".into();
+        *prepared.provenance_packet.lock().unwrap() = Some(wrong);
+        assert!(prepared.prove_provenance(chain.as_ref()).is_err());
+    }
     #[test]
     fn original_preparation_survives_missing_provenance_capability() {
         let (chain, wallet, p, _) = note_fixture();
@@ -1122,7 +1516,7 @@ mod tests {
     fn configured_source_provenance_mismatch_fails_before_relay_request() {
         let (chain, _, _, _) = note_fixture();
         let manifest = source::authenticate_manifest(
-            include_bytes!("../../../invisi-sdk-core/provenance/manifest.json"),
+            include_bytes!("../../provenance/manifest.json"),
             "6107789c5c0d24c4130bff05da6d389336feb5ccb247c4030eae5198ab05d762",
         )
         .unwrap();
@@ -1147,15 +1541,15 @@ mod tests {
     }
     #[test]
     fn local_source_configuration_rejects_private_fields_and_wrong_key_identity() {
-        let mut config = json!({"endpoint":"http://127.0.0.1:1","chainId":"31337","protocolAddress":"0x1234","generation":"1","providerId":"0x01","signingKeyId":"0x01","signingPublicKey":format!("0x{}","00".repeat(32)),"manifestSha256":"6107789c5c0d24c4130bff05da6d389336feb5ccb247c4030eae5198ab05d762","assetRoot":std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../invisi-sdk-core/provenance"),"bbBinary":"unused","noirExecutor":"unused","timeoutSeconds":120,"threads":4,"budgets":{"maxRootPages":1,"maxCertificates":1,"maxTotalLeaves":1}});
+        let mut config = json!({"endpoint":"http://127.0.0.1:1","chainId":"31337","protocolAddress":"0x1234","generation":"1","providerId":"0x01","signingKeyId":"0x01","signingPublicKey":format!("0x{}","00".repeat(32)),"manifestSha256":"6107789c5c0d24c4130bff05da6d389336feb5ccb247c4030eae5198ab05d762","assetRoot":std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("provenance"),"bbBinary":"unused","noirExecutor":"unused","timeoutSeconds":120,"threads":4,"budgets":{"maxRootPages":1,"maxCertificates":1,"maxTotalLeaves":1}});
         config["opening"] = json!({"nonce":"1"});
         assert!(serde_json::from_value::<LocalProvenanceConfiguration>(config.clone()).is_err());
         config.as_object_mut().unwrap().remove("opening");
         let invalid_config = serde_json::from_value(config.clone()).unwrap();
-        assert!(PreparedProvenance::from_local_configuration(invalid_config)
+        let error = PreparedProvenance::from_local_configuration(invalid_config)
             .err()
-            .unwrap()
-            .contains("key ID mismatch"));
+            .unwrap();
+        assert!(error.contains("key ID mismatch"), "{error}");
         use sha2::Digest;
         config["signingKeyId"] = json!(format!(
             "0x{}",
@@ -1255,10 +1649,11 @@ mod tests {
         fn provenance_mode(&self) -> Option<()> {
             None
         }
-        fn fee(&self, _: Address, _: Option<&[u8]>) -> Result<RelayFee> {
+        fn fee(&self, _: Address, data: Option<&[u8]>) -> Result<RelayFee> {
+            assert!(data.is_some(), "final intent calldata required");
             let n = self.fees.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(RelayFee {
-                fee_amount: if n == 0 { "1" } else { "2" }.into(),
+                fee_amount: if n % 2 == 0 { "1" } else { "2" }.into(),
                 fee_recipient: self.configuration().fee_recipient,
                 max_gas: "100000".into(),
             })

@@ -1,6 +1,6 @@
 [package]
 name = "invisi-sdk"
-version = "0.1.0"
+version = "1.1.8"
 edition = "2021"
 authors = ["InvisiPay team"]
 license = "Apache-2.0"
@@ -10,16 +10,18 @@ readme = "README.md"
 keywords = ["zk", "poseidon2", "bn254", "privacy", "noir"]
 categories = ["cryptography"]
 
+include = ["Cargo.toml", "README.md", "LICENSE", "CHANGELOG.md", "RELEASE.md", "src/**", "tests/**"]
+
 [lib]
 name = "invisi_sdk"
 
 [dependencies]
-invisi-sdk-core = { path = "crates/invisi-sdk-core" }
-invisi-sdk-protocol = { path = "crates/invisi-sdk-protocol" }
-invisi-sdk-prover = { path = "crates/invisi-sdk-prover" }
-invisi-sdk-rpc = { path = "crates/invisi-sdk-rpc" }
-invisi-sdk-runtime = { path = "crates/invisi-sdk-runtime" }
-invisi-sdk-session = { path = "crates/invisi-sdk-session" }
+invisi-sdk-core = { path = "crates/invisi-sdk-core", version = "=1.1.8" }
+invisi-sdk-protocol = { path = "crates/invisi-sdk-protocol", version = "=1.1.8" }
+invisi-sdk-prover = { path = "crates/invisi-sdk-prover", version = "=1.1.8" }
+invisi-sdk-rpc = { path = "crates/invisi-sdk-rpc", version = "=1.1.8" }
+invisi-sdk-runtime = { path = "crates/invisi-sdk-runtime", version = "=1.1.8" }
+invisi-sdk-session = { path = "crates/invisi-sdk-session", version = "=1.1.8" }
 
 [dev-dependencies]
 alloy-primitives = { version = "0.8", features = ["serde"] }

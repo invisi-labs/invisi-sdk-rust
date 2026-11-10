@@ -62,10 +62,8 @@ mod encrypted_adapter_tests {
     };
     use serde_json::{json, Value};
     fn record() -> RecoveryRecord {
-        let fixture: Value = serde_json::from_str(include_str!(
-            "../../invisi-sdk-rpc/testdata/provenance-recovery.json"
-        ))
-        .unwrap();
+        let fixture: Value =
+            serde_json::from_str(include_str!("../testdata/provenance-recovery.json")).unwrap();
         serde_json::from_value(json!({"format":"invisi-provenance-recovery-v1","deliveryMode":"direct","revision":1,"id":"one","intent":fixture["intent"],"manifestSha256":fixture["manifestSha256"],"chainGeneration":"1","sidecar":fixture["sidecars"][0],"idempotencyKey":"stable","state":"broadcast_possible"})).unwrap()
     }
     #[test]

@@ -4,6 +4,11 @@ A Rust SDK for ordinary private Notes and deferred Credit grants, aligned with t
 shared TypeScript and Go protocol behavior. Source, comments and documentation use English.
 The SDK does not select accounts, read Keychain/Keystore, hold a mnemonic, or approve requests.
 
+## Release validation
+
+The public crates share version **1.1.8**. See [local release validation](RELEASE.md)
+for verified packaging and the required publication order.
+
 ## Workspace
 
 | Crate | Responsibility |
@@ -101,3 +106,7 @@ No release, push or App migration is performed by these commands.
 ## Optional Provenance tracking
 
 The independent [Provenance module](PROVENANCE.md) keeps Source recognition separate from protocol settlement. Ready private Note payments expose `prove_provenance`, `precheck_provenance`, and independent `submit_provenance` with an optional transaction hash. Rebuilding Source evidence preserves the existing payment. Broadcaster estimates fees separately from its final signed quote, advertises Source requirements, and assigns opaque server submission IDs. Managed retries retain the exact request and the returned server ID. See the parallel [Broadcaster examples](examples/07-broadcaster) and ordinary [Note](examples/03-note/transfer.rs) and [Credit](examples/04-credit/create.rs) flows. Apps supply ordinary signing and delivery decryption.
+
+Final RPC gas estimates are available on native Note and Credit prepared transactions and managed operations through `estimate_gas`. They use the exact exported calldata and caller. Managed estimates retain the export fence even if the provider rejects the estimate. These RPC results are separate from documented benchmark references, relay fees and quote gas ceilings.
+
+`ProtocolRpcClient::discover_broadcasters(token)` pages enabled registrations at one canonical registry anchor and independently probes each operator's token support. Unsupported, unreachable or incorrectly identified services are skipped. Apps with their own network policy may use `discover_broadcasters_with_transport`; the Protocol RPC wire query itself has no token filter.

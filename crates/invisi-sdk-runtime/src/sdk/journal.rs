@@ -131,6 +131,8 @@ pub struct PreparedSnapshot {
     ready: bool,
     broadcaster: Option<PreparedBroadcasterState>,
     credit_recipient: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provenance_packet: Option<sdk::ProvenanceProof>,
 }
 pub enum ManagedPrepared {
     Funds(PreparedTransaction),
@@ -150,6 +152,8 @@ impl ManagedPrepared {
             needs_authorization: value.needs_authorization,
             target: value.target.clone(),
             provenance: value.provenance.clone(),
+            provenance_data: value.provenance_data.clone(),
+            provenance_packet: value.provenance_packet.clone(),
             broadcaster: value.broadcaster.clone(),
             reprice: value.reprice.clone(),
         })
@@ -184,11 +188,13 @@ impl ManagedPrepared {
             ready: false,
             broadcaster: None,
             credit_recipient: None,
+            provenance_packet: None,
         };
         Ok(match self {
             Self::Funds(v) => {
                 let mut s = empty(v.context, v.token, v.anchor.clone());
                 s.broadcaster = v.broadcaster.clone();
+                s.provenance_packet = v.export_provenance_proof()?;
                 s.inputs = v.inputs().iter().map(NoteInputRecord::from).collect();
                 s.outputs = v.outputs().iter().map(OutputSnapshot::capture).collect();
                 s.needs_authorization = v.needs_authorization;
@@ -441,6 +447,10 @@ impl PreparedSnapshot {
                     needs_authorization: false,
                     target: "evm".into(),
                     provenance: None,
+                    provenance_data: None,
+                    provenance_packet: Arc::new(std::sync::Mutex::new(
+                        self.provenance_packet.clone(),
+                    )),
                     broadcaster: self.broadcaster.clone(),
                     reprice: None,
                 })
@@ -530,6 +540,10 @@ impl PreparedSnapshot {
                     needs_authorization: self.needs_authorization,
                     target: self.target.clone(),
                     provenance: None,
+                    provenance_data: None,
+                    provenance_packet: Arc::new(std::sync::Mutex::new(
+                        self.provenance_packet.clone(),
+                    )),
                     broadcaster: self.broadcaster.clone(),
                     reprice: None,
                 })
@@ -822,6 +836,32 @@ impl PreparedSnapshot {
 }
 
 impl PreparedSnapshot {
+    /// Reconstructs retained final Note calldata for Source-only proof recovery.
+    pub fn provenance_calldata(&self) -> Result<Option<Vec<u8>>> {
+        let Some(proof) = &self.proof else {
+            return Ok(None);
+        };
+        let P::InvisiProtocolCalls::transact_0(mut call) =
+            P::InvisiProtocolCalls::abi_decode(&self.unsigned_call, true)
+                .map_err(|e| e.to_string())?
+        else {
+            return Ok(None);
+        };
+        call._0 = proof.proof.clone().into();
+        Ok(Some(call.abi_encode()))
+    }
+    /// Updates public Source evidence without changing the saved payment or verified proof state.
+    pub fn update_provenance_proof(&mut self, prepared: &ManagedPrepared) -> Result<()> {
+        let candidate = prepared.snapshot()?;
+        if candidate.context != self.context
+            || candidate.token != self.token
+            || candidate.unsigned_call != self.unsigned_call
+        {
+            return Err("provenance update payment mismatch".into());
+        }
+        self.provenance_packet = candidate.provenance_packet;
+        Ok(())
+    }
     pub fn context(&self) -> ProtocolContext {
         self.context
     }
@@ -847,6 +887,13 @@ impl ManagedPrepared {
                 needs_authorization: v.needs_authorization,
                 target: v.target.clone(),
                 provenance: v.provenance.clone(),
+                provenance_data: v.provenance_data.clone(),
+                provenance_packet: Arc::new(std::sync::Mutex::new(
+                    v.provenance_packet
+                        .lock()
+                        .expect("provenance cache lock")
+                        .clone(),
+                )),
                 broadcaster: v.broadcaster.clone(),
                 reprice: v.reprice.clone(),
             }),

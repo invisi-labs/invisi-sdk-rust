@@ -518,3 +518,49 @@ fn indexed_duplicate_aliases_are_compared_after_typed_normalization() {
     });
     assert_eq!(rpc.get_note_updates(1, 10).unwrap().items.len(), 1);
 }
+
+#[test]
+fn token_discovery_pins_pages_and_skips_incompatible_operators() {
+    use invisi_sdk::broadcaster::Configuration;
+    let mut pins = deployment();
+    pins.broadcaster_registry = Some(pins.protocol.clone());
+    let token = Address::repeat_byte(9);
+    let pages = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let page_calls = pages.clone();
+    let rpc = ProtocolRpcClient::new(
+        Transport { handler: Box::new(move |r| {
+            page_calls.fetch_add(1,Ordering::SeqCst);
+            assert_eq!(r["method"], "invisi_getBroadcasters");
+            assert!(r["params"][0].get("tokenAddress").is_none());
+            assert_eq!(r["params"][0]["enabled"], true);
+            let second = r["params"][0].get("after").is_some();
+            if second { assert_eq!(r["params"][0]["block"], serde_json::to_value(block(10)).unwrap()); }
+            let ids: Vec<u8> = if second { vec![101,102] } else { (1..=100).collect() };
+            let rows: Vec<_> = ids.into_iter().map(|id| json!({"operator":Address::repeat_byte(id),"endpoint":format!("https://relay{id}.example"),"metadataURI":"","quoteSigner":Address::repeat_byte(id+10),"feeRecipient":Address::repeat_byte(id+20),"enabled":true,"block":block(10)})).collect();
+            let mut result=json!({"block":block(10),"broadcasters":rows});
+            if !second {result["next"]=json!(Address::repeat_byte(100));}
+            Ok(json!({"jsonrpc":"2.0","id":r["id"],"result":result}))
+        }) },
+        Chain { reorg: Arc::new(AtomicBool::new(false)) }, pins,
+    ).unwrap();
+    let selected = rpc.discover_broadcasters_with_transport(token, |configuration: &Configuration| {
+        let cfg=configuration.clone();
+        Ok(Transport { handler: Box::new(move |r| {
+            assert_eq!(r["method"],"broadcaster_getTokenSupport");
+            assert_eq!(r["params"][0]["tokenAddress"],json!(token));
+            if cfg.endpoint.contains("relay3") { return Err(Error::Transport("offline".into())); }
+            Ok(json!({"jsonrpc":"2.0","id":r["id"],"result":{"apiVersion":"v1","protocolVersion":"1","chainId":if cfg.endpoint.contains("relay4") {"2"} else {"31337"},"protocol":Address::repeat_byte(1),"sender":cfg.quote_signer,"feeRecipient":cfg.fee_recipient,"tokenAddress":if cfg.endpoint.contains("relay5") {Address::repeat_byte(8)}else{token},"supported":cfg.endpoint=="https://relay1.example","submissionHalted":false,"provenance":{"enabled":false}}}))
+        }) })
+    }).unwrap();
+    assert_eq!(pages.load(Ordering::SeqCst), 2);
+    assert_eq!(selected.len(), 1);
+    assert_eq!(
+        selected[0].configuration().endpoint,
+        "https://relay1.example"
+    );
+    assert!(rpc
+        .discover_broadcasters_with_transport(Address::ZERO, |_| -> Result<Transport> {
+            panic!("zero token reached network")
+        })
+        .is_err());
+}

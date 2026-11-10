@@ -801,6 +801,16 @@ impl PreparedCredit {
     pub fn proof(&self) -> Option<&ProofBundle> {
         self.proof.as_ref()
     }
+    pub fn estimate_gas<G: crate::rpc::ChainGas>(
+        &self,
+        chain: &dyn ChainState,
+        gas: &G,
+        caller: Address,
+    ) -> Result<U256> {
+        let call = self.calldata(chain, caller)?;
+        gas.estimate_gas(self.context.chain_id, caller, &call)
+            .map_err(|e| e.to_string())
+    }
     pub fn calldata(&self, chain: &dyn ChainState, caller: Address) -> Result<TransactionCall> {
         let block = chain.snapshot()?;
         if chain.context() != self.context {
@@ -1402,6 +1412,58 @@ mod lifecycle_tests {
             assert_eq!(relay.submits.load(std::sync::atomic::Ordering::SeqCst), 1);
         }
     }
+    #[derive(Clone, Default)]
+    pub(super) struct GasProbe {
+        pub(super) chain_id: u64,
+        pub(super) calls: Arc<Mutex<Vec<serde_json::Value>>>,
+        pub(super) fail: Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl crate::rpc::RpcTransport for GasProbe {
+        fn send(&self, request: &serde_json::Value) -> crate::rpc::Result<serde_json::Value> {
+            if request["method"] == "eth_estimateGas" {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(request["params"][0].clone());
+                if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err(crate::rpc::Error::Invalid("estimate rejected"));
+                }
+            }
+            Ok(
+                serde_json::json!({"jsonrpc":"2.0","id":request["id"],"result":if request["method"]=="eth_chainId" {format!("{:#x}", self.chain_id)} else {"0x1e240".to_owned()}}),
+            )
+        }
+    }
+    #[test]
+    fn final_credit_gas_uses_verified_calldata_and_caller() {
+        for label in ["create_credit", "credit_draw_slots1", "credit_update"] {
+            let (chain, p) = prepared(label);
+            let caller = p.wallet.owner;
+            let probe = GasProbe {
+                chain_id: chain.context().chain_id,
+                ..Default::default()
+            };
+            let gas = crate::rpc::EthereumChain::new(probe.clone());
+            assert!(p.estimate_gas(chain.as_ref(), &gas, caller).is_err());
+            assert!(probe.calls.lock().unwrap().is_empty());
+            let proved = p.prove(&SyntheticCreditBackend).unwrap();
+            let expected = proved.calldata(chain.as_ref(), caller).unwrap();
+            assert_eq!(
+                proved.estimate_gas(chain.as_ref(), &gas, caller).unwrap(),
+                U256::from(123456)
+            );
+            let request = probe.calls.lock().unwrap()[0].clone();
+            assert_eq!(request["from"], serde_json::json!(caller));
+            assert_eq!(request["to"], serde_json::json!(expected.to));
+            assert_eq!(request["data"], format!("0x{}", hex::encode(expected.data)));
+            assert_eq!(request["value"], "0x0");
+            probe.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+            assert!(proved
+                .estimate_gas(chain.as_ref(), &gas, caller)
+                .unwrap_err()
+                .contains("estimate rejected"));
+        }
+    }
     struct SyntheticCreditBackend;
     impl Prover for SyntheticCreditBackend {
         fn prove(&self, r: &prover::ProvingRequest) -> Result<ProofBundle> {
@@ -1446,11 +1508,12 @@ mod lifecycle_tests {
         fn provenance_mode(&self) -> Option<()> {
             Some(())
         }
-        fn fee(&self, _: Address, _: Option<&[u8]>) -> Result<invisi_sdk_rpc::broadcaster::Fee> {
+        fn fee(&self, _: Address, data: Option<&[u8]>) -> Result<invisi_sdk_rpc::broadcaster::Fee> {
+            assert!(data.is_some(), "final Credit calldata required");
             let n = self.fees.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(invisi_sdk_rpc::broadcaster::Fee {
                 fee_recipient: self.configuration().fee_recipient,
-                fee_amount: if n == 0 { "1" } else { "2" }.into(),
+                fee_amount: if n % 2 == 0 { "1" } else { "2" }.into(),
                 max_gas: "100000".into(),
             })
         }
@@ -2074,6 +2137,29 @@ mod revocation_tests {
         let direct = invisi
             .prepare_revoke_credit(&wallet, token, 1, 0, deadline, Fee::default())
             .unwrap();
+        let probe = super::lifecycle_tests::GasProbe {
+            chain_id: chain.context().chain_id,
+            ..Default::default()
+        };
+        let gas = crate::rpc::EthereumChain::new(probe.clone());
+        assert!(direct
+            .estimate_gas(chain.as_ref(), &gas, Address::repeat_byte(9))
+            .is_err());
+        assert!(probe.calls.lock().unwrap().is_empty());
+        let expected = direct.calldata(chain.as_ref(), owner).unwrap();
+        assert_eq!(
+            direct.estimate_gas(chain.as_ref(), &gas, owner).unwrap(),
+            U256::from(123456)
+        );
+        let request = probe.calls.lock().unwrap()[0].clone();
+        assert_eq!(request["from"], serde_json::json!(owner));
+        assert_eq!(request["to"], serde_json::json!(expected.to));
+        assert_eq!(request["data"], format!("0x{}", hex::encode(expected.data)));
+        probe.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(direct
+            .estimate_gas(chain.as_ref(), &gas, owner)
+            .unwrap_err()
+            .contains("estimate rejected"));
         assert!(!direct.needs_authorization());
         assert!(direct.calldata(&*chain, owner).is_ok());
         assert!(direct.calldata(&*chain, Address::repeat_byte(9)).is_err());

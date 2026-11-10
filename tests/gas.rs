@@ -6,7 +6,7 @@ fn documented_measurements_match_ts_go_and_pinned_asset_digest() {
         serde_json::from_str(include_str!("fixtures/current-gas.json")).unwrap();
     assert_eq!(
         hex::encode(Sha256::digest(include_bytes!(
-            "../crates/invisi-sdk-core/assets/gas/documented-references.json"
+            "fixtures/documented-references.json"
         ))),
         DOCUMENTED_CATALOG_SHA256
     );
@@ -28,7 +28,7 @@ fn compact_catalog_provenance_and_unsupported_shapes_remain_exact() {
     use sha2::{Digest, Sha256};
     let fixtures: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/current-gas.json")).unwrap();
-    let raw = include_bytes!("../crates/invisi-sdk-core/assets/gas/documented-references.json");
+    let raw = include_bytes!("fixtures/documented-references.json");
     let mut compact = Vec::new();
     let mut quoted = false;
     let mut escaped = false;

@@ -16,10 +16,8 @@ fn execute(key: &[u8], requests: &Value) -> Value {
 
 #[test]
 fn ffi_executes_current_shared_wallet_messages() {
-    let fixtures: Value = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/wallet-wire-vectors.json"
-    ))
-    .unwrap();
+    let fixtures: Value =
+        serde_json::from_str(include_str!("fixtures/wallet-wire-vectors.json")).unwrap();
     let key = hex::decode(
         fixtures["privateKey"]
             .as_str()

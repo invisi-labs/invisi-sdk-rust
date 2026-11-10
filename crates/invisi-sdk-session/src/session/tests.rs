@@ -48,6 +48,7 @@ fn wallet(n: u8) -> Wallet {
 struct Chain {
     height: std::sync::atomic::AtomicU64,
     reorg: AtomicBool,
+    source_anchors: AtomicBool,
     spent: Mutex<BTreeSet<B256>>,
     roots: Mutex<BTreeSet<B256>>,
 }
@@ -59,7 +60,13 @@ impl ChainState for Chain {
         Ok(block(self.height.load(Ordering::SeqCst).max(10)))
     }
     fn canonical(&self, b: &CanonicalBlock) -> Result<()> {
-        if self.reorg.load(Ordering::SeqCst) || *b != block(b.number) {
+        let expected = block(b.number);
+        let source_anchor = self.source_anchors.load(Ordering::SeqCst)
+            && b.parent_hash == B256::ZERO
+            && b.timestamp == 0
+            && b.number == expected.number
+            && b.hash == expected.hash;
+        if self.reorg.load(Ordering::SeqCst) || (*b != expected && !source_anchor) {
             return Err("chain reorg".into());
         }
         Ok(())
@@ -1347,3 +1354,108 @@ fn funds_relay_retry_reads_known_journal_even_when_inputs_are_spent() {
     );
     assert_eq!(relay.attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
 }
+
+#[derive(Clone)]
+struct ManagedGasProbe {
+    session: WalletSession,
+    id: String,
+    caller: Address,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+    fail: bool,
+}
+impl crate::rpc::RpcTransport for ManagedGasProbe {
+    fn send(&self, request: &serde_json::Value) -> crate::rpc::Result<serde_json::Value> {
+        let state = self.session.snapshot().unwrap();
+        let record = &state.operations[&self.id];
+        assert!(record.externalized);
+        assert_eq!(record.status, OperationStatus::Exported);
+        let call = record.call.as_ref().unwrap();
+        if request["method"] == "eth_estimateGas" {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(request["params"][0]["from"], serde_json::json!(self.caller));
+            assert_eq!(request["params"][0]["to"], serde_json::json!(call.to));
+            assert_eq!(
+                request["params"][0]["data"],
+                format!("0x{}", hex::encode(&call.data))
+            );
+            if self.fail {
+                return Err(crate::rpc::Error::Invalid("managed estimate rejected"));
+            }
+        }
+        Ok(
+            serde_json::json!({"jsonrpc":"2.0","id":request["id"],"result":if request["method"]=="eth_chainId" {"0x7a69"} else {"0x1e240"}}),
+        )
+    }
+}
+#[test]
+fn managed_note_and_credit_gas_export_fence_precedes_provider() {
+    for credit in [false, true] {
+        let h = synced();
+        let caller = h.session.wallet.owner_address();
+        let mut operation = if credit {
+            let state = CreditDeliveryState {
+                note: crate::credit::CreditState {
+                    context: context(),
+                    token_address: h.note.token_address,
+                    spender_wallet_identity: sdk::address_word(wallet(2).owner_address()),
+                    owner_wallet_identity: sdk::address_word(caller),
+                    revocation_shard: 1,
+                    revocation_slot: 0,
+                    nonce: U256::from(74),
+                    expiry: 2100000000,
+                    credit_shared_key: U256::from(75),
+                    policy: Default::default(),
+                    usage: Default::default(),
+                    available_credit: U256::from(400),
+                    unlimited: false,
+                    payload: Vec::new(),
+                },
+                owner_receiving_keys: h.session.wallet.receiving_keys().unwrap().clone(),
+                spender_receiving_keys: wallet(2).receiving_keys().unwrap().clone(),
+            };
+            h.session
+                .prepare_create_credit(state, 2000000100, sdk::Fee::default())
+                .unwrap()
+        } else {
+            h.session.prepare_transfer(transfer(&h)).unwrap()
+        };
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let probe = ManagedGasProbe {
+            session: h.session.clone(),
+            id: operation.id().to_owned(),
+            caller,
+            calls: calls.clone(),
+            fail: false,
+        };
+        let gas = crate::rpc::EthereumChain::new(probe.clone());
+        assert!(operation.estimate_gas(&gas, caller).is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(!h.session.snapshot().unwrap().operations[operation.id()].externalized);
+        if credit {
+            let request = operation.export_wallet_request("gas-consent").unwrap();
+            let response: WalletResponse = serde_json::from_value(
+                crate::wallet::execute(&key(1), &request.as_value()).unwrap(),
+            )
+            .unwrap();
+            operation = operation.with_wallet_response(&response).unwrap();
+        }
+        let mut operation = operation.prove(&Backend, false).unwrap();
+        assert_eq!(
+            operation.estimate_gas(&gas, caller).unwrap(),
+            U256::from(123456)
+        );
+        let failed_gas = crate::rpc::EthereumChain::new(ManagedGasProbe {
+            fail: true,
+            ..probe
+        });
+        assert!(operation
+            .estimate_gas(&failed_gas, caller)
+            .unwrap_err()
+            .contains("managed estimate rejected"));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(h.session.snapshot().unwrap().operations[operation.id()].externalized);
+    }
+}
+
+#[path = "source_reproof_tests.rs"]
+mod source_reproof_tests;

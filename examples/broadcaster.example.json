@@ -1,0 +1,5 @@
+{
+  "endpoint": "https://your-broadcaster.example/v1/chains/31337",
+  "quoteSigner": "0x<registered-quote-signer>",
+  "feeRecipient": "0x<registered-fee-recipient>"
+}

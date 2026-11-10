@@ -21,7 +21,78 @@ pub struct PreparedProvenance {
     pub prover: Arc<dyn OfflineProver + Send + Sync>,
     pub budgets: SourceReplayBudgets,
 }
-#[derive(Clone, Debug)]
+/// This file-backed configuration contains public pins and local executable/asset paths only.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LocalProvenanceConfiguration {
+    pub endpoint: String,
+    pub chain_id: String,
+    pub protocol_address: String,
+    pub policy_id: String,
+    pub generation: String,
+    pub provider_id: String,
+    pub signing_key_id: String,
+    pub signing_public_key: String,
+    pub manifest_sha256: String,
+    pub asset_root: std::path::PathBuf,
+    pub bb_binary: std::path::PathBuf,
+    pub noir_executor: std::path::PathBuf,
+    pub timeout_seconds: u64,
+    pub threads: usize,
+    pub budgets: SourceReplayBudgets,
+}
+impl PreparedProvenance {
+    pub fn from_local_configuration(c: LocalProvenanceConfiguration) -> Result<Self> {
+        if c.timeout_seconds == 0 || c.threads == 0 {
+            return Err("positive local prover options required".into());
+        }
+        let manifest = source::authenticate_manifest(
+            &std::fs::read(c.asset_root.join("manifest.json"))
+                .map_err(|_| "local source manifest unavailable")?,
+            &c.manifest_sha256,
+        )
+        .map_err(|e| e.to_string())?;
+        let public_key: [u8; 32] = hex_bytes(&c.signing_public_key, Some(32))?
+            .try_into()
+            .map_err(|_| "signing key width")?;
+        use sha2::Digest;
+        let key_id = source_word(&c.signing_key_id)?;
+        if U256::from_be_slice(&sha2::Sha256::digest(public_key)) != key_id {
+            return Err("source signing key ID mismatch".into());
+        }
+        let trust = source::TrustContext {
+            scope: source::Scope {
+                chain_id: source_number(&c.chain_id)?,
+                protocol_address: source_word(&c.protocol_address)?,
+                policy_id: source_word(&c.policy_id)?,
+            },
+            chain_generation: source_number(&c.generation)?,
+            provider_id: source_word(&c.provider_id)?,
+            signing_keys: BTreeMap::from([(key_id, public_key)]),
+            signing_key_validity: BTreeMap::new(),
+            manifest_sha256: c.manifest_sha256.clone(),
+        };
+        let timeout = std::time::Duration::from_secs(c.timeout_seconds);
+        Ok(Self {
+            client: Arc::new(ProvenanceClient::new(&c.endpoint, trust)?),
+            manifest,
+            prover: Arc::new(prover::NativeSourceProver {
+                directory: c.asset_root,
+                manifest_sha256: c.manifest_sha256,
+                bb_binary: c.bb_binary,
+                timeout,
+                threads: c.threads,
+                witness_executor: Arc::new(prover::NoirCli {
+                    binary: c.noir_executor,
+                    timeout,
+                }),
+            }),
+            budgets: c.budgets,
+        })
+    }
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SourceReplayBudgets {
     pub max_root_pages: usize,
     pub max_certificates: usize,
@@ -732,6 +803,28 @@ mod tests {
             .unwrap_err();
         assert!(error.contains("policy/manifest mismatch"));
         assert!(prepared.broadcaster_state().is_none());
+    }
+    #[test]
+    fn local_source_configuration_rejects_private_fields_and_wrong_key_identity() {
+        let mut config = json!({"endpoint":"http://127.0.0.1:1","chainId":"31337","protocolAddress":"0x1234","policyId":"0x01","generation":"1","providerId":"0x01","signingKeyId":"0x01","signingPublicKey":format!("0x{}","00".repeat(32)),"manifestSha256":"f90f2ce43218de158c6392fa19e6517dda703c35823a4aa5bfc20b50788ad282","assetRoot":std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../invisi-sdk-core/provenance"),"bbBinary":"unused","noirExecutor":"unused","timeoutSeconds":120,"threads":4,"budgets":{"maxRootPages":1,"maxCertificates":1,"maxTotalLeaves":1}});
+        config["opening"] = json!({"nonce":"1"});
+        assert!(serde_json::from_value::<LocalProvenanceConfiguration>(config.clone()).is_err());
+        config.as_object_mut().unwrap().remove("opening");
+        let invalid_config = serde_json::from_value(config.clone()).unwrap();
+        assert!(PreparedProvenance::from_local_configuration(invalid_config)
+            .err()
+            .unwrap()
+            .contains("key ID mismatch"));
+        use sha2::Digest;
+        config["signingKeyId"] = json!(format!(
+            "0x{}",
+            hex::encode(sha2::Sha256::digest([0u8; 32]))
+        ));
+        let loaded =
+            PreparedProvenance::from_local_configuration(serde_json::from_value(config).unwrap())
+                .unwrap();
+        assert_eq!(loaded.client.trust.scope.chain_id, 31337);
+        assert_eq!(loaded.manifest.sha256, loaded.client.trust.manifest_sha256);
     }
     struct NoProver;
     impl OfflineProver for NoProver {

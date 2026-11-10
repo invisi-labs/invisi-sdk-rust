@@ -62,7 +62,7 @@ A generation change or reorg returns `needs_reproof` after host reconciliation. 
 
 Recovery state-machine tests use explicitly marked synthetic proof bytes and real signed root certificates; they validate recovery/encryption behavior and do not claim another native-prover or App integration test.
 
-Rust: `provenance_store::SessionRecoveryRecords::new(existingAtomicRecords)` adapts existing session `AtomicRecords` (including optional `SQLiteRecords`) to `provenance_recovery::EncryptedRecoveryStore::new(Arc::new(adapter), key32)`. Construct `RecoveryCoordinator` with explicit store/trust/service/host references; a successful `prepare` is the broadcast permit. `AtomicBool` cancellation and optional local reproof remain host-controlled; this does not add a Rust proving backend.
+Rust: `provenance_store::SessionRecoveryRecords::new(existingAtomicRecords)` adapts existing session `AtomicRecords` (including optional `SQLiteRecords`) to `provenance_recovery::EncryptedRecoveryStore::new(Arc::new(adapter), key32)`. Construct `RecoveryCoordinator` with explicit store/trust/service/host references; a successful `prepare` is the broadcast permit. `AtomicBool` cancellation and optional local reproof remain host-controlled; the coordinator delegates proving to its explicit local capability. `prover::NativeSourceProver` is an available local Noir/BB adapter with separate source manifest/VK authentication and independent verification.
 
 ## Normal prepared transactions
 
@@ -76,6 +76,10 @@ The final prepared transaction retains its verified quote, deployment/relay/poli
 
 Shield/zero-input operations skip source proving. A configured source client may preflight these without sidecars; the relay also applies its normal policy evaluation. Existing direct Credit lifecycle relay support uses the same unified client and does not require a Note source proof. The new prepared fee-convergence helper covers Note/Shield funds operations; it does not add a separate Credit preparation API. Aggregated relay broadcast remains unsupported.
 
-## Flat examples
+## Normal examples
 
-See [`examples/07-provenance`](examples/07-provenance/README.md) for discover → prepare → automatic source/quote attachment → host approval → main prove → relay submission, followed by primary confirmation and automatic source-recognition tracking.
+The existing [`03-note/transfer.rs`](examples/03-note/transfer.rs) and [`withdraw.rs`](examples/03-note/withdraw.rs) show discovery → preparation → automatic source/quote attachment → host approval → main proof → optional relay submission. Set `SOURCE_CONFIG` to trusted public `LocalProvenanceConfiguration` and `BROADCASTER_CONFIG` to the registered relay configuration. `PreparedProvenance::from_local_configuration` authenticates the local source manifest and signing-key ID and installs a `NativeSourceProver`; no example assembles private source witnesses or public sidecars. The configured pin/key must come from the operator, never a service response. This simple file configuration pins one active signing key; applications that need verified rotation intervals can still construct the explicit `PreparedProvenance` capability with their validated trust history.
+
+These same Note files offer `--confirm` using `BROADCAST_RECORD` plus `TRANSACTION_HASH`. This authenticates the retained relay configuration and actual primary transaction/receipt/block, waits for automatic source tracking and confirms the exact operation recognition. It does not resubmit the source proof or main transaction. See [`examples/README.md`](examples/README.md) and the public `source.example.json`/`broadcaster.example.json` templates.
+
+The existing [`04-credit/revoke.rs`](examples/04-credit/revoke.rs) demonstrates the supported lowlevel Credit lifecycle relay flow: fee convergence, verified policy-aware quote, host EVM revocation consent and explicit submission. It requires no Note source proof; it does not claim a new Credit `with_broadcaster` preparation API. Aggregated relay broadcast remains unsupported.

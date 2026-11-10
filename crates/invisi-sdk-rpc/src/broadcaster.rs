@@ -229,7 +229,8 @@ pub(crate) fn verify_quote_with_hash(
     }
     Ok(())
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Configuration {
     pub endpoint: String,
     pub quote_signer: Address,

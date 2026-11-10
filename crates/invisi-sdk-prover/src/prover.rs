@@ -871,3 +871,6 @@ mod timeout_tests {
         assert!(start.elapsed() < Duration::from_secs(2));
     }
 }
+
+mod source_native;
+pub use source_native::NativeSourceProver;

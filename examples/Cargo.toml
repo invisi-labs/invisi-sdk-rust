@@ -85,11 +85,3 @@ required-features = ["sqlite"]
 name = "revoke-credit-session"
 path = "05-session/credit-revoke.rs"
 required-features = ["sqlite"]
-
-[[bin]]
-name = "provenance-prove-and-broadcast"
-path = "07-provenance/prove-and-broadcast.rs"
-
-[[bin]]
-name = "provenance-confirm-source"
-path = "07-provenance/confirm-source.rs"

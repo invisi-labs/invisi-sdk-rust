@@ -15,6 +15,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    if env::var("BROADCASTER_CONFIG").is_ok() || env::args().any(|a| a == "--submit") {
+        return Err("aggregate Broadcaster submission is unsupported".into());
+    }
+
     let deployment: ProtocolDeployment =
         serde_json::from_slice(&fs::read(env::var("DEPLOYMENT_JSON")?)?)?;
     let ethereum = EthereumChain::new(HttpTransport::new(&env::var("ETH_RPC_URL")?)?);

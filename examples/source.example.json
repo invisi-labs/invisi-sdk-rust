@@ -1,6 +1,5 @@
 {
   "endpoint": "https://your-provenance.example",
-  "chainRpcUrl": "https://your-primary-rpc.example",
   "chainId": "31337",
   "protocolAddress": "0x<20-byte-protocol-address>",
   "policyId": "0x<32-byte-policy-id>",
@@ -9,9 +8,14 @@
   "signingKeyId": "0x<sha256-of-pinned-public-key>",
   "signingPublicKey": "0x<32-byte-pinned-ed25519-public-key>",
   "assetRoot": "/absolute/path/to/sdk/.cache/provenance",
-  "broadcaster": {
-    "endpoint": "https://your-broadcaster.example/v1/chains/31337",
-    "quoteSigner": "0x<registered-quote-signer>",
-    "feeRecipient": "0x<registered-fee-recipient>"
+  "manifestSha256": "f90f2ce43218de158c6392fa19e6517dda703c35823a4aa5bfc20b50788ad282",
+  "bbBinary": "/absolute/path/to/bb",
+  "noirExecutor": "/absolute/path/to/noir-execute",
+  "timeoutSeconds": 120,
+  "threads": 4,
+  "budgets": {
+    "maxRootPages": 16,
+    "maxCertificates": 3200,
+    "maxTotalLeaves": 1000000
   }
 }

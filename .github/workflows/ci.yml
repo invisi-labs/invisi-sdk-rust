@@ -2,8 +2,16 @@ name: Rust SDK
 on:
   push:
   pull_request:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing immutable release tag
+        required: true
+        default: v1.2.0
+        type: string
 jobs:
   verify:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -20,3 +28,11 @@ jobs:
       - run: python3 scripts/check-native-exports.py target/release/libinvisi_sdk_ffi.so
       - run: cargo run -p invisi-sdk-examples --bin note-output
       - run: python3 scripts/check-release.py --work-dir "${{ runner.temp }}/invisi-release"
+  release:
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ inputs.tag }}
+    secrets: inherit

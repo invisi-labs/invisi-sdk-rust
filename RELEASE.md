@@ -49,6 +49,10 @@ order and wait for each preceding registry version to become available.
 The seven packages retain the `invisi-sdk` names and version `1.2.0`.
 Publishing runs in [Release Rust SDK](https://github.com/invisi-lab/invisi-sdk-rust/actions/workflows/release.yml)
 on a pushed `vMAJOR.MINOR.PATCH` tag, or a manual dispatch naming an existing tag.
+If GitHub has not registered a newly added release workflow yet, manually dispatch
+the existing [Rust SDK workflow](https://github.com/invisi-lab/invisi-sdk-rust/actions/workflows/ci.yml)
+from the release feature branch with the same `tag` input. It invokes the reusable
+release job, which checks out the immutable tag rather than publishing branch source.
 The checked-out commit must match that tag; all seven public package versions and
 exact sibling requirements must match it. Fork repositories and dirty checkouts
 are rejected. Rust/Cargo is pinned to 1.94.0 so retries produce the same archive format.

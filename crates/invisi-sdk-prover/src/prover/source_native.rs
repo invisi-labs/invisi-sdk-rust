@@ -1,9 +1,8 @@
 //! Source proofs use their own manifest and verification keys, independently of the main release.
 use super::*;
-use invisi_sdk_core::{
-    note::{ModelError, ModelResult},
-    provenance::{authenticate_manifest, OfflineProver, Witness, PUBLIC_INPUTS},
-};
+use invisi_sdk_primitives::note::{ModelError, ModelResult};
+
+use crate::provenance::{authenticate_manifest, OfflineProver, Witness, PUBLIC_INPUTS};
 
 pub struct NativeSourceProver {
     pub directory: PathBuf,
@@ -188,6 +187,10 @@ mod tests {
                 timeout: Duration::from_secs(120),
             }),
         };
+        let manifest = fs::read(root.join("circuits/provenance/manifest.json"))
+            .map_err(|_| "tracked Source manifest required")?;
+        authenticate_manifest(&manifest, &prover.manifest_sha256).map_err(|e| e.to_string())?;
+        assert_eq!(manifest, include_bytes!("../../provenance/manifest.json"));
         for key in ["witnessK10SingleInput", "witnessK10CrossTree"] {
             let witness = golden[key]
                 .as_object()

@@ -1,5 +1,5 @@
 # invisi-sdk-session
 
-Part of the [Invisi Rust SDK](https://github.com/invisi-lab/invisi-sdk-rust), version 1.1.8.
+Version `1.2.0`. Wallet inventory, synchronization, reservations, history, encrypted storage and recovery. Depends on SDK, RPC and primitives; protocol is direct because public session interfaces expose its canonical DTOs. Proving is accessed through SDK.
 
-See the repository README for usage, security boundaries, and supported protocol capabilities. Licensed under Apache-2.0.
+See the [workspace documentation](https://github.com/invisi-lab/invisi-sdk-rust) for usage. Licensed under Apache-2.0.

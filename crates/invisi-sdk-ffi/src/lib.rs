@@ -3,7 +3,7 @@ use std::ffi::{c_char, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use zeroize::{Zeroize, Zeroizing};
 
-use invisi_core::wallet;
+use invisi_sdk_primitives::wallet;
 
 const MAX_REQUEST_BYTES: usize = wallet::MAX_WALLET_BATCH_JSON_BYTES;
 

@@ -1,10 +1,10 @@
 //! Refresh encrypted Credit inventory, revoke a managed grant operation, or resume its saved ID.
+use invisi_sdk_session::session::{sqlite::SQLiteRecords, EncryptedWalletStore, WalletSession};
 
 use alloy_primitives::Address;
 use invisi_sdk::{
     rpc::{EthereumChain, HttpTransport, ProtocolDeployment, ProtocolRpcClient},
     sdk::{self, ChainState, Fee, Invisi, RpcChainState, Wallet},
-    session::{sqlite::SQLiteRecords, EncryptedWalletStore, WalletSession},
 };
 use serde_json::json;
 use std::{env, fs, sync::Arc};
@@ -43,7 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Refresh and authenticate earlier grants before choosing inputs for a new operation.
     if env::var("OPERATION_ID").is_err() {
-        let mut options = invisi_sdk::session::RefreshOptions::from_block(
+        let mut options = invisi_sdk_session::session::RefreshOptions::from_block(
             env::var("FROM_BLOCK")
                 .ok()
                 .map(|s| s.parse())
@@ -113,10 +113,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // The host has already signed and submitted this exact unsigned transaction.
         operation.track_transaction(hash.parse()?)?;
         match session.reconcile(operation.id())? {
-            invisi_sdk::session::Reconciliation::Pending => {
+            invisi_sdk_session::session::Reconciliation::Pending => {
                 println!("Transaction is not yet canonically available.")
             }
-            invisi_sdk::session::Reconciliation::Ready(pending) => {
+            invisi_sdk_session::session::Reconciliation::Ready(pending) => {
                 let applied = pending.decrypt(&invisi_sdk_examples::AppDecryptor)?;
 
                 println!(

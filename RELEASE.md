@@ -1,21 +1,21 @@
-# Rust SDK 1.1.8 local release validation
+# Rust SDK 1.2.0 local release validation
 
-All eight public crates use version `1.1.8`. Workspace sibling dependencies carry both
-the development path and exact registry version `=1.1.8`, including the FFI crate's
-`invisi-core` alias. The examples package remains private at `0.1.0` and consumes SDK
-`1.1.8`. This release does not change the C ABI version.
+All seven public crates use version `1.2.0`. Workspace sibling dependencies carry both
+the development path and exact registry version `=1.2.0`. The examples package remains private at `0.1.0` and consumes SDK
+`1.2.0`. This release does not change the C ABI version.
 
 Run from the repository root with Rust/Cargo and Python 3.12 or newer:
 
 ```sh
+python3 scripts/check-boundaries.py
 cargo test --locked --workspace --all-features
-python3 scripts/check-release.py --work-dir /tmp/invisi-rust-release-1.1.8
+python3 scripts/check-release.py --work-dir /tmp/invisi-rust-release-1.2.0
 ```
 
 The release check vendors locked third-party dependencies into its temporary working
 directory. It builds a local directory source for the unpublished sibling versions,
 then runs `cargo package --locked --offline` with Cargo's verification enabled for
-core, protocol, prover, RPC, runtime, Session, FFI, and the facade in that order.
+primitives, protocol, prover, RPC, SDK, Session, and FFI in that order.
 Each actual archive replaces its bootstrap directory entry before downstream checks.
 The script separately unpacks each archive and runs its tests with all features,
 resolving siblings as registry packages from the local source rather than workspace

@@ -1,12 +1,14 @@
 //! Encrypted recovery for public provenance evidence, separate from wallet inventory and signing.
-use crate::provenance_tracking::{preflight_tracking, tracking_from_result, STALE_TRACKING};
 use aes_gcm::{
     aead::{Aead, KeyInit, Payload},
     Aes256Gcm, Nonce,
 };
 use alloy_primitives::{keccak256, U256};
-use invisi_sdk_core::provenance::{
+use invisi_sdk_protocol::provenance::{
     input_digest, parse_integer, validate_proof_bundle, ProofBundle, ProofSidecar, TrustContext,
+};
+use invisi_sdk_rpc::provenance_tracking::{
+    preflight_tracking, tracking_from_result, STALE_TRACKING,
 };
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -212,7 +214,7 @@ pub trait RecoveryService {
     fn job(&self, id: &str) -> Result<Value>;
     fn operation_recognition(&self, locator: &BTreeMap<String, String>) -> Result<Value>;
 }
-impl RecoveryService for crate::provenance_client::ProvenanceClient {
+impl RecoveryService for invisi_sdk_rpc::provenance_client::ProvenanceClient {
     fn evaluate(&self, data: &str, sidecars: &[ProofSidecar]) -> Result<Value> {
         self.evaluate_transaction(json!(data), sidecars)
     }
@@ -744,8 +746,8 @@ impl RecoveryCoordinator<'_> {
 
 /// Local membership filtering is independent of protocol spendability and makes no per-note requests.
 pub fn filter_recognized_commitments(
-    scope: &invisi_sdk_core::provenance::Scope,
-    tree: &invisi_sdk_core::provenance::RecognizedTree,
+    scope: &invisi_sdk_protocol::provenance::Scope,
+    tree: &invisi_sdk_protocol::provenance::RecognizedTree,
     commitments: &[U256],
 ) -> Result<Vec<U256>> {
     let mut out = Vec::new();
@@ -892,7 +894,7 @@ mod tests {
                 .try_into()
                 .unwrap();
         let trust = TrustContext {
-            scope: invisi_sdk_core::provenance::Scope {
+            scope: invisi_sdk_protocol::provenance::Scope {
                 chain_id: number(&intent.chain_id, 64).unwrap().to(),
                 protocol_address: number(&intent.protocol_address, 160).unwrap(),
             },
@@ -1234,7 +1236,8 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(2));
             }
         });
-        let client = crate::provenance_client::ProvenanceClient::new(&endpoint, trust).unwrap();
+        let client =
+            invisi_sdk_rpc::provenance_client::ProvenanceClient::new(&endpoint, trust).unwrap();
         let error = client
             .submit_proof(json!({}), &sidecars[0].proof_bundle, "internal/test")
             .unwrap_err();

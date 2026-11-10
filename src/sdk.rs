@@ -3375,10 +3375,10 @@ mod conventional_wallet_signature_tests {
     }
 }
 
-pub use invisi_sdk_core::provenance::{ProofContext, ProvenanceProof};
+pub use crate::provenance::{ProofContext, ProvenanceProof};
 pub fn validate_provenance_proof(
     packet: &ProvenanceProof,
-    trust: &invisi_sdk_core::provenance::TrustContext,
+    trust: &crate::provenance::TrustContext,
 ) -> Result<()> {
     invisi_sdk_rpc::provenance_packet::validate_provenance_proof(packet, trust)
 }

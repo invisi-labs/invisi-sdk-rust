@@ -1,11 +1,11 @@
 //! Rediscover earlier outputs through native viewing and atomically restore validated inventory
 //! into encrypted SQLite.
+use invisi_sdk_session::session::{sqlite::SQLiteRecords, EncryptedWalletStore, WalletSession};
 
 use alloy_primitives::Address;
 use invisi_sdk::{
     rpc::{EthereumChain, HttpTransport, ProtocolDeployment, ProtocolRpcClient},
     sdk::{Invisi, RpcChainState, Wallet},
-    session::{sqlite::SQLiteRecords, EncryptedWalletStore, WalletSession},
 };
 use std::{env, fs, sync::Arc};
 
@@ -39,7 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let session = WalletSession::connect(invisi, wallet, store, source, "examples")?;
 
-    let mut options = invisi_sdk::session::RefreshOptions::from_block(
+    let mut options = invisi_sdk_session::session::RefreshOptions::from_block(
         env::var("FROM_BLOCK")
             .ok()
             .map(|s| s.parse())

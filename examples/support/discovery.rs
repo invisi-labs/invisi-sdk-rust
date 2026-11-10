@@ -5,9 +5,9 @@ use invisi_sdk::{
     delivery::CreditRole,
     rpc::{EthereumChain, HttpTransport, ProtocolDeployment, ProtocolRpcClient},
     sdk::{self, CreditInput, Invisi, NoteInput, Wallet},
-    session::{
-        MemoryWalletStore, PendingWalletRefresh, RefreshOptions, WalletSession, WalletState,
-    },
+};
+use invisi_sdk_session::session::{
+    MemoryWalletStore, PendingWalletRefresh, RefreshOptions, WalletSession, WalletState,
 };
 use std::sync::Arc;
 
@@ -173,8 +173,8 @@ mod tests {
         delivery::CreditDeliveryState,
         note::{Note, ProtocolContext},
         rpc::CanonicalBlock,
-        session::{StoredCredit, StoredNote},
     };
+    use invisi_sdk_session::session::{StoredCredit, StoredNote};
     fn block() -> CanonicalBlock {
         CanonicalBlock {
             number: 10,

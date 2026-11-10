@@ -6,7 +6,7 @@ use crate::{
 };
 use alloy_primitives::{keccak256, Address, B256, U256};
 use alloy_sol_types::SolValue;
-use invisi_sdk_core::provenance::{self as source, ProvenanceProof, TrustContext};
+use invisi_sdk_protocol::provenance::{self as source, ProvenanceProof, TrustContext};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 type Result<T> = std::result::Result<T, String>;
@@ -115,7 +115,7 @@ pub fn validate_provenance_proof(packet: &ProvenanceProof, trust: &TrustContext)
         U256::from_be_slice(p.feeRecipient.as_slice()),
         p.feeAmount,
     ]);
-    let authorization = invisi_sdk_core::wallet::authorization_digest(
+    let authorization = invisi_sdk_primitives::wallet::authorization_digest(
         &json!({"operation":"transact","capacity":capacity,"context":{"chainId":trust.scope.chain_id.to_string(),"protocolAddress":word(trust.scope.protocol_address)},"words":words.iter().map(U256::to_string).collect::<Vec<_>>()}),
     )?;
     words.extend(split(B256::from(authorization)));
@@ -163,7 +163,7 @@ mod tests {
     use super::*;
     use alloy_primitives::Bytes;
     use alloy_sol_types::SolCall;
-    use invisi_sdk_core::provenance::{
+    use invisi_sdk_protocol::provenance::{
         ProofBundle, ProofContext, ProofSidecar, RootCertificate, Scope, Source,
     };
     use std::collections::BTreeMap;
@@ -240,7 +240,7 @@ mod tests {
             (request.deliveries.clone(),).abi_encode_params(),
         )));
         words.extend([10, 1, 100, 0, 0, 0, 0].map(U256::from));
-        let auth=invisi_sdk_core::wallet::authorization_digest(&json!({"operation":"transact","capacity":1,"context":{"chainId":"4","protocolAddress":"5"},"words":words.iter().map(U256::to_string).collect::<Vec<_>>()})).unwrap();
+        let auth=invisi_sdk_primitives::wallet::authorization_digest(&json!({"operation":"transact","capacity":1,"context":{"chainId":"4","protocolAddress":"5"},"words":words.iter().map(U256::to_string).collect::<Vec<_>>()})).unwrap();
         words.extend(split(B256::from(auth)));
         let digest = source::operation_digest(&trust.scope, 1, &words).unwrap();
         let digest_value = U256::from_be_bytes(digest);

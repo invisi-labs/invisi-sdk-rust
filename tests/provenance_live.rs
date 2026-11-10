@@ -5,6 +5,31 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, time::Duration};
+const LIVE_MANIFEST_SHA256: &str =
+    "6107789c5c0d24c4130bff05da6d389336feb5ccb247c4030eae5198ab05d762";
+fn current_source_release() -> ManifestIdentity {
+    let identity = authenticate_manifest(
+        include_bytes!("../provenance/manifest.json"),
+        LIVE_MANIFEST_SHA256,
+    )
+    .unwrap();
+    assert_eq!(identity.manifest.public_inputs, PUBLIC_INPUTS);
+    assert_eq!(identity.manifest.public_inputs.len(), 11);
+    assert_eq!(
+        identity
+            .manifest
+            .circuits
+            .iter()
+            .map(|entry| entry.capacity)
+            .collect::<Vec<_>>(),
+        [10, 20, 40, 80, 120, 160, 190]
+    );
+    identity
+}
+#[test]
+fn live_manifest_matches_current_packaged_release() {
+    current_source_release();
+}
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LiveScope {
@@ -63,13 +88,11 @@ fn provenance_live_service() {
         );
         return;
     }
+    let release = current_source_release();
     let file = std::env::var("INVISI_PROVENANCE_TRUST").expect("explicit trust file required");
     let f: LiveTrust = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
     assert_eq!(f.format, "invisi-provenance-sdk-live-v1");
-    assert_eq!(
-        f.manifest_sha256,
-        "f90f2ce43218de158c6392fa19e6517dda703c35823a4aa5bfc20b50788ad282"
-    );
+    assert_eq!(f.manifest_sha256, LIVE_MANIFEST_SHA256);
     assert!(
         f.endpoint.starts_with("http://127.0.0.1:")
             || f.endpoint.starts_with("http://localhost:")
@@ -116,7 +139,10 @@ fn provenance_live_service() {
     identity(&version, &f);
     assert_eq!(version["apiVersion"], "v1");
     assert_eq!(version["protocolVersion"], "1");
-    assert_eq!(version["publicInputCount"], "13");
+    assert_eq!(
+        version["publicInputCount"],
+        release.manifest.public_inputs.len().to_string()
+    );
     assert_eq!(version["proofFormat"], "invisi-provenance-proof-v1");
     let status = c.get_status().unwrap();
     identity(&status, &f);

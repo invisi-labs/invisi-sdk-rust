@@ -3,7 +3,7 @@ use crate::protocol::{InvisiProtocol, ProtocolContract};
 use crate::rpc::{self, decimal, Error, HttpTransport, JsonRpc, Result, RpcTransport};
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use alloy_sol_types::{SolCall, SolInterface, SolValue};
-use invisi_sdk_core::provenance::{provenance_intent_hash, ProofSidecar};
+use invisi_sdk_protocol::provenance::{provenance_intent_hash, ProofSidecar};
 use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -460,7 +460,7 @@ impl<T: RpcTransport> BroadcasterClient<T> {
         decode_intent(data)?;
         let _wire = sidecars
             .iter()
-            .map(invisi_sdk_core::provenance::proof_sidecar_to_wire)
+            .map(invisi_sdk_protocol::provenance::proof_sidecar_to_wire)
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|_| Error::Invalid("invalid proof sidecar"))?;
         let signed: SignedQuote = serde_json::from_value(self.rpc.call(
@@ -494,7 +494,7 @@ impl<T: RpcTransport> BroadcasterClient<T> {
         }
         let wire = sidecars
             .iter()
-            .map(invisi_sdk_core::provenance::proof_sidecar_to_wire)
+            .map(invisi_sdk_protocol::provenance::proof_sidecar_to_wire)
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|_| Error::Invalid("invalid proof sidecar"))?;
         let mut trust = verified.trust.clone();

@@ -6,26 +6,34 @@ The SDK does not select accounts, read Keychain/Keystore, hold a mnemonic, or ap
 
 ## Release validation
 
-The public crates share version **1.1.8**. See [local release validation](RELEASE.md)
-for verified packaging and the required publication order.
+The public crates share version **1.2.0**. See [local release validation](RELEASE.md)
+for packaging checks and the required publication order.
+
+Version 1.2.0 exposes six common modules plus the separate native FFI adapter.
+Replace `invisi-sdk-core` dependencies/imports with `invisi-sdk-primitives`.
+Use `invisi_sdk::sdk` for stateless operations and `invisi_sdk_session::session`
+for managed wallets; enable `sqlite` on `invisi-sdk-session` when needed.
+The former runtime crate is integrated into `invisi-sdk`. Public Source contracts
+are in `invisi_sdk_protocol::provenance`; local Source witnesses and proving
+capabilities are in `invisi_sdk_prover::provenance`. Encrypted Source recovery
+and its coordinator are in `invisi_sdk_session::provenance_recovery`.
 
 ## Workspace
 
 | Crate | Responsibility |
 | --- | --- |
-| `invisi-sdk-core` | Wallet cryptography, Note/Credit models and transitions, addresses, FMD, delivery, disclosure, payment requests and measured gas references. No HTTP, prover or managed store. |
-| `invisi-sdk-protocol` | Current contract ABIs, shared chain/output types and canonical receipt decoding. |
+| `invisi-sdk-primitives` | Wallet cryptography, Note/Credit models and transitions, addresses, FMD, delivery, disclosure, payment requests. No HTTP, prover or managed store. |
+| `invisi-sdk-protocol` | Current contract ABIs, shared chain/output types, strict codecs, public circuit statements, Source digests, capacity catalogs, gas references and canonical receipt decoding. |
 | `invisi-sdk-prover` | Authenticated circuit identities, explicit local witnesses, native BB proving and recursive aggregation. |
 | `invisi-sdk-rpc` | Indexed Protocol RPC, independent Ethereum reads and registered broadcaster quote/submit/status transport. |
-| `invisi-sdk-runtime` | Public Wallet, stateless preparation, external authorization, funding, proving and calldata. |
+| `invisi-sdk` | Public Wallet, stateless preparation, external authorization, funding, proving and calldata. |
 | `invisi-sdk-session` | Inventory, staged synchronization, reservations, history, journal recovery and encrypted persistence; optional SQLite. |
-| `invisi-sdk-ffi` | Narrow native C ABI backed by core only. It does not pull in HTTP, proving or Session. |
-| `invisi-sdk` | Convenience facade that reexports the focused crates. Its `src` contains only `lib.rs`. |
+| `invisi-sdk-ffi` | Narrow native C ABI backed by primitives only. It does not pull in HTTP, proving or Session. |
 | `invisi-sdk-examples` | Flat, independent scenario programs, corresponding to the Go/TS examples. |
 
-Dependencies flow from core to protocol/prover, then RPC and runtime, then Session.
+Dependencies flow from primitives to protocol, then prover and RPC, then the stateless SDK, then Session. Session directly uses protocol DTOs and accesses proving through SDK.
 Protocol DTOs live below RPC so receipt decoding does not create a dependency cycle.
-Native hosts that only need wallet cryptography depend on core or FFI directly.
+Native hosts that only need wallet cryptography depend on primitives or FFI directly.
 
 ## Public Wallet and application capabilities
 
@@ -83,8 +91,8 @@ The C ABI exports only `invisi_wallet_execute_batch` and `invisi_wallet_free`.
 Its methods are `wallet.public`, `wallet.detect`, `wallet.decryptNote`,
 `wallet.decryptCredit` and `wallet.authorize`, using the same dispatcher and wire
 messages as the SDK. Note commitments and nullifiers bind both chain ID and
-Protocol address. Native hosts use the current Protocol/runtime preparation APIs
-for Shield, transact and Credit; ERC20 approval is explicit runtime data.
+Protocol address. Native hosts use the current Protocol/SDK preparation APIs
+for Shield, transact and Credit; ERC20 approval is explicit SDK data.
 
 ## Examples and verification
 

@@ -1,6 +1,6 @@
 //! Explicit ciphertext adapter for independently scoped provenance recovery records.
+use crate::provenance_recovery::{AtomicRecoveryRecords, RecoveryCiphertext};
 use crate::session::{AtomicRecords, EncryptedRecord};
-use invisi_sdk_rpc::provenance_recovery::{AtomicRecoveryRecords, RecoveryCiphertext};
 use std::sync::Arc;
 pub struct SessionRecoveryRecords {
     records: Arc<dyn AtomicRecords>,
@@ -56,10 +56,8 @@ mod tests {
 #[cfg(test)]
 mod encrypted_adapter_tests {
     use super::*;
+    use crate::provenance_recovery::{EncryptedRecoveryStore, RecoveryAtomicStore, RecoveryRecord};
     use crate::session::MemoryAtomicRecords;
-    use invisi_sdk_rpc::provenance_recovery::{
-        EncryptedRecoveryStore, RecoveryAtomicStore, RecoveryRecord,
-    };
     use serde_json::{json, Value};
     fn record() -> RecoveryRecord {
         let fixture: Value =

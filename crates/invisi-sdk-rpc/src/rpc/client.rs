@@ -68,9 +68,10 @@ impl<T: RpcTransport> CanonicalChain for EthereumChain<T> {
             0,
             32 << 20,
         )
+        .map_err(Error::from)
     }
     fn call(&self, address: Address, data: &[u8], block: u64) -> Result<Vec<u8>> {
-        bytes(&self.rpc.call("eth_call",json!([{"to":address,"data":format!("0x{}",hex::encode(data))},format!("0x{block:x}")]))?,0,32<<20)
+        Ok(bytes(&self.rpc.call("eth_call",json!([{"to":address,"data":format!("0x{}",hex::encode(data))},format!("0x{block:x}")]))?,0,32<<20)?)
     }
 }
 pub struct ProtocolRpcClient<T: RpcTransport, C: CanonicalChain> {
@@ -264,7 +265,7 @@ impl<T: RpcTransport, C: CanonicalChain> ProtocolRpcClient<T, C> {
             .as_array()
             .ok_or(Error::Invalid("membership siblings required"))?
             .iter()
-            .map(hash)
+            .map(|value| hash(value).map_err(Error::from))
             .collect::<Result<Vec<_>>>()?;
         if path.len() != TREE_DEPTH {
             return Err(Error::Invalid("invalid Merkle depth"));
@@ -377,7 +378,7 @@ impl<T: RpcTransport, C: CanonicalChain> ProtocolRpcClient<T, C> {
         rows: &[Value],
         from: u64,
         to: u64,
-        parse: fn(&Value) -> Result<A>,
+        parse: fn(&Value) -> invisi_sdk_protocol::Result<A>,
     ) -> Result<Vec<A>> {
         let mut positions = HashMap::new();
         let mut commitments = HashMap::new();
@@ -487,7 +488,7 @@ impl<T: RpcTransport, C: CanonicalChain> ProtocolRpcClient<T, C> {
         commitment: B256,
         block: &CanonicalBlock,
         credit: bool,
-        parse: fn(&Value) -> Result<A>,
+        parse: fn(&Value) -> invisi_sdk_protocol::Result<A>,
     ) -> Result<Option<IndexedLookup<A>>> {
         if commitment == B256::ZERO {
             return Err(Error::Invalid("nonzero commitment required"));
@@ -542,7 +543,7 @@ impl<T: RpcTransport, C: CanonicalChain> ProtocolRpcClient<T, C> {
             .as_array()
             .ok_or(Error::Invalid("lookup path required"))?
             .iter()
-            .map(hash)
+            .map(|value| hash(value).map_err(Error::from))
             .collect::<Result<Vec<_>>>()?;
         if path != membership.path {
             return Err(Error::Invalid("lookup membership mismatch"));
@@ -1079,7 +1080,10 @@ impl<T: RpcTransport> ChainReceipts for EthereumChain<T> {
             }
             logs.push(CanonicalLog {
                 address: address(&row["address"])?,
-                topics: topics.iter().map(hash).collect::<Result<_>>()?,
+                topics: topics
+                    .iter()
+                    .map(|value| hash(value).map_err(Error::from))
+                    .collect::<Result<_>>()?,
                 data: bytes(&row["data"], 0, 32 << 20)?,
                 log_index,
             });

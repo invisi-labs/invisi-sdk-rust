@@ -1,6 +1,6 @@
 //! Public Source JSON-RPC transport, independent of payment execution.
 use alloy_primitives::U256;
-use invisi_sdk_core::provenance::{
+use invisi_sdk_protocol::provenance::{
     assert_certificate_trust, parse_integer, ProofBundle, ProofSidecar, RootCertificate,
     TrustContext,
 };
@@ -44,7 +44,8 @@ impl ProvenanceClient {
     }
     fn call(&self, method: &str, query: Option<Value>) -> Result<Value, String> {
         if let Some(q) = &query {
-            invisi_sdk_core::provenance::assert_public_submission(q).map_err(|e| e.to_string())?;
+            invisi_sdk_protocol::provenance::assert_public_submission(q)
+                .map_err(|e| e.to_string())?;
         }
         let id = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
         let response=self.client.post(format!("{}/v1/chains/{}",self.endpoint,self.trust.scope.chain_id)).json(&json!({"jsonrpc":"2.0","id":id,"method":method,"params":query.map(|q|vec![q]).unwrap_or_default()})).send().map_err(|e|e.to_string())?.error_for_status().map_err(|e|e.to_string())?;
@@ -162,7 +163,7 @@ impl ProvenanceClient {
         )
     }
     pub fn get_note_recognition(&self, commitment: U256) -> Result<Value, String> {
-        invisi_sdk_core::note::field(commitment, "commitment").map_err(|e| e.to_string())?;
+        invisi_sdk_primitives::note::field(commitment, "commitment").map_err(|e| e.to_string())?;
         let encoded = format!("0x{}", hex::encode(commitment.to_be_bytes::<32>()));
         self.call(
             "provenance_getNoteRecognition",
@@ -187,15 +188,19 @@ impl ProvenanceClient {
         data: Value,
         proof_sidecars: &[ProofSidecar],
     ) -> Result<Value, String> {
-        invisi_sdk_core::provenance::assert_public_submission(&data).map_err(|e| e.to_string())?;
+        invisi_sdk_protocol::provenance::assert_public_submission(&data)
+            .map_err(|e| e.to_string())?;
         for sidecar in proof_sidecars {
             parse_integer(&sidecar.operation_index, 32).map_err(|e| e.to_string())?;
-            invisi_sdk_core::provenance::validate_proof_bundle(&sidecar.proof_bundle, &self.trust)
-                .map_err(|e| e.to_string())?;
+            invisi_sdk_protocol::provenance::validate_proof_bundle(
+                &sidecar.proof_bundle,
+                &self.trust,
+            )
+            .map_err(|e| e.to_string())?;
         }
         let wire_sidecars = proof_sidecars
             .iter()
-            .map(invisi_sdk_core::provenance::proof_sidecar_to_wire)
+            .map(invisi_sdk_protocol::provenance::proof_sidecar_to_wire)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
         self.call(
@@ -208,15 +213,19 @@ impl ProvenanceClient {
         data: Value,
         proof_sidecars: &[ProofSidecar],
     ) -> Result<Value, String> {
-        invisi_sdk_core::provenance::assert_public_submission(&data).map_err(|e| e.to_string())?;
+        invisi_sdk_protocol::provenance::assert_public_submission(&data)
+            .map_err(|e| e.to_string())?;
         for sidecar in proof_sidecars {
             parse_integer(&sidecar.operation_index, 32).map_err(|e| e.to_string())?;
-            invisi_sdk_core::provenance::validate_proof_bundle(&sidecar.proof_bundle, &self.trust)
-                .map_err(|e| e.to_string())?;
+            invisi_sdk_protocol::provenance::validate_proof_bundle(
+                &sidecar.proof_bundle,
+                &self.trust,
+            )
+            .map_err(|e| e.to_string())?;
         }
         let wire = proof_sidecars
             .iter()
-            .map(invisi_sdk_core::provenance::proof_sidecar_to_wire)
+            .map(invisi_sdk_protocol::provenance::proof_sidecar_to_wire)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
         self.call(
@@ -236,11 +245,12 @@ impl ProvenanceClient {
         if idempotency_key.is_empty() {
             return Err("idempotency key required".into());
         }
-        invisi_sdk_core::provenance::validate_proof_bundle(bundle, &self.trust)
+        invisi_sdk_protocol::provenance::validate_proof_bundle(bundle, &self.trust)
             .map_err(|e| e.to_string())?;
-        locator["proofBundle"] =
-            json!(invisi_sdk_core::provenance::proof_bundle_to_wire(bundle)
-                .map_err(|e| e.to_string())?);
+        locator["proofBundle"] = json!(invisi_sdk_protocol::provenance::proof_bundle_to_wire(
+            bundle
+        )
+        .map_err(|e| e.to_string())?);
         locator["idempotencyKey"] = json!(idempotency_key);
         self.call("provenance_submitProof", Some(self.query(locator)))
     }
@@ -318,8 +328,8 @@ impl ProvenanceClient {
         root_id: &str,
         certificate: &RootCertificate,
         max_leaves: u64,
-    ) -> Result<invisi_sdk_core::provenance::RecognizedTree, String> {
-        use invisi_sdk_core::provenance::{
+    ) -> Result<invisi_sdk_protocol::provenance::RecognizedTree, String> {
+        use invisi_sdk_protocol::provenance::{
             checkpoint_hash, recognized_leaf, scope_hash, RecognizedTree,
         };
         assert_certificate_trust(certificate, &self.trust).map_err(|e| e.to_string())?;
@@ -395,7 +405,7 @@ impl ProvenanceClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use invisi_sdk_core::provenance::Scope;
+    use invisi_sdk_protocol::provenance::Scope;
     use std::collections::BTreeMap;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -574,11 +584,11 @@ impl ProvenanceClient {
         root_id: &str,
         allow_interest_disclosure: bool,
     ) -> Result<Value, String> {
-        use invisi_sdk_core::provenance::{recognized_leaf, scope_hash};
+        use invisi_sdk_protocol::provenance::{recognized_leaf, scope_hash};
         if !allow_interest_disclosure {
             return Err("membership lookup requires explicit interest disclosure".into());
         }
-        invisi_sdk_core::note::field(commitment, "commitment").map_err(|e| e.to_string())?;
+        invisi_sdk_primitives::note::field(commitment, "commitment").map_err(|e| e.to_string())?;
         let result=self.call("provenance_getMembership",Some(self.query(json!({"rootId":root_id,"commitment":format!("0x{}",hex::encode(commitment.to_be_bytes::<32>()))}))))?;
         let cert: RootCertificate =
             serde_json::from_value(result["certificate"].clone()).map_err(|e| e.to_string())?;
@@ -607,7 +617,7 @@ impl ProvenanceClient {
             } else {
                 [sibling, leaf]
             };
-            leaf = invisi_sdk_core::note::hash_fields(&nodes).map_err(|e| e.to_string())?;
+            leaf = invisi_sdk_primitives::note::hash_fields(&nodes).map_err(|e| e.to_string())?;
         }
         if leaf != parse_integer(&cert.root, 256).map_err(|e| e.to_string())? {
             return Err("membership root mismatch".into());

@@ -1,5 +1,5 @@
 //! Scoped preflight tracking capabilities and strict current-v1 responses.
-use invisi_sdk_core::provenance::parse_integer;
+use invisi_sdk_protocol::provenance::parse_integer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 pub const STALE_TRACKING: &str = "TRACKING_STALE_GENERATION";

@@ -1,4 +1,4 @@
-use invisi_sdk::session::{
+use invisi_sdk_session::session::{
     AtomicRecords, EncryptedWalletStore, MemoryAtomicRecords, WalletState, WalletStore,
 };
 use std::sync::Arc;

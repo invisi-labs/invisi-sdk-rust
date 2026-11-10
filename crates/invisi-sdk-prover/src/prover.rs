@@ -17,11 +17,6 @@ const MANIFEST: &str = include_str!("../assets/prover/witness-layouts.json");
 const RECURSIVE_KEYS: &str = include_str!("../assets/prover/recursive-key.json");
 #[derive(Deserialize)]
 struct Layout {
-    #[serde(rename = "artifactSha256")]
-    artifact_sha256: String,
-    keys: BTreeMap<String, String>,
-    #[serde(rename = "publicInputCount")]
-    count: usize,
     #[serde(rename = "public")]
     public_fields: Vec<PublicField>,
     private: Vec<String>,
@@ -38,37 +33,7 @@ fn layouts() -> Result<BTreeMap<String, Layout>> {
 pub fn sha256(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ProofStatement {
-    pub circuit_name: String,
-    pub target: String,
-    pub artifact_sha256: String,
-    pub vk_sha256: String,
-    pub expected_public_inputs: Vec<B256>,
-}
-pub fn statement(name: &str, target: &str, inputs: Vec<B256>) -> Result<ProofStatement> {
-    for input in &inputs {
-        crate::note::field(U256::from_be_slice(input.as_slice()), "public field")
-            .map_err(|e| e.to_string())?;
-    }
-    let all = layouts()?;
-    let layout = all.get(name).ok_or("unsupported circuit")?;
-    let key = layout
-        .keys
-        .get(target)
-        .ok_or("unsupported proving target")?;
-    if inputs.len() != layout.count {
-        return Err("public statement width mismatch".into());
-    }
-    Ok(ProofStatement {
-        circuit_name: name.into(),
-        target: target.into(),
-        artifact_sha256: layout.artifact_sha256.clone(),
-        vk_sha256: key.clone(),
-        expected_public_inputs: inputs,
-    })
-}
+pub use invisi_sdk_protocol::statements::{statement, ProofStatement};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProofBundle {

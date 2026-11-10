@@ -1702,7 +1702,7 @@ dependencies = [
 
 [[package]]
 name = "invisi-sdk"
-version = "1.1.8"
+version = "1.2.0"
 dependencies = [
  "aes-gcm",
  "alloy-primitives",
@@ -1711,39 +1711,17 @@ dependencies = [
  "decaf377-fmd",
  "hex",
  "hkdf",
- "invisi-sdk-core",
+ "invisi-sdk-primitives",
  "invisi-sdk-protocol",
  "invisi-sdk-prover",
  "invisi-sdk-rpc",
- "invisi-sdk-runtime",
- "invisi-sdk-session",
- "k256",
- "serde",
- "serde_json",
- "sha2",
- "uuid",
- "zeroize",
-]
-
-[[package]]
-name = "invisi-sdk-core"
-version = "1.1.8"
-dependencies = [
- "aes-gcm",
- "alloy-primitives",
- "ark-bn254",
- "ark-ff 0.4.2",
- "base64 0.22.1",
- "decaf377-fmd",
- "ed25519-dalek",
- "hex",
- "hkdf",
  "k256",
  "rand 0.8.8",
  "serde",
  "serde_json",
  "sha2",
  "thiserror 1.0.69",
+ "uuid",
  "zeroize",
 ]
 
@@ -1755,6 +1733,7 @@ dependencies = [
  "alloy-sol-types",
  "hex",
  "invisi-sdk",
+ "invisi-sdk-session",
  "k256",
  "serde_json",
  "sha2",
@@ -1764,34 +1743,58 @@ dependencies = [
 
 [[package]]
 name = "invisi-sdk-ffi"
-version = "1.1.8"
+version = "1.2.0"
 dependencies = [
  "hex",
- "invisi-sdk-core",
+ "invisi-sdk-primitives",
  "serde_json",
  "zeroize",
 ]
 
 [[package]]
+name = "invisi-sdk-primitives"
+version = "1.2.0"
+dependencies = [
+ "aes-gcm",
+ "alloy-primitives",
+ "ark-bn254",
+ "ark-ff 0.4.2",
+ "base64 0.22.1",
+ "decaf377-fmd",
+ "hex",
+ "hkdf",
+ "k256",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
+ "zeroize",
+]
+
+[[package]]
 name = "invisi-sdk-protocol"
-version = "1.1.8"
+version = "1.2.0"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
+ "ed25519-dalek",
  "hex",
- "invisi-sdk-core",
+ "invisi-sdk-primitives",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 1.0.69",
 ]
 
 [[package]]
 name = "invisi-sdk-prover"
-version = "1.1.8"
+version = "1.2.0"
 dependencies = [
  "alloy-primitives",
  "hex",
- "invisi-sdk-core",
+ "invisi-sdk-primitives",
+ "invisi-sdk-protocol",
  "rand 0.8.8",
  "serde",
  "serde_json",
@@ -1803,58 +1806,34 @@ dependencies = [
 
 [[package]]
 name = "invisi-sdk-rpc"
-version = "1.1.8"
+version = "1.2.0"
 dependencies = [
- "aes-gcm",
  "alloy-primitives",
  "alloy-sol-types",
  "decaf377-fmd",
  "hex",
- "invisi-sdk-core",
+ "invisi-sdk-primitives",
  "invisi-sdk-protocol",
  "k256",
- "rand 0.8.8",
  "reqwest",
  "serde",
  "serde_json",
  "sha2",
  "thiserror 1.0.69",
- "zeroize",
-]
-
-[[package]]
-name = "invisi-sdk-runtime"
-version = "1.1.8"
-dependencies = [
- "alloy-primitives",
- "alloy-sol-types",
- "hex",
- "invisi-sdk-core",
- "invisi-sdk-protocol",
- "invisi-sdk-prover",
- "invisi-sdk-rpc",
- "k256",
- "rand 0.8.8",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 1.0.69",
- "zeroize",
 ]
 
 [[package]]
 name = "invisi-sdk-session"
-version = "1.1.8"
+version = "1.2.0"
 dependencies = [
  "aes-gcm",
  "alloy-primitives",
  "alloy-sol-types",
  "hex",
- "invisi-sdk-core",
+ "invisi-sdk",
+ "invisi-sdk-primitives",
  "invisi-sdk-protocol",
- "invisi-sdk-prover",
  "invisi-sdk-rpc",
- "invisi-sdk-runtime",
  "k256",
  "rand 0.8.8",
  "rusqlite",

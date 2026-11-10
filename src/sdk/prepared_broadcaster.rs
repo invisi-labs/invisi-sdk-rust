@@ -1,6 +1,6 @@
 //! Relay configuration is attached before authorization; failed candidates leave the original usable.
 use super::*;
-use invisi_sdk_core::provenance::{
+use crate::provenance::{
     self as source, ManifestIdentity, OfflineProver, Opening, ProofSidecar, RootCertificate,
     Source, WitnessInput, WitnessRequest,
 };
@@ -1137,7 +1137,7 @@ mod tests {
             (request.deliveries.clone(),).abi_encode_params(),
         )));
         words.extend([10, 1, 100, 0, 0, 0, 0].map(U256::from));
-        let auth=invisi_sdk_core::wallet::authorization_digest(&json!({"operation":"transact","capacity":1,"context":{"chainId":"4","protocolAddress":"5"},"words":words.iter().map(U256::to_string).collect::<Vec<_>>()})).unwrap();
+        let auth=invisi_sdk_primitives::wallet::authorization_digest(&json!({"operation":"transact","capacity":1,"context":{"chainId":"4","protocolAddress":"5"},"words":words.iter().map(U256::to_string).collect::<Vec<_>>()})).unwrap();
         words.extend(cache_split(B256::from(auth)));
         let digest = source::operation_digest(&trust.scope, 1, &words).unwrap();
         let digest_value = U256::from_be_bytes(digest);

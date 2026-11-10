@@ -1,6 +1,6 @@
 //! Exact documented gas workloads. These observations are neither gas limits nor RPC estimates.
-use crate::note::{ModelError, ModelResult};
 use alloy_primitives::U256;
+use invisi_sdk_primitives::note::{ModelError, ModelResult};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -26,7 +26,7 @@ pub struct UnavailableReference {
 pub struct AvailableReference {
     pub source: String,
     pub available: bool,
-    #[serde(with = "crate::note::decimal")]
+    #[serde(with = "invisi_sdk_primitives::note::decimal")]
     pub gas_units: U256,
     pub statistic: String,
     pub sample_count: u32,

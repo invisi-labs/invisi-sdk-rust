@@ -1,5 +1,5 @@
 #![cfg(feature = "sqlite")]
-use invisi_sdk::session::{sqlite::SQLiteRecords, AtomicRecords, EncryptedRecord};
+use invisi_sdk_session::session::{sqlite::SQLiteRecords, AtomicRecords, EncryptedRecord};
 use std::sync::{Arc, Barrier};
 #[test]
 fn sqlite_competing_instances_compare_and_swap_atomically() {

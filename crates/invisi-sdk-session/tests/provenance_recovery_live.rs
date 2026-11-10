@@ -3,10 +3,10 @@ use alloy_primitives::{keccak256, U256};
 use invisi_sdk::{
     provenance::*,
     provenance_client::ProvenanceClient,
-    provenance_recovery::*,
-    provenance_store::SessionRecoveryRecords,
     rpc::{HttpTransport, RpcTransport},
 };
+use invisi_sdk_session::provenance_recovery::*;
+use invisi_sdk_session::provenance_store::SessionRecoveryRecords;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
@@ -17,6 +17,31 @@ use std::{
     sync::{atomic::AtomicBool, Arc},
     time::Duration,
 };
+const LIVE_MANIFEST_SHA256: &str =
+    "6107789c5c0d24c4130bff05da6d389336feb5ccb247c4030eae5198ab05d762";
+fn current_source_release() -> ManifestIdentity {
+    let identity = authenticate_manifest(
+        include_bytes!("../testdata/source-manifest.json"),
+        LIVE_MANIFEST_SHA256,
+    )
+    .unwrap();
+    assert_eq!(identity.manifest.public_inputs, PUBLIC_INPUTS);
+    assert_eq!(identity.manifest.public_inputs.len(), 11);
+    assert_eq!(
+        identity
+            .manifest
+            .circuits
+            .iter()
+            .map(|entry| entry.capacity)
+            .collect::<Vec<_>>(),
+        [10, 20, 40, 80, 120, 160, 190]
+    );
+    identity
+}
+#[test]
+fn live_manifest_matches_current_packaged_release() {
+    current_source_release();
+}
 fn text<'a>(value: &'a Value, key: &str) -> &'a str {
     value[key].as_str().unwrap()
 }
@@ -191,10 +216,11 @@ fn provenance_recovery_live() {
         eprintln!("SKIP explicit recovery live opt-in required");
         return;
     }
+    let release = current_source_release();
     let path = PathBuf::from(std::env::var("INVISI_PROVENANCE_TRUST").unwrap());
     let fixture: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     let recovery = fixture["recovery"].clone();
-    let pin = "f90f2ce43218de158c6392fa19e6517dda703c35823a4aa5bfc20b50788ad282";
+    let pin = LIVE_MANIFEST_SHA256;
     assert_eq!(fixture["manifestSha256"], pin);
     for endpoint in [text(&fixture, "endpoint"), text(&recovery, "primaryRPC")] {
         assert!(["http://127.0.0.1:", "http://localhost:", "http://[::1]:"]
@@ -239,7 +265,11 @@ fn provenance_recovery_live() {
     .with_rotation_history(ring)
     .unwrap();
     let client = ProvenanceClient::new(text(&fixture, "endpoint"), trust.clone()).unwrap();
-    client.get_version().unwrap();
+    let version = client.get_version().unwrap();
+    assert_eq!(
+        version["publicInputCount"],
+        release.manifest.public_inputs.len().to_string()
+    );
     client.get_status().unwrap();
     let calldata = text(&recovery, "calldata");
     let intent = FrozenProvenanceIntent {
@@ -267,9 +297,15 @@ fn provenance_recovery_live() {
         );
     }
     let sidecar: ProofSidecar = serde_json::from_value(recovery["sidecar"].clone()).unwrap();
+    assert_eq!(
+        sidecar.proof_bundle.public_inputs.len(),
+        PUBLIC_INPUTS.len()
+    );
+    validate_proof_bundle(&sidecar.proof_bundle, &trust).unwrap();
     let root = Path::new(text(&recovery, "protocolRoot"));
     let manifest = std::fs::read(root.join("circuits/provenance/manifest.json")).unwrap();
     authenticate_manifest(&manifest, pin).unwrap();
+    assert_eq!(manifest, include_bytes!("../testdata/source-manifest.json"));
     let raw: Value = serde_json::from_slice(&manifest).unwrap();
     let capacity: usize = sidecar
         .proof_bundle
@@ -309,7 +345,8 @@ fn provenance_recovery_live() {
         "invisi-recovery-live-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
-    let records = Arc::new(invisi_sdk::session::sqlite::SQLiteRecords::open(&db_path).unwrap());
+    let records =
+        Arc::new(invisi_sdk_session::session::sqlite::SQLiteRecords::open(&db_path).unwrap());
     let adapter = Arc::new(SessionRecoveryRecords::new(records));
     let store = EncryptedRecoveryStore::new(adapter, [23; 32]);
     let coordinator = RecoveryCoordinator {
@@ -349,7 +386,8 @@ fn provenance_recovery_live() {
         assert_eq!(rejected.proof_job_status.as_deref(), Some("invalid"));
         assert_eq!(rejected.reason_code.as_deref(), Some("PROOF_INVALID"));
     }
-    let records = Arc::new(invisi_sdk::session::sqlite::SQLiteRecords::open(&db_path).unwrap());
+    let records =
+        Arc::new(invisi_sdk_session::session::sqlite::SQLiteRecords::open(&db_path).unwrap());
     let reopened =
         EncryptedRecoveryStore::new(Arc::new(SessionRecoveryRecords::new(records)), [23; 32]);
     let restart = RecoveryCoordinator {

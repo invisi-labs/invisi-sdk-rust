@@ -1,6 +1,6 @@
 [package]
 name = "invisi-sdk-protocol"
-version = "1.1.8"
+version = "1.2.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "Invisi SDK protocol capabilities"
@@ -10,10 +10,12 @@ repository = "https://github.com/invisi-lab/invisi-sdk-rust"
 include = ["Cargo.toml", "README.md", "LICENSE", "src/**", "assets/**", "provenance/**", "testdata/**", "tests/**", "include/**"]
 
 [dependencies]
-invisi-sdk-core = { path = "../invisi-sdk-core", version = "=1.1.8" }
+invisi-sdk-primitives = { path = "../invisi-sdk-primitives", version = "=1.2.0" }
 alloy-primitives = { version = "0.8", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1.0"
 hex = "0.4"
 alloy-sol-types = { version = "0.8", features = ["json"] }
+sha2 = "0.10"
+ed25519-dalek = "2"

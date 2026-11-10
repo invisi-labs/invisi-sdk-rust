@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/invisi-lab/invisi-sdk-go/core"
+	"github.com/invisi-lab/invisi-sdk-go/primitives"
 	"github.com/invisi-lab/invisi-sdk-go/protocol"
 	"math/big"
 	"os"
@@ -80,11 +80,11 @@ func main() {
 	w["delivery_hash_low"] = new(big.Int).SetBytes(hash[16:]).String()
 	w["auth_digest_high"] = new(big.Int).SetBytes(words[len(words)-2][:]).String()
 	w["auth_digest_low"] = new(big.Int).SetBytes(words[len(words)-1][:]).String()
-	req, e := protocol.WalletAuthorizationRequest(c, core.WalletTransact, 5, words[:len(words)-2])
+	req, e := protocol.WalletAuthorizationRequest(c, primitives.WalletTransact, 5, words[:len(words)-2])
 	if e != nil {
 		panic(e)
 	}
-	signature, e := core.SignWalletAuthorization(common.LeftPadBytes([]byte{1}, 32), req)
+	signature, e := primitives.SignWalletAuthorization(common.LeftPadBytes([]byte{1}, 32), req)
 	if e != nil {
 		panic(e)
 	}

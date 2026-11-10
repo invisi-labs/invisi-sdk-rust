@@ -50,7 +50,12 @@ pub fn address(value: &Value) -> Result<Address> {
 }
 pub fn field(value: B256) -> Result<()> {
     let data = value.as_slice();
-    if crate::field::field_to_bytes_be(crate::field::bytes_to_field(data)).as_slice() != data {
+    if invisi_sdk_primitives::field::field_to_bytes_be(
+        invisi_sdk_primitives::field::bytes_to_field(data),
+    )
+    .as_slice()
+        != data
+    {
         return Err(Error::Invalid("noncanonical field"));
     }
     Ok(())

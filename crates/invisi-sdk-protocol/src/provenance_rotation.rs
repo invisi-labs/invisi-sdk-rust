@@ -1,7 +1,7 @@
 //! Authenticated signing-key rotation and historical validity intervals.
-use crate::note::{ModelError, ModelResult};
 use crate::provenance::{parse_integer, TrustContext};
 use alloy_primitives::U256;
+use invisi_sdk_primitives::note::{ModelError, ModelResult};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

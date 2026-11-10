@@ -1,70 +1,19 @@
-# Provenance: one private input → Broadcaster → source recognition
+# Normal private transfer with Provenance
 
-The two files show the calls in order; there is no shared scenario runtime. They use a **real, already prepared direct `transact` with exactly one private Note input**. Its main circuit can have more than one slot (for example C2: one input, one output); its independent source proof uses K1. No aggregate, Credit-state leaf, remote witness/prover or account key is involved.
+The first flat example follows the normal SDK flow: discover and decrypt earlier deposits through the existing native host boundary, prepare a private transfer, call `with_broadcaster`, approve the wallet request in the host, prove the main transaction locally and call `submit_broadcaster`. Source paths, source capacity, source witness/proof, preflight tracking and the policy-bound quote are assembled by the SDK before host approval. No prepared JSON, private opening or hand-built sidecar is an example input.
 
-## Before running
+Copy `config.example.json` outside the checkout and replace its public deployment/policy/provider/signing-key pins from trusted operator configuration. Synchronize local source assets with `python3 scripts/sync-provenance.py ../invisi-protocol`; `assetRoot` points to `.cache/provenance`. Configure the existing main proving release with `PROVER_ASSETS`, and pinned executables with `NOIR_EXECUTOR` and `BB_BINARY`. The local source adapter authenticates artifacts/VKs and independently verifies its proof. No remote prover receives a witness.
 
-1. Prepare/authorize/prove the main transaction through the normal Note flow. Discover and decrypt its selected Note locally through the existing host boundary. Settle the broadcaster fee **before** freezing the main statement: initial `getFee` needs no source proof. Retain the exact main `publicInputs` and final calldata; the source proof binds this statement. A changed fee, output, deadline or input requires rebuilding the main proof and source proof, then obtaining a new quote.
-2. Copy `config.example.json` outside the repository and replace every placeholder with externally trusted deployment, policy, provider and **active** signing-key pins. Do not take trust pins from an untrusted API response. This short example pins one key; production key rotation uses the verified history APIs described in `../../PROVENANCE.md`.
-3. Synchronize authenticated local source assets with `python3 scripts/sync-provenance.py ../invisi-protocol`. `assetRoot` points at `.cache/provenance`, including its nested `circuits/provenance` paths. Supply local SRS/runtime resources as required by the proving backend.
-4. Have the host pass this local JSON through stdin. All integers are strings. `rootId` identifies a currently usable signed checkpoint containing the selected Note. The source tree is replayed locally; no per-Note membership request discloses interest to the source API.
-
-```json
-{
-  "rootId": "1:2",
-  "tokenAddress": "0x<20-byte-token-address>",
-  "opening": {"owner": "0x<owner>", "nonce": "<private-field-integer>", "amount": "<base-units>"},
-  "mainCircuitCapacity": "2",
-  "publicInputs": ["<exact main-proof public fields, including authorization limbs>"],
-  "data": "0x<final proved and authorized transact calldata>"
-}
-```
-
-This is a **host-local handoff**, not a Provenance request schema. Never upload it, log it or commit it. The normal host should retain openings in encrypted storage and feed stdin directly; the shell commands below use an external protected file only to make the CLI boundary visible. The SDK independently authenticates the release, source certificate, root replay and proof. The example checks the primary chain/checkpoint anchor and that the main statement spends the supplied Note; the Broadcaster additionally validates the binding against the submitted calldata.
+Set `PROVENANCE_CONFIG`, `DEPLOYMENT_JSON`, `PROTOCOL_RPC_URL`, `WALLET_ADDRESS` (resolved receiving keys are required for change), `RECIPIENT_ADDRESS`, `TOKEN_ADDRESS`, `AMOUNT` (raw integer units), `DEADLINE` (Unix seconds), `BROADCAST_ID` and a new `PROVENANCE_RECORD` path. Discovery and approval requests are printed as native-host request arrays; paste the corresponding response arrays when prompted. This is the existing explicit host boundary, not a new wallet signer. The example selects discovered unspent Notes locally; ensure sufficient balance for the amount and converged relay fee.
 
 ```sh
-export PROVENANCE_CONFIG='/outside/repository/provenance-config.json'
-export PROVENANCE_RECORD='/outside/repository/payment-source-public.json'
-export BROADCAST_ID='stable-host-operation-id'
-```
-
-The tracking ID is an unlisted lookup capability; keep this file private even though it contains no opening. The public record contains only calldata, sidecar, quote, the scoped preflight tracking ID and stable broadcast ID. It is created exclusively and synced **before** submission; an existing file aborts instead of overwriting an uncertain payment. This is not a substitute for a production encrypted wallet/recovery journal. See `RecoveryCoordinator` in `../../PROVENANCE.md` for durable host integration.
-
-## Run
-
-```sh
-export NOIR_EXECUTOR='/path/to/noir-1.0.0/noir-execute'
-export BB_BINARY='/path/to/bb-6.0.0'
-cargo run -p invisi-sdk-examples --bin provenance-prove-and-broadcast -- --execute < /protected/host-prepared.json
-# Add --submit to that first invocation to really broadcast (start with a new record path).
-export TRANSACTION_HASH='0x<confirmed-transaction-hash>'
+cargo run -p invisi-sdk-examples --bin provenance-prove-and-broadcast -- --execute
+# Add --submit to explicitly send through the configured relay.
 cargo run -p invisi-sdk-examples --bin provenance-confirm-source -- --execute
 ```
 
-Retain `PreparedTransaction::public_inputs()` for the exact main preparation, serialized as 32-byte hex strings. Rust's SDK has an explicit `OfflineProver` boundary. `LocalHost` in this example implements it using the local Noir executor and BB 6.0.0: pinned manifest/artifact/VK checks, private temporary witness, exact 13-field comparison, independent `bb verify`, cleanup. It is an example host adapter, not a newly shipped Rust/WASM backend. It suppresses process output to avoid logging witness material.
+Without `--execute`, both programs exit before accessing files, keys or the network. The first exclusively creates and syncs a public source/quote/tracking/calldata record before possible relay submission. It keeps all raw openings in local memory. For durable private inventory and reservations, use the existing encrypted `WalletSession` store and its `Operation::with_broadcaster`/`submit_broadcaster` methods; this example does not wire the App.
 
-Its opt-in genuine proving check can be run with the same local tools:
+After submission set `TRANSACTION_HASH` to the actual mined transaction. The second example authenticates the exact calldata, successful receipt and canonical block through the configured primary, waits for the retained automatic tracking ID, then queries the exact operation's recognition. Preflight allow and proof validity alone are not operation recognition. Receivers separately authenticate signed source roots and their Note membership.
 
-```sh
-export INVISI_PROTOCOL_ROOT='../invisi-protocol'
-export PROVENANCE_ASSETS="$PWD/.cache/provenance"
-cargo test -p invisi-sdk-examples --bin provenance-prove-and-broadcast -- --ignored
-```
-
-The first command proves locally, calls source preflight on the exact final calldata and retains its durable tracking acknowledgement, then obtains a cryptographically verified, required-policy-bound quote. It does not broadcast unless `--submit` is present. Review the configured recipient, final fee-bearing calldata and intent before using that switch. The example stores the public record and prints Broadcaster status, which may still be pending; it never treats HTTP acceptance as chain confirmation.
-
-For a quote timeout, failed submit response or restart, retain the **same** calldata, sidecar, quote and `BROADCAST_ID`. Query the Broadcaster's `status` API using that ID. Retry the identical submission only through the original host/recovery journal; do not run the first example again with a new ID or change the fee to bypass an uncertain submission. For confirmed tracked transactions, run the second example with their transaction hash and original tracking record; explicitly untracked self-broadcast recovery uses the direct fallback described below.
-
-The second command reads the actual primary transaction, successful receipt and canonical block, checks deployment/calldata, waits for the retained automatic tracking task, then checks the exact operation's published `recognitionState`. Preflight `allow` is not `recognized`. Index lag, insufficient confirmations or publication delay can require rerunning this second command with the same record/hash. A reorg or `stale_generation` requires host reconciliation and explicit local reproof; it never resends the payment. A recipient separately authenticates the signed published root/anchor and its Note membership; this operation-status query does not replace that verification.
-
-Only public evidence is sent to Provenance and Broadcaster. No service receives `opening`, nonce, witness, viewing key or private key. These examples perform no approval, EVM signing or automatic repricing.
-
-## Automatic confirmation tracking
-
-The first file evaluates the final frozen calldata/sidecar **before** requesting a Broadcaster quote. The source service durably creates/coalesces a scoped task; the Broadcaster's own repeated preflight returns the same operation's tracking ID. The public record is exclusively created and synced before actual broadcast. The second file checks the original transaction/receipt/block through the configured primary RPC, then waits on the retained tracking ID and confirms the exact operation-recognition response. It does not manually call `submitProof`; normal indexing and the source worker collect the preflight evidence automatically. Keep the same frozen calldata and tracking/broadcast IDs after timeouts or restarts.
-
-`pending_confirmation` and `pending_source` are resumable; `expired` or `superseded` stops tracking without changing or resending the transaction. A generation change requires authenticated host reconciliation and explicit local reproof. Wall-clock expiry alone is not proof of an unbroadcast transaction when indexing is behind. No private opening is uploaded or stored in this public example record.
-
-For an explicitly chosen self-broadcast/manual recovery path, use the SDK's `prepareDirect` / `PrepareDirect` / `prepare_direct` or direct `submitProof` API after primary confirmation, then poll the proof job and operation recognition. That fallback is separate from the normal automatic path; it is never selected merely because preflight did not return tracking. These flat examples do not wire the App or change the host's existing nonce/input reservations.
-
-For explicit source recovery, base keys are 1–63 printable ASCII bytes and must not start with `internal/`; that prefix is reserved for server jobs and is also rejected by direct `submitProof` before HTTP.
+Keep the same record/hash/IDs after provider outages or uncertain relay responses. Generation changes require primary reconciliation and explicit local reproof; neither example changes or resends the transaction. Normal confirmation does not call `submitProof`. Explicit self-broadcast/reproof recovery remains available through `prepare_direct` or direct source submission; missing tracking never chooses that fallback automatically. Recovery base keys are 1–63 printable ASCII bytes and cannot start with reserved `internal/`.

@@ -66,6 +66,60 @@ impl Operation {
         self.requests.clear();
         Ok(self)
     }
+    pub fn broadcaster_state(&self) -> Option<&sdk::PreparedBroadcasterState> {
+        match &self.prepared {
+            ManagedPrepared::Funds(v) => v.broadcaster_state(),
+            _ => None,
+        }
+    }
+    pub fn with_broadcaster(
+        &mut self,
+        relay: Arc<dyn sdk::PreparedBroadcaster>,
+        options: &sdk::BroadcasterOptions,
+    ) -> Result<()> {
+        let mut state = self.current()?;
+        if state.operations[&self.id].externalized {
+            return Err("cannot reprice an externalized operation".into());
+        }
+        let prepared = match &self.prepared {
+            ManagedPrepared::Funds(v) => ManagedPrepared::Funds(v.with_broadcaster(
+                self.session.invisi.chain.clone(),
+                relay,
+                options,
+            )?),
+            _ => return Err("funds operation required".into()),
+        };
+        let record = state
+            .operations
+            .get_mut(&self.id)
+            .ok_or("operation not found")?;
+        record.snapshot = prepared.snapshot()?;
+        record.generation = record
+            .generation
+            .checked_add(1)
+            .ok_or("operation generation exhausted")?;
+        let generation = record.generation;
+        self.session.commit(state)?;
+        self.generation = generation;
+        self.prepared = prepared;
+        self.requests.clear();
+        Ok(())
+    }
+    pub fn submit_broadcaster(
+        &mut self,
+        relay: &dyn sdk::PreparedBroadcaster,
+        id: &str,
+    ) -> Result<invisi_sdk_rpc::broadcaster::Status> {
+        self.current()?;
+        // Fence possible externalization before the first network send, including uncertain responses.
+        self.calldata(Address::ZERO)?;
+        match &self.prepared {
+            ManagedPrepared::Funds(v) => {
+                v.submit_broadcaster(self.session.invisi.chain.as_ref(), relay, id)
+            }
+            _ => Err("funds operation required".into()),
+        }
+    }
     pub fn export_wallet_request(&mut self, id: impl Into<String>) -> Result<WalletRequest> {
         self.current()?;
         let id = id.into();
@@ -424,7 +478,10 @@ impl WalletSession {
         if record.snapshot.context() != self.scope.context {
             return Err("saved operation deployment mismatch".into());
         }
-        let prepared = record.snapshot.restore(&self.wallet, backend)?;
+        let mut prepared = record.snapshot.restore(&self.wallet, backend)?;
+        if let (Some(cap), ManagedPrepared::Funds(v)) = (&self.invisi.provenance, &mut prepared) {
+            *v = v.clone().reattach_provenance(cap.clone())?;
+        }
         record.generation = record
             .generation
             .checked_add(1)

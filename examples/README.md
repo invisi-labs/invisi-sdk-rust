@@ -165,4 +165,4 @@ Run the other binaries without `--execute` to inspect their guard behavior witho
 
 ## Provenance
 
-[`07-provenance`](07-provenance/README.md) shows local recognized-tree replay, real source proving, policy-bound Broadcaster quote/optional submission, and confirmed-transaction source-proof submission/publication waiting. These examples add an explicit `--submit` switch; the existing examples still only export unsigned transactions.
+[`07-provenance`](07-provenance/README.md) shows normal discovery/preparation, automatic local source proving/tracking and policy-bound quote attachment before approval/main proving, optional relay submission, then primary-confirmed automatic recognition waiting. These examples add an explicit `--submit` switch; the existing examples still only export unsigned transactions.

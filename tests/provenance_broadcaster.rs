@@ -1,10 +1,8 @@
 use alloy_primitives::{keccak256, Address, B256, U256};
-use invisi_sdk::broadcaster::provenance::{
-    verify_provenance_quote, ProvenanceSignedQuote, REQUEST_HASH_FORMAT,
-};
 use invisi_sdk::broadcaster::{
     quote_digest, request_hash, verify_quote, Quote, SignedQuote, Trust,
 };
+use invisi_sdk::broadcaster::{verify_quote_for_policy, REQUEST_HASH_FORMAT};
 #[test]
 fn provenance_quote_requires_bound_configured_policy() {
     let rows: serde_json::Value =
@@ -29,25 +27,28 @@ fn provenance_quote_requires_bound_configured_policy() {
         .unwrap();
     let mut bytes = signature.to_bytes().to_vec();
     bytes.push(recovery.to_byte());
-    let mut s = ProvenanceSignedQuote {
+    let mut s = SignedQuote {
         quote: quote.clone(),
         signature: format!("0x{}", hex::encode(bytes)),
         provenance_policy_id: Some(policy),
         request_hash_format: Some(REQUEST_HASH_FORMAT.into()),
     };
-    verify_provenance_quote(&s, &trust, &data, 0, policy).unwrap();
-    assert!(verify_provenance_quote(&s, &trust, &data, 0, B256::repeat_byte(0x78)).is_err());
+    verify_quote_for_policy(&s, &trust, &data, 0, Some(policy)).unwrap();
+    assert!(verify_quote_for_policy(&s, &trust, &data, 0, Some(B256::repeat_byte(0x78))).is_err());
     assert!(verify_quote(
         &SignedQuote {
             quote,
-            signature: s.signature.clone()
+            signature: s.signature.clone(),
+            provenance_policy_id: None,
+            request_hash_format: None
         },
         &trust,
         &data,
         0
     )
     .is_err());
-    assert!(serde_json::from_value::<SignedQuote>(serde_json::to_value(&s).unwrap()).is_err());
+    assert!(serde_json::from_value::<SignedQuote>(serde_json::to_value(&s).unwrap()).is_ok());
+    assert!(verify_quote(&s, &trust, &data, 0).is_err());
     s.provenance_policy_id = None;
-    assert!(verify_provenance_quote(&s, &trust, &data, 0, policy).is_err());
+    assert!(verify_quote_for_policy(&s, &trust, &data, 0, Some(policy)).is_err());
 }

@@ -28,7 +28,7 @@ Policy-enabled broadcaster quotes bind the original public request hash and requ
 
 `invisi_sdk::provenance_client::ProvenanceClient` supplies scoped machine JSON-RPC methods, `sync_recognized_tree` with an explicit leaf budget, and bounded job waiting. It never changes Note spending state.
 
-`invisi_sdk::broadcaster::provenance::ProvenanceBroadcasterClient` is the explicit required-policy quote/submission flow; `verify_provenance_quote` checks outer metadata and the policy-bound EIP-712 signature. Policy-disabled broadcaster structs and signing APIs remain intact and reject unexpected provenance metadata.
+`BroadcasterClient::with_provenance_policy(policy)` configures the unified quote/submission client. `verify_quote_for_policy` checks outer metadata and the policy-bound EIP-712 signature; a policy-disabled client rejects unexpected policy metadata. No separate policy quote type is needed.
 
 Golden vector and transport tests: `cargo test -p invisi-sdk-core provenance`, `cargo test -p invisi-sdk-rpc provenance_client`, and `cargo test --test provenance_broadcaster`.
 
@@ -64,6 +64,18 @@ Recovery state-machine tests use explicitly marked synthetic proof bytes and rea
 
 Rust: `provenance_store::SessionRecoveryRecords::new(existingAtomicRecords)` adapts existing session `AtomicRecords` (including optional `SQLiteRecords`) to `provenance_recovery::EncryptedRecoveryStore::new(Arc::new(adapter), key32)`. Construct `RecoveryCoordinator` with explicit store/trust/service/host references; a successful `prepare` is the broadcast permit. `AtomicBool` cancellation and optional local reproof remain host-controlled; this does not add a Rust proving backend.
 
+## Normal prepared transactions
+
+Configure `Invisi::with_provenance(Arc<PreparedProvenance>)` with a pinned client, authenticated local manifest, local `OfflineProver` and explicit `SourceReplayBudgets`. After normal Note discovery and `prepare_transfer`, call `prepared.with_broadcaster(chain, relay, &BroadcasterOptions::default())` **before** wallet approval or main proving. The method borrows the original and returns a detached prepared transaction; fee convergence, source denial, local cancellation or quote failure leaves the original usable.
+
+Fee convergence rebuilds candidates from the original business preparation. Only the final fee-bearing plan obtains source proofs and tracking. The SDK first reads the current checkpoint, authenticates its certificate and primary-chain anchor and rebuilds its public recognized tree. If required, bounded root-history pages select the latest certified prefix per physical tree. Certificate/page/total-leaf budgets fail explicitly; no per-Note recognition request is made. Input nullifier order remains the native statement order, with independent source capacity selected from all 28 tiers.
+
+The final prepared transaction retains its verified quote, deployment/relay/policy identity, original intent hash, public sidecars and automatic tracking. Run the existing wallet authorization and main proving methods, then `submit_broadcaster(chain, relay, id)`; submission validates the saved context and attaches its saved sidecars internally. Funding nonce/deadline freeze before the quote; `with_funding_terms` cannot change them afterwards. The existing funding-signature attachment remains allowed and cannot change the unsigned intent. A changed business plan requires explicit preparation/repricing and new source evidence. There is no automatic resend.
+
+`Operation::with_broadcaster(&mut self, relay, options)` atomically stores the final public context in the existing encrypted wallet journal before consent. `Operation::submit_broadcaster` fences possible externalization before sending. Restored operations reattach the configured runtime capability from `Invisi`; client/prover capabilities and the in-memory repricing template are not serialized. A restored frozen transaction can submit its retained quote and source context but cannot silently reconstruct or reprice its original business intent.
+
+Shield/zero-input operations skip source proving. A configured source client may preflight these without sidecars; the relay also applies its normal policy evaluation. Existing direct Credit lifecycle relay support uses the same unified client and does not require a Note source proof. The new prepared fee-convergence helper covers Note/Shield funds operations; it does not add a separate Credit preparation API. Aggregated relay broadcast remains unsupported.
+
 ## Flat examples
 
-See [`examples/07-provenance`](examples/07-provenance/README.md) for local proof generation, public sidecars, verified Broadcaster quote/explicit submission and confirmed source publication.
+See [`examples/07-provenance`](examples/07-provenance/README.md) for discover → prepare → automatic source/quote attachment → host approval → main prove → relay submission, followed by primary confirmation and automatic source-recognition tracking.

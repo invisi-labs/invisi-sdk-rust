@@ -1040,6 +1040,7 @@ pub(crate) enum Plan {
         capacity: usize,
     },
 }
+#[derive(Clone)]
 pub struct PreparedTransaction {
     pub(crate) wallet: Wallet,
     pub(crate) context: ProtocolContext,
@@ -1051,6 +1052,9 @@ pub struct PreparedTransaction {
     pub(crate) proof: Option<ProofBundle>,
     pub(crate) needs_authorization: bool,
     pub(crate) target: String,
+    pub(crate) provenance: Option<Arc<PreparedProvenance>>,
+    pub(crate) broadcaster: Option<PreparedBroadcasterState>,
+    pub(crate) reprice: Option<RepriceTemplate>,
 }
 impl std::fmt::Debug for PreparedTransaction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1062,6 +1066,7 @@ impl std::fmt::Debug for PreparedTransaction {
 #[derive(Clone)]
 pub struct Invisi {
     pub chain: Arc<dyn ChainState>,
+    pub provenance: Option<Arc<PreparedProvenance>>,
 }
 fn sum(mut values: impl Iterator<Item = U256>) -> Result<U256> {
     values.try_fold(U256::ZERO, |a, b| {
@@ -1133,13 +1138,17 @@ fn sorted_sources(inputs: &[NoteInput]) -> Result<Vec<abi::InputSource>> {
 }
 impl Invisi {
     pub fn new(chain: Arc<dyn ChainState>) -> Self {
-        Self { chain }
+        Self {
+            chain,
+            provenance: None,
+        }
     }
     pub fn prepare_shield(
         &self,
         wallet: &Wallet,
         p: ShieldPreparation,
     ) -> Result<PreparedTransaction> {
+        let template = RepriceTemplate::Shield(p.clone());
         let anchor = self.chain.snapshot()?;
         let context = self.chain.context();
         p.fee.validate()?;
@@ -1176,6 +1185,9 @@ impl Invisi {
             proof: None,
             needs_authorization: false,
             target: "evm".into(),
+            provenance: self.provenance.clone(),
+            broadcaster: None,
+            reprice: Some(template),
         })
     }
     pub fn prepare_transfer(
@@ -1183,6 +1195,7 @@ impl Invisi {
         wallet: &Wallet,
         mut p: TransferPreparation,
     ) -> Result<PreparedTransaction> {
+        let template = RepriceTemplate::Transfer(p.clone());
         let anchor = self.chain.snapshot()?;
         let context = self.chain.context();
         p.fee.validate()?;
@@ -1283,6 +1296,9 @@ impl Invisi {
             proof: None,
             needs_authorization,
             target: "evm".into(),
+            provenance: self.provenance.clone(),
+            broadcaster: None,
+            reprice: Some(template),
         })
     }
 }
@@ -2088,6 +2104,9 @@ impl PreparedTransaction {
     pub fn with_funding_terms(mut self, chain: &dyn ChainState, deadline: u64) -> Result<Self> {
         if self.phase == Phase::Exported || self.funding().amount == U256::ZERO {
             return Err("operation has no pending public funding".into());
+        }
+        if self.broadcaster.is_some() {
+            return Err("funding terms frozen by broadcaster quote".into());
         }
         let block = chain.snapshot()?;
         if chain.context() != self.context || deadline < block.timestamp {
@@ -3130,3 +3149,6 @@ mod public_funding_tests {
         assert_eq!(decoded._3.amount, U256::from(7));
     }
 }
+
+pub mod prepared_broadcaster;
+pub use prepared_broadcaster::*;

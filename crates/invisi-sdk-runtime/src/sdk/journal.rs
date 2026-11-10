@@ -129,6 +129,7 @@ pub struct PreparedSnapshot {
     proof: Option<ProofBundle>,
     target: String,
     ready: bool,
+    broadcaster: Option<PreparedBroadcasterState>,
 }
 pub enum ManagedPrepared {
     Funds(PreparedTransaction),
@@ -147,6 +148,9 @@ impl ManagedPrepared {
             proof: value.proof.clone(),
             needs_authorization: value.needs_authorization,
             target: value.target.clone(),
+            provenance: value.provenance.clone(),
+            broadcaster: value.broadcaster.clone(),
+            reprice: value.reprice.clone(),
         })
     }
     pub fn phase(&self) -> Phase {
@@ -177,10 +181,12 @@ impl ManagedPrepared {
             proof: None,
             target: "evm".into(),
             ready: false,
+            broadcaster: None,
         };
         Ok(match self {
             Self::Funds(v) => {
                 let mut s = empty(v.context, v.token, v.anchor.clone());
+                s.broadcaster = v.broadcaster.clone();
                 s.inputs = v.inputs().iter().map(NoteInputRecord::from).collect();
                 s.outputs = v.outputs().iter().map(OutputSnapshot::capture).collect();
                 s.needs_authorization = v.needs_authorization;
@@ -428,6 +434,9 @@ impl PreparedSnapshot {
                     proof: None,
                     needs_authorization: false,
                     target: "evm".into(),
+                    provenance: None,
+                    broadcaster: self.broadcaster.clone(),
+                    reprice: None,
                 })
             }
             P::InvisiProtocolCalls::transact_0(c) => {
@@ -514,6 +523,9 @@ impl PreparedSnapshot {
                     proof: None,
                     needs_authorization: self.needs_authorization,
                     target: self.target.clone(),
+                    provenance: None,
+                    broadcaster: self.broadcaster.clone(),
+                    reprice: None,
                 })
             }
             other => {
@@ -764,6 +776,9 @@ impl ManagedPrepared {
                 proof: v.proof.clone(),
                 needs_authorization: v.needs_authorization,
                 target: v.target.clone(),
+                provenance: v.provenance.clone(),
+                broadcaster: v.broadcaster.clone(),
+                reprice: v.reprice.clone(),
             }),
             Self::Credit(v) => Self::Credit(PreparedCredit {
                 wallet: v.wallet.clone(),

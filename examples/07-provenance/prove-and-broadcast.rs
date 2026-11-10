@@ -1,18 +1,26 @@
 use alloy_primitives::{Address, B256, U256};
-use invisi_sdk::broadcaster::{provenance::ProvenanceBroadcasterClient, Configuration};
+use invisi_sdk::broadcaster::{BroadcasterClient, Configuration};
 use invisi_sdk::note::{ModelError, ModelResult};
 use invisi_sdk::provenance::*;
 use invisi_sdk::provenance_client::ProvenanceClient;
-use invisi_sdk::rpc::{HttpTransport, JsonRpc};
+use invisi_sdk::rpc::HttpTransport;
+use invisi_sdk::{
+    rpc::{EthereumChain, ProtocolDeployment, ProtocolRpcClient},
+    sdk::{
+        self, BroadcasterOptions, ChainState, Invisi, PreparedProvenance, SourceReplayBudgets,
+        Wallet,
+    },
+    session::{MemoryWalletStore, RefreshOptions, WalletSession},
+};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 use std::{
     collections::BTreeMap,
     env, fs,
-    io::{Read, Write},
+    io::Write,
     path::PathBuf,
     process::{Command, Stdio},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 const PIN: &str = "f90f2ce43218de158c6392fa19e6517dda703c35823a4aa5bfc20b50788ad282";
@@ -188,130 +196,141 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )]),
         signing_key_validity: BTreeMap::new(),
     };
-    let source = ProvenanceClient::new(text(&config["endpoint"])?, trust.clone())?;
-    source.get_version()?;
-    // Read the host's exact final main-proof statement and one opening locally, never over HTTP.
-    let mut local = String::new();
-    std::io::stdin().take(1 << 20).read_to_string(&mut local)?;
-    let prepared: Value = serde_json::from_str(&local)?;
-    drop(local);
-    let root = source.get_root(text(&prepared["rootId"])?)?;
-    if root["allowedForNewProof"] != true {
-        return Err("Root unavailable".into());
-    }
-    let cert: RootCertificate = serde_json::from_value(root["certificate"].clone())?;
-    let primary = JsonRpc::new(HttpTransport::new(text(&config["chainRpcUrl"])?)?);
-    if number(&primary.call("eth_chainId", json!([]))?)? != U256::from(trust.scope.chain_id) {
-        return Err("Primary chain mismatch".into());
-    }
-    let anchor = primary.call(
-        "eth_getBlockByNumber",
-        json!([
-            format!("0x{:x}", parse_integer(&cert.confirmed_block_number, 64)?),
-            false
-        ]),
-    )?;
-    if anchor["hash"] != cert.confirmed_block_hash {
-        return Err("Checkpoint anchor is not canonical".into());
-    }
-    let tree = source.sync_recognized_tree(text(&prepared["rootId"])?, &cert, 100000)?;
-    let opening = Opening {
-        owner: number(&prepared["opening"]["owner"])?,
-        nonce: number(&prepared["opening"]["nonce"])?,
-        amount: number(&prepared["opening"]["amount"])?,
-    };
-    let token = number(&prepared["tokenAddress"])?;
-    let (commitment, nullifier) = note_opening(&trust.scope, token, &opening)?;
-    let membership = tree
-        .membership_for_commitment(&trust.scope, commitment)?
-        .ok_or("Note not recognized")?;
-    let public = prepared["publicInputs"]
-        .as_array()
-        .ok_or("Native public inputs")?
-        .iter()
-        .map(number)
-        .collect::<Result<Vec<_>, _>>()?;
-    let capacity: usize = number(&prepared["mainCircuitCapacity"])?
-        .try_into()
-        .map_err(|_| "Main capacity")?;
-    if !(1..=190).contains(&capacity) || public.len() != 17 + 3 * capacity {
-        return Err("Native statement width".into());
-    }
-    if public[0] != U256::from(trust.scope.chain_id)
-        || public[1] != trust.scope.protocol_address
-        || public[2] != token
-        || public[3] != U256::from(1)
-        || public[6 + 2 * capacity] != nullifier
-    {
-        return Err("Main statement does not spend this exact one-input Note".into());
-    }
-    let digest = operation_digest(
-        &trust.scope,
-        number(&prepared["mainCircuitCapacity"])?.to(),
-        &public,
-    )?;
+    let source = Arc::new(ProvenanceClient::new(
+        text(&config["endpoint"])?,
+        trust.clone(),
+    )?);
+    let deployment: ProtocolDeployment =
+        serde_json::from_slice(&fs::read(env::var("DEPLOYMENT_JSON")?)?)?;
+    let primary_url = text(&config["chainRpcUrl"])?;
+    let chain = Arc::new(sdk::RpcChainState::new(
+        EthereumChain::new(HttpTransport::new(primary_url)?),
+        deployment.clone(),
+    )?);
     let assets = PathBuf::from(text(&config["assetRoot"])?);
     let identity = authenticate_manifest(&fs::read(assets.join("manifest.json"))?, PIN)?;
-    let host = LocalHost {
-        assets,
-        noir: env::var("NOIR_EXECUTOR")?,
-        bb: env::var("BB_BINARY")?,
+    let invisi = Invisi::new(chain.clone()).with_provenance(Arc::new(PreparedProvenance {
+        client: source,
+        manifest: identity,
+        prover: Arc::new(LocalHost {
+            assets,
+            noir: env::var("NOIR_EXECUTOR")?,
+            bb: env::var("BB_BINARY")?,
+        }),
+        budgets: SourceReplayBudgets::default(),
+    }))?;
+    let wallet = Wallet::from_address(&env::var("WALLET_ADDRESS")?)?;
+    let recipient = Wallet::from_address(&env::var("RECIPIENT_ADDRESS")?)?;
+    let token: Address = env::var("TOKEN_ADDRESS")?.parse()?;
+    let rpc = Arc::new(ProtocolRpcClient::new(
+        HttpTransport::protocol(&env::var("PROTOCOL_RPC_URL")?, deployment.chain_id()?)?,
+        EthereumChain::new(HttpTransport::new(primary_url)?),
+        deployment.clone(),
+    )?);
+    // Discovery only retains openings in local memory; the public source/relay APIs never receive them.
+    let discovery = WalletSession::connect(
+        invisi.clone(),
+        wallet.clone(),
+        Arc::new(MemoryWalletStore::default()),
+        rpc,
+        "provenance-example",
+    )?;
+    let pending = discovery.refresh(RefreshOptions::from_block(deployment.protocol.from_block))?;
+    println!(
+        "Native discovery requests: {}",
+        serde_json::to_string(pending.wallet_requests())?
+    );
+    let responses: Vec<sdk::WalletResponse> = if pending.wallet_requests().is_empty() {
+        Vec::new()
+    } else {
+        eprintln!("Execute the discovery array in your native host and paste its response array:");
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        serde_json::from_str(&line)?
     };
-    // K1 is one private input, independently of the main circuit's total slots.
-    let sidecar = export_sidecar(
-        &WitnessRequest {
-            scope: trust.scope.clone(),
-            capacity: 1,
-            token_address: token,
-            chain_generation: trust.chain_generation,
-            operation_digest: U256::from_be_bytes(digest),
-            inputs: vec![WitnessInput {
-                opening,
-                source_index: 0,
-                leaf_index: membership.leaf_index,
-                path: membership.path,
-            }],
-            sources: vec![Source {
-                tree_id: parse_integer(&cert.tree_id, 64)?.to(),
-                root: parse_integer(&cert.root, 256)?,
-                leaf_count: parse_integer(&cert.leaf_count, 64)?.to(),
-            }],
-        },
-        &[cert],
-        &trust,
-        &identity,
-        &host,
-        0,
-    )?;
-    let relay = ProvenanceBroadcasterClient::connect(
-        Configuration {
-            endpoint: text(&config["broadcaster"]["endpoint"])?.into(),
-            quote_signer: text(&config["broadcaster"]["quoteSigner"])?.parse::<Address>()?,
-            fee_recipient: text(&config["broadcaster"]["feeRecipient"])?.parse()?,
-        },
-        B256::from(trust.scope.policy_id.to_be_bytes::<32>()),
-    )?;
-    let evaluated =
-        source.evaluate_transaction(prepared["data"].clone(), std::slice::from_ref(&sidecar))?;
-    let tracking = invisi_sdk::provenance_tracking::preflight_tracking(
-        &evaluated,
-        "0",
-        &format!("0x{}", hex::encode(digest)),
-    )?;
-    let data = hex::decode(text(&prepared["data"])?.trim_start_matches("0x"))?;
-    // Fees are already frozen in this calldata; changed fee/data requires fresh main/source proofs.
-    let quote = relay.quote(
-        &data,
-        trust.scope.chain_id,
-        text(&config["protocolAddress"])?.parse()?,
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
-        std::slice::from_ref(&sidecar),
-    )?;
-    let id = env::var("BROADCAST_ID")?;
-    if id.is_empty() || id.len() > 63 || !id.bytes().all(|b| (33..=126).contains(&b)) {
-        return Err("Stable ASCII BROADCAST_ID required, maximum 63 bytes".into());
+    pending.apply_wallet_responses(&responses)?;
+    let state = discovery.snapshot()?;
+    let inputs = state
+        .notes
+        .values()
+        .filter(|n| {
+            !n.spent
+                && n.reserved_by.is_none()
+                && n.input.note.token_address == sdk::address_word(token)
+        })
+        .map(|n| n.input.clone())
+        .collect::<Vec<_>>();
+    if inputs.is_empty() {
+        return Err("No discovered unspent private Notes".into());
     }
-    let record = json!({"data":prepared["data"],"sidecar":sidecar,"broadcastId":id,"quote":quote.signed(),"operationDigest":format!("0x{}",hex::encode(digest)),"trackingId":tracking.id});
+    let output = sdk::NoteOutput::for_recipient(
+        chain.context(),
+        token,
+        &recipient,
+        U256::from_str_radix(&env::var("AMOUNT")?, 10)?,
+        Vec::new(),
+    )?;
+    let prepared = invisi.prepare_transfer(
+        &wallet,
+        sdk::TransferPreparation {
+            token,
+            inputs,
+            outputs: vec![output],
+            withdrawal: None,
+            funding: sdk::empty_funding(),
+            fee: sdk::Fee::default(),
+            deadline: env::var("DEADLINE")?.parse()?,
+            automatic_change: true,
+        },
+    )?;
+    let relay = Arc::new(
+        BroadcasterClient::connect(Configuration {
+            endpoint: text(&config["broadcaster"]["endpoint"])?.into(),
+            quote_signer: text(&config["broadcaster"]["quoteSigner"])?.parse()?,
+            fee_recipient: text(&config["broadcaster"]["feeRecipient"])?.parse()?,
+        })?
+        .with_provenance_policy(B256::from(trust.scope.policy_id.to_be_bytes::<32>()))?,
+    );
+    // Fee convergence, local source proving, tracking and the signed quote all precede consent.
+    let prepared =
+        prepared.with_broadcaster(chain.clone(), relay.clone(), &BroadcasterOptions::default())?;
+    let request = prepared.export_wallet_request("provenance-transfer")?;
+    println!(
+        "Native wallet requests: {}",
+        serde_json::to_string(std::slice::from_ref(&request))?
+    );
+    eprintln!("Approve in your native host and paste its response array:");
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    let responses: Vec<sdk::WalletResponse> = serde_json::from_str(&line)?;
+    wallet.accept_batch(std::slice::from_ref(&request), &responses)?;
+    let response = responses
+        .iter()
+        .find(|r| r.id == request.id)
+        .ok_or("Missing wallet response")?;
+    let main_prover = invisi_sdk::prover::NativeProver {
+        bb_binary: env::var("BB_BINARY")?.into(),
+        timeout: std::time::Duration::from_secs(600),
+        threads: 4,
+        assets: Arc::new(invisi_sdk::prover::DirectoryAssets {
+            directory: env::var("PROVER_ASSETS")?.into(),
+        }),
+        witness_executor: Arc::new(invisi_sdk::prover::NoirCli {
+            binary: env::var("NOIR_EXECUTOR")?.into(),
+            timeout: std::time::Duration::from_secs(120),
+        }),
+    };
+    let prepared = prepared
+        .with_wallet_response(&request, response)?
+        .prove(&main_prover, false)?;
+    let saved = prepared.broadcaster_state().ok_or("Missing saved quote")?;
+    let tracking = saved
+        .tracking
+        .as_ref()
+        .ok_or("Missing automatic tracking")?;
+    let data = prepared.calldata(chain.as_ref(), Address::ZERO)?.data;
+    let id = env::var("BROADCAST_ID")?;
+    let record = json!({"data":format!("0x{}",hex::encode(&data)),"sidecar":saved.sidecars.first().ok_or("Missing source sidecar")?,"broadcastId":id,"quote":saved.quote,"operationDigest":tracking.operation_digest,"trackingId":tracking.id});
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -322,14 +341,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut file = options.open(env::var("PROVENANCE_RECORD")?)?;
     file.write_all(&serde_json::to_vec_pretty(&record)?)?;
     file.sync_all()?;
-    println!("Public sidecar and verified quote saved; keep the record for confirmation/recovery.");
+    println!("Public source context saved before broadcast; retain it after uncertain responses.");
     if env::args().any(|a| a == "--submit") {
         println!(
             "Broadcaster status: {:?}",
-            relay.submit(&data, &quote, &id, &[sidecar])?
-        )
+            prepared.submit_broadcaster(chain.as_ref(), relay.as_ref(), &id)?
+        );
     }
-    // An uncertain response is not a failed payment: recover this ID without recreating payment.
     Ok(())
 }
 

@@ -3,9 +3,11 @@ use crate::protocol::{InvisiProtocol, ProtocolContract};
 use crate::rpc::{self, decimal, Error, HttpTransport, JsonRpc, Result, RpcTransport};
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use alloy_sol_types::{SolCall, SolInterface, SolValue};
+use invisi_sdk_core::provenance::{provenance_intent_hash, ProofSidecar};
 use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+pub const REQUEST_HASH_FORMAT: &str = "invisi-broadcaster-provenance-intent-v1";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Trust {
@@ -24,10 +26,14 @@ pub struct Quote {
     pub request_hash: B256,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SignedQuote {
     pub quote: Quote,
     pub signature: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance_policy_id: Option<B256>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_hash_format: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Intent {
@@ -145,7 +151,33 @@ pub fn quote_digest(quote: &Quote, trust: &Trust) -> Result<B256> {
     Ok(keccak256(message))
 }
 pub fn verify_quote(signed: &SignedQuote, trust: &Trust, data: &[u8], now: u64) -> Result<()> {
-    verify_quote_with_hash(signed, trust, data, now, request_hash(data)?)
+    verify_quote_for_policy(signed, trust, data, now, None)
+}
+pub fn verify_quote_for_policy(
+    signed: &SignedQuote,
+    trust: &Trust,
+    data: &[u8],
+    now: u64,
+    policy: Option<B256>,
+) -> Result<()> {
+    let base = request_hash(data)?;
+    let hash = match policy {
+        Some(policy)
+            if policy != B256::ZERO
+                && signed.provenance_policy_id == Some(policy)
+                && signed.request_hash_format.as_deref() == Some(REQUEST_HASH_FORMAT) =>
+        {
+            B256::from(provenance_intent_hash(
+                base.0,
+                U256::from_be_bytes(policy.0),
+            ))
+        }
+        None if signed.provenance_policy_id.is_none() && signed.request_hash_format.is_none() => {
+            base
+        }
+        _ => return Err(Error::Invalid("broadcaster provenance policy mismatch")),
+    };
+    verify_quote_with_hash(signed, trust, data, now, hash)
 }
 pub(crate) fn verify_quote_with_hash(
     signed: &SignedQuote,
@@ -228,6 +260,16 @@ pub struct VerifiedQuote {
     trust: Trust,
 }
 impl VerifiedQuote {
+    pub fn authenticate(
+        signed: SignedQuote,
+        trust: Trust,
+        data: &[u8],
+        now: u64,
+        policy: Option<B256>,
+    ) -> Result<Self> {
+        verify_quote_for_policy(&signed, &trust, data, now, policy)?;
+        Ok(Self { signed, trust })
+    }
     pub fn signed(&self) -> &SignedQuote {
         &self.signed
     }
@@ -262,6 +304,7 @@ pub struct Status {
 pub struct BroadcasterClient<T: RpcTransport> {
     configuration: Configuration,
     rpc: JsonRpc<T>,
+    required_policy: Option<B256>,
 }
 impl BroadcasterClient<HttpTransport> {
     pub fn connect(configuration: Configuration) -> Result<Self> {
@@ -276,7 +319,18 @@ impl<T: RpcTransport> BroadcasterClient<T> {
         Ok(Self {
             configuration,
             rpc: JsonRpc::new(transport),
+            required_policy: None,
         })
+    }
+    pub fn with_provenance_policy(mut self, policy: B256) -> Result<Self> {
+        if policy == B256::ZERO {
+            return Err(Error::Invalid("nonzero provenance policy required"));
+        }
+        self.required_policy = Some(policy);
+        Ok(self)
+    }
+    pub fn required_policy(&self) -> Option<B256> {
+        self.required_policy
     }
     pub fn configuration(&self) -> &Configuration {
         &self.configuration
@@ -312,10 +366,28 @@ impl<T: RpcTransport> BroadcasterClient<T> {
         protocol: Address,
         now: u64,
     ) -> Result<VerifiedQuote> {
+        self.quote_with_sidecars(data, chain_id, protocol, now, &[])
+    }
+    pub fn quote_with_sidecars(
+        &self,
+        data: &[u8],
+        chain_id: u64,
+        protocol: Address,
+        now: u64,
+        sidecars: &[ProofSidecar],
+    ) -> Result<VerifiedQuote> {
+        if self.required_policy.is_none() && !sidecars.is_empty() {
+            return Err(Error::Invalid("unexpected proof sidecars"));
+        }
         decode_intent(data)?;
+        let wire = sidecars
+            .iter()
+            .map(invisi_sdk_core::provenance::proof_sidecar_to_wire)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|_| Error::Invalid("invalid proof sidecar"))?;
         let signed: SignedQuote = serde_json::from_value(self.rpc.call(
             "broadcaster_getQuote",
-            json!([{"data":format!("0x{}",hex::encode(data))}]),
+            json!([{"data":format!("0x{}",hex::encode(data)), "proofSidecars":wire}]),
         )?)
         .map_err(|_| Error::Invalid("invalid signed broadcaster quote"))?;
         let trust = Trust {
@@ -323,7 +395,7 @@ impl<T: RpcTransport> BroadcasterClient<T> {
             protocol,
             signer: self.configuration.quote_signer,
         };
-        verify_quote(&signed, &trust, data, now)?;
+        verify_quote_for_policy(&signed, &trust, data, now, self.required_policy)?;
         if signed.quote.fee_recipient != self.configuration.fee_recipient {
             return Err(Error::Invalid("unregistered quote fee recipient"));
         }
@@ -335,14 +407,31 @@ impl<T: RpcTransport> BroadcasterClient<T> {
         verified: &VerifiedQuote,
         idempotency_key: &str,
     ) -> Result<Status> {
+        self.submit_with_sidecars(data, verified, idempotency_key, &[])
+    }
+    pub fn submit_with_sidecars(
+        &self,
+        data: &[u8],
+        verified: &VerifiedQuote,
+        idempotency_key: &str,
+        sidecars: &[ProofSidecar],
+    ) -> Result<Status> {
         validate_id(idempotency_key)?;
+        if self.required_policy.is_none() && !sidecars.is_empty() {
+            return Err(Error::Invalid("unexpected proof sidecars"));
+        }
+        let wire = sidecars
+            .iter()
+            .map(invisi_sdk_core::provenance::proof_sidecar_to_wire)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|_| Error::Invalid("invalid proof sidecar"))?;
         let mut trust = verified.trust.clone();
         trust.signer = self.configuration.quote_signer;
-        verify_quote(&verified.signed, &trust, data, 0)?;
+        verify_quote_for_policy(&verified.signed, &trust, data, 0, self.required_policy)?;
         if verified.signed.quote.fee_recipient != self.configuration.fee_recipient {
             return Err(Error::Invalid("unregistered quote fee recipient"));
         }
-        let status:Status=serde_json::from_value(self.rpc.call("broadcaster_submitTransaction",json!([{"data":format!("0x{}",hex::encode(data)),"quote":verified.signed.quote,"signature":verified.signed.signature,"idempotencyKey":idempotency_key}]))?).map_err(|_|Error::Invalid("invalid broadcaster status"))?;
+        let status:Status=serde_json::from_value(self.rpc.call("broadcaster_submitTransaction",json!([{"data":format!("0x{}",hex::encode(data)),"quote":verified.signed.quote,"signature":verified.signed.signature,"idempotencyKey":idempotency_key,"proofSidecars":wire}]))?).map_err(|_|Error::Invalid("invalid broadcaster status"))?;
         check_status(status, idempotency_key)
     }
     pub fn status(&self, id: &str) -> Result<Status> {
@@ -367,5 +456,3 @@ fn check_status(status: Status, id: &str) -> Result<Status> {
     }
     Ok(status)
 }
-
-pub mod provenance;

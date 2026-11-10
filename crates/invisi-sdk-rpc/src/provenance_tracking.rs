@@ -3,14 +3,14 @@ use invisi_sdk_core::provenance::parse_integer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 pub const STALE_TRACKING: &str = "TRACKING_STALE_GENERATION";
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TrackingMatch {
     pub tx_hash: String,
     pub block_hash: String,
     pub operation_index: String,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Tracking {
     pub id: String,

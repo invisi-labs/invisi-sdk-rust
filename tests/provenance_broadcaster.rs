@@ -32,6 +32,7 @@ fn provenance_quote_requires_bound_configured_policy() {
         signature: format!("0x{}", hex::encode(bytes)),
         provenance_policy_id: Some(policy),
         request_hash_format: Some(REQUEST_HASH_FORMAT.into()),
+        provenance_tracking: None,
     };
     verify_quote_for_policy(&s, &trust, &data, 0, Some(policy)).unwrap();
     assert!(verify_quote_for_policy(&s, &trust, &data, 0, Some(B256::repeat_byte(0x78))).is_err());
@@ -40,7 +41,8 @@ fn provenance_quote_requires_bound_configured_policy() {
             quote,
             signature: s.signature.clone(),
             provenance_policy_id: None,
-            request_hash_format: None
+            request_hash_format: None,
+            provenance_tracking: None,
         },
         &trust,
         &data,
@@ -51,4 +53,34 @@ fn provenance_quote_requires_bound_configured_policy() {
     assert!(verify_quote(&s, &trust, &data, 0).is_err());
     s.provenance_policy_id = None;
     assert!(verify_quote_for_policy(&s, &trust, &data, 0, Some(policy)).is_err());
+}
+
+#[test]
+fn broadcaster_status_lookup_only_treats_current_unknown_request_code_as_missing() {
+    struct ErrorTransport(i64);
+    impl invisi_sdk::rpc::RpcTransport for ErrorTransport {
+        fn send(&self, request: &serde_json::Value) -> invisi_sdk::rpc::Result<serde_json::Value> {
+            assert_eq!(request["method"], "broadcaster_getTransactionStatus");
+            Ok(
+                serde_json::json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":self.0,"message":"Unknown request"}}),
+            )
+        }
+    }
+    for code in [-32001, -32000] {
+        let client = invisi_sdk::broadcaster::BroadcasterClient::new(
+            invisi_sdk::broadcaster::Configuration {
+                endpoint: "https://relay.example".into(),
+                quote_signer: Address::repeat_byte(1),
+                fee_recipient: Address::repeat_byte(2),
+            },
+            ErrorTransport(code),
+        )
+        .unwrap();
+        let result = client.lookup_status("stable-id");
+        if code == -32001 {
+            assert!(result.unwrap().is_none());
+        } else {
+            assert!(result.is_err());
+        }
+    }
 }

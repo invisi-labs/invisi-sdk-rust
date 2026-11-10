@@ -134,6 +134,9 @@ pub struct PreparedBroadcasterState {
     pub tracking: Option<Tracking>,
 }
 pub trait PreparedBroadcaster: Send + Sync {
+    fn lookup_status(&self, _id: &str) -> Result<Option<RelayStatus>> {
+        Err("broadcaster status lookup capability required".into())
+    }
     fn configuration(&self) -> Configuration;
     fn required_policy(&self) -> Option<B256>;
     fn fee(&self, token: Address, data: Option<&[u8]>) -> Result<RelayFee>;
@@ -154,6 +157,9 @@ pub trait PreparedBroadcaster: Send + Sync {
     ) -> Result<RelayStatus>;
 }
 impl<T: RpcTransport + Send + Sync> PreparedBroadcaster for BroadcasterClient<T> {
+    fn lookup_status(&self, id: &str) -> Result<Option<RelayStatus>> {
+        BroadcasterClient::lookup_status(self, id).map_err(|e| e.to_string())
+    }
     fn configuration(&self) -> Configuration {
         BroadcasterClient::configuration(self).clone()
     }
@@ -193,7 +199,7 @@ impl Invisi {
     }
 }
 impl PreparedProvenance {
-    fn validate(&self, context: ProtocolContext, policy: Option<B256>) -> Result<()> {
+    pub(crate) fn validate(&self, context: ProtocolContext, policy: Option<B256>) -> Result<()> {
         let t = &self.client.trust;
         if t.scope.chain_id != context.chain_id
             || t.scope.protocol_address != context.protocol_address
@@ -297,7 +303,7 @@ impl PreparedTransaction {
         let mut candidate = final_candidate.ok_or("broadcaster fee convergence budget exceeded")?;
         let data = candidate.broadcaster_intent()?.data;
         let mut sidecars = Vec::new();
-        let mut tracking = None;
+        let mut expected_digest = None;
         if policy.is_some() && !candidate.inputs().is_empty() {
             let cap = candidate
                 .provenance
@@ -305,16 +311,7 @@ impl PreparedTransaction {
                 .ok_or("provenance capability required")?;
             let (sidecar, digest) = candidate.build_source_sidecar(chain.as_ref(), cap)?;
             sidecars.push(sidecar);
-            let evaluated = cap
-                .client
-                .evaluate_transaction(json!(hex(&data)), &sidecars)?;
-            tracking = Some(preflight_tracking(&evaluated, "0", &digest)?);
-        } else if let Some(cap) = candidate.provenance.as_ref().filter(|_| policy.is_some()) {
-            cap.validate(candidate.context, policy)?;
-            let evaluated = cap.client.evaluate_transaction(json!(hex(&data)), &[])?;
-            if evaluated["broadcastDecision"] != "allow" {
-                return Err("source preflight denied".into());
-            }
+            expected_digest = Some(digest);
         }
         let block = chain.snapshot()?;
         let quote = relay.quote(
@@ -336,6 +333,22 @@ impl PreparedTransaction {
             policy,
         )
         .map_err(|e| e.to_string())?;
+        let tracking = if let Some(digest) = expected_digest {
+            let cap = candidate
+                .provenance
+                .as_ref()
+                .ok_or("provenance capability required")?;
+            Some(trusted_quote_tracking(
+                quote.signed().provenance_tracking.clone(),
+                &digest,
+                cap.client.as_ref(),
+            )?)
+        } else {
+            if quote.signed().provenance_tracking.is_some() {
+                return Err("unexpected source tracking".into());
+            }
+            None
+        };
         chain.canonical(&block)?;
         candidate.broadcaster = Some(PreparedBroadcasterState {
             endpoint: config.endpoint,
@@ -586,6 +599,20 @@ impl PreparedTransaction {
         ))?;
         Ok((sidecar, hex(&digest)))
     }
+}
+fn trusted_quote_tracking(
+    received: Option<Tracking>,
+    digest: &str,
+    client: &ProvenanceClient,
+) -> Result<Tracking> {
+    let received = received.ok_or("Broadcaster source tracking required")?;
+    let ack = json!({"broadcastDecision":"allow","operationDigest":digest,"tracking":received});
+    let received = preflight_tracking(&ack, "0", digest)?;
+    let current = client.get_tracking(&received.id)?;
+    let current =
+        invisi_sdk_rpc::provenance_tracking::tracking_from_result(&current, Some(&received.id))?;
+    let checked = json!({"broadcastDecision":"allow","operationDigest":digest,"tracking":current});
+    preflight_tracking(&checked, "0", digest)
 }
 fn source_word(raw: &str) -> Result<U256> {
     source::parse_integer(raw, 256).map_err(|e| e.to_string())
@@ -904,6 +931,7 @@ mod tests {
                     signature: hex(&bytes),
                     provenance_policy_id: None,
                     request_hash_format: None,
+                    provenance_tracking: None,
                 },
                 trust,
                 data,
@@ -920,6 +948,93 @@ mod tests {
             _: &[ProofSidecar],
         ) -> Result<RelayStatus> {
             panic!("no submit")
+        }
+    }
+    #[test]
+    fn quote_tracking_is_independently_read_with_pinned_source_identity() {
+        use std::io::{Read, Write};
+        for wrong_scope in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let digest = format!("0x{}", "11".repeat(32));
+            let tracking:Tracking=serde_json::from_value(json!({"id":"ab".repeat(24),"status":"pending_confirmation","expiresAt":"10","operationDigest":digest})).unwrap();
+            let response_tracking = tracking.clone();
+            let server = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                let mut bytes = Vec::new();
+                let mut buf = [0u8; 4096];
+                let request = loop {
+                    let n = socket.read(&mut buf).unwrap();
+                    assert!(n > 0);
+                    bytes.extend_from_slice(&buf[..n]);
+                    if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&bytes[..end]).to_lowercase();
+                        let len: usize = headers
+                            .lines()
+                            .find_map(|l| {
+                                l.strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse().unwrap())
+                            })
+                            .unwrap();
+                        if bytes.len() >= end + 4 + len {
+                            break serde_json::from_slice::<Value>(&bytes[end + 4..end + 4 + len])
+                                .unwrap();
+                        }
+                    }
+                };
+                assert_eq!(request["method"], "provenance_getTracking");
+                let result = json!({"scope":{"chainId":if wrong_scope{"2"}else{"1"},"protocolAddress":"0x01","policyId":"0x02"},"chainGeneration":"1","providerId":"0x03","signingKeyId":"0x04","manifestSha256":"pin","tracking":response_tracking});
+                let body = serde_json::to_vec(
+                    &json!({"jsonrpc":"2.0","id":request["id"],"result":result}),
+                )
+                .unwrap();
+                write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).unwrap();
+                socket.write_all(&body).unwrap();
+            });
+            let trust = source::TrustContext {
+                scope: source::Scope {
+                    chain_id: 1,
+                    protocol_address: U256::from(1),
+                    policy_id: U256::from(2),
+                },
+                chain_generation: 1,
+                provider_id: U256::from(3),
+                signing_keys: BTreeMap::from([(U256::from(4), [1; 32])]),
+                signing_key_validity: BTreeMap::new(),
+                manifest_sha256: "pin".into(),
+            };
+            let client = ProvenanceClient::new(&endpoint, trust).unwrap();
+            let result = trusted_quote_tracking(Some(tracking.clone()), &digest, &client);
+            if wrong_scope {
+                assert!(result.unwrap_err().contains("deployment mismatch"));
+            } else {
+                assert_eq!(result.unwrap(), tracking);
+            }
+            server.join().unwrap();
+        }
+    }
+    #[test]
+    fn missing_or_terminal_quote_tracking_fails_before_source_read() {
+        let trust = source::TrustContext {
+            scope: source::Scope {
+                chain_id: 1,
+                protocol_address: U256::from(1),
+                policy_id: U256::from(2),
+            },
+            chain_generation: 1,
+            provider_id: U256::from(3),
+            signing_keys: BTreeMap::new(),
+            signing_key_validity: BTreeMap::new(),
+            manifest_sha256: "pin".into(),
+        };
+        let client = ProvenanceClient::new("http://127.0.0.1:1", trust).unwrap();
+        let digest = format!("0x{}", "11".repeat(32));
+        assert!(trusted_quote_tracking(None, &digest, &client)
+            .unwrap_err()
+            .contains("tracking required"));
+        for status in ["expired", "superseded", "stale_generation", "unknown"] {
+            let tracking:Tracking=serde_json::from_value(json!({"id":"ab".repeat(24),"status":status,"expiresAt":"10","operationDigest":digest})).unwrap();
+            assert!(trusted_quote_tracking(Some(tracking), &digest, &client).is_err());
         }
     }
     struct MissingCapabilityRelay;

@@ -1854,6 +1854,7 @@ dependencies = [
  "invisi-sdk-prover",
  "invisi-sdk-rpc",
  "invisi-sdk-runtime",
+ "k256",
  "rand 0.8.8",
  "rusqlite",
  "serde",

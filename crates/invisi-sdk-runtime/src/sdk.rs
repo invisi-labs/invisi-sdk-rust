@@ -3152,3 +3152,5 @@ mod public_funding_tests {
 
 pub mod prepared_broadcaster;
 pub use prepared_broadcaster::*;
+
+mod prepared_credit_broadcaster;

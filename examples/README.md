@@ -10,7 +10,7 @@ cargo run -p invisi-sdk-examples --bin transfer -- --execute
 cargo run -p invisi-sdk-examples --features sqlite --bin restore-session -- --execute
 ```
 
-`note-output` constructs an encrypted Note offline using public receiving material only. Every other binary returns before reading environment configuration, opening files or databases, contacting RPC, or accessing keys unless `--execute` is present. Without relay configuration, the transaction examples export **unsigned** EVM transactions for the host to review, sign and submit. Normal Note transfer/withdrawal and Credit revocation can instead use a registered Broadcaster; `--submit` explicitly sends only after the public relay context is saved. There is no standalone Provenance walkthrough.
+`note-output` constructs an encrypted Note offline using public receiving material only. Every other binary returns before reading environment configuration, opening files or databases, contacting RPC, or accessing keys unless `--execute` is present. Without relay configuration, the transaction examples export **unsigned** EVM transactions for the host to review, sign and submit. Normal Note transfer/withdrawal and all four Credit operations can instead use a registered Broadcaster; `--submit` explicitly sends only after the public relay context is saved. There is no standalone Provenance walkthrough.
 
 ## Files
 
@@ -165,7 +165,7 @@ Run the other binaries without `--execute` to inspect their guard behavior witho
 
 ## Provenance
 
-Normal [`03-note/transfer.rs`](03-note/transfer.rs) and [`withdraw.rs`](03-note/withdraw.rs) install Provenance through optional `SOURCE_CONFIG`, then call `with_broadcaster` before wallet approval/main proving. Their flat call order stays visible; the SDK handles source roots, bounded leaf replay, private witness/proof and preflight tracking internally. A changed fee plan obtains fresh source evidence; failed fee/quote/cancellation leaves the original preparation usable.
+Normal [`03-note/transfer.rs`](03-note/transfer.rs) and [`withdraw.rs`](03-note/withdraw.rs) install Provenance through optional `SOURCE_CONFIG`, then call `with_broadcaster` before wallet approval/main proving. Their flat call order stays visible; the SDK handles source roots, bounded leaf replay and private witness/proof internally. Broadcaster performs the source evaluation and returns `provenanceTracking` in the quote; the SDK binds it to the exact digest and independently reads the same task through its pinned Source client. No SDK evaluate call is made in this relay path. A changed fee plan obtains fresh source evidence; failed fee/quote/cancellation leaves the original preparation usable.
 
 Copy `source.example.json` and `broadcaster.example.json` outside the checkout and replace public pins/paths from trusted operator deployment configuration. `SOURCE_CONFIG` points to the source configuration, including the reviewed manifest hash, local asset root, pinned provider/signing key and local Noir/BB executable paths. It contains no account secret or opening. Synchronize source assets with `python3 scripts/sync-provenance.py ../invisi-protocol`. Existing `PROVER_ASSETS`, `BB_BINARY` and `NOIR_EXECUTOR` configure main proving separately. `BROADCASTER_CONFIG` points to the registered HTTPS endpoint, quote signer and fee recipient; optional `BROADCASTER_POLICY_ID` explicitly pins its required policy. For Note examples the source configuration supplies that policy if the explicit setting is absent; inconsistent settings fail closed.
 
@@ -173,7 +173,7 @@ With relay configuration, set stable `BROADCAST_ID` and a new `BROADCAST_RECORD`
 
 After the actual transaction is mined, run the same Note binary with `--execute --confirm`, `TRANSACTION_HASH` and the same record/configuration. This branch skips discovery/preparation/proving, verifies primary deployment/calldata/receipt/canonical block, waits for the retained automatic tracking ID and checks exact operation recognition. Unknown, expired or stale tracking cannot silently submit a payment or source proof. Reorgs require authenticated reconciliation and explicit local reproof. A receiver still independently checks signed roots and output membership.
 
-[`04-credit/revoke.rs`](04-credit/revoke.rs) demonstrates the existing lowlevel Credit relay capability with `BROADCASTER_CONFIG` and optional required policy: converge the fee before host EVM consent, verify the quote and explicitly submit after saving the public request. Credit lifecycle calls do not need a private Note source proof. The other Credit examples retain their ordinary unsigned host flow; no new Credit highlevel orchestration API is implied. Aggregate Broadcaster submission is explicitly rejected.
+All four existing `04-credit` files use highlevel `with_broadcaster` before native approval/main proving (or before EVM revocation consent). They call `submit_broadcaster` only after retaining the final public context. Credit lifecycle calls do not need a private Note source proof. Draw keeps gross payer/grant accounting while rebuilding and encrypting the recipient Note for gross debit minus the final relay fee. `getFee` is the authoritative token-support check; errors stop without consent/proving or an automatic direct-path fallback. Aggregate Broadcaster submission is explicitly rejected.
 
 ```sh
 cargo run -p invisi-sdk-examples --bin transfer -- --execute --submit
@@ -182,3 +182,7 @@ cargo run -p invisi-sdk-examples --bin revoke-credit -- --execute --submit
 ```
 
 The reusable `prover::NativeSourceProver` checks its separate manifest/artifact/VK pins, runs local Noir and BB with bounded execution, compares all public inputs and independently verifies the returned proof. Its opt-in real local test is `cargo test -p invisi-sdk-prover real_local_source_proof_is_independently_verified -- --ignored`, with `INVISI_PROTOCOL_ROOT`, `PROVENANCE_ASSETS`, `NOIR_EXECUTOR` and `BB_BINARY` pointing to the authenticated local release/tools.
+
+Direct protocol send and off-chain source proof submission remain independent SDK steps. With no relay configuration, the examples retain their ordinary unsigned host flow; Source availability/recognition is not a prerequisite for preparing or exporting that direct transaction. The App may independently evaluate source evidence before sending or submit it after primary confirmation.
+
+Managed `Operation::with_broadcaster` supports all four Credit operations. The encrypted journal stores the first broadcaster ID/call/context before sending. Same-ID retries query the relay journal first, including after expiry/spend or Source downtime; only an explicit unknown request permits a freshly validated same-body attempt. A different ID is rejected and lookup outages never automatically resend. Wallet completion still requires canonical primary reconciliation.

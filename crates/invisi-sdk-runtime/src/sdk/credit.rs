@@ -67,6 +67,7 @@ pub(crate) enum CreditPlan {
         signature: Vec<u8>,
     },
 }
+#[derive(Clone)]
 pub struct PreparedCredit {
     pub(crate) wallet: Wallet,
     pub(crate) context: ProtocolContext,
@@ -77,6 +78,16 @@ pub struct PreparedCredit {
     pub(crate) phase: Phase,
     pub(crate) authorization: Option<WalletAuthorization>,
     pub(crate) proof: Option<ProofBundle>,
+    pub(crate) provenance: Option<Arc<PreparedProvenance>>,
+    pub(crate) broadcaster: Option<PreparedBroadcasterState>,
+    pub(crate) reprice: Option<CreditRepriceTemplate>,
+}
+#[derive(Clone)]
+pub(crate) enum CreditRepriceTemplate {
+    Create(CreditDeliveryState, u64),
+    Update(CreditInput, crate::credit::CreditUpdateChanges, u64),
+    Draw(Vec<CreditInput>, Wallet, u64, Vec<u8>),
+    Revoke(Address, u64, u16, u64),
 }
 impl std::fmt::Debug for PreparedCredit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -144,6 +155,7 @@ impl Invisi {
         deadline: u64,
         fee: Fee,
     ) -> Result<PreparedCredit> {
+        let template = CreditRepriceTemplate::Create(state.clone(), deadline);
         let anchor = self.chain.snapshot()?;
         let context = self.chain.context();
         fee.validate()?;
@@ -191,6 +203,9 @@ impl Invisi {
             phase: Phase::Prepared,
             authorization: None,
             proof: None,
+            provenance: self.provenance.clone(),
+            broadcaster: None,
+            reprice: Some(template),
         })
     }
     pub fn prepare_update_credit(
@@ -201,6 +216,7 @@ impl Invisi {
         deadline: u64,
         fee: Fee,
     ) -> Result<PreparedCredit> {
+        let template = CreditRepriceTemplate::Update(input.clone(), changes.clone(), deadline);
         let anchor = self.chain.snapshot()?;
         let context = self.chain.context();
         fee.validate()?;
@@ -249,6 +265,9 @@ impl Invisi {
             phase: Phase::Prepared,
             authorization: None,
             proof: None,
+            provenance: self.provenance.clone(),
+            broadcaster: None,
+            reprice: Some(template),
         })
     }
     pub fn prepare_draw_credit(
@@ -260,6 +279,12 @@ impl Invisi {
         fee: Fee,
         payload: Vec<u8>,
     ) -> Result<PreparedCredit> {
+        let template = CreditRepriceTemplate::Draw(
+            inputs.clone(),
+            recipient.clone(),
+            deadline,
+            payload.clone(),
+        );
         let anchor = self.chain.snapshot()?;
         let context = self.chain.context();
         fee.validate()?;
@@ -408,6 +433,9 @@ impl Invisi {
             phase: Phase::Prepared,
             authorization: None,
             proof: None,
+            provenance: self.provenance.clone(),
+            broadcaster: None,
+            reprice: Some(template),
         })
     }
     pub fn prepare_revoke_credit(
@@ -419,6 +447,7 @@ impl Invisi {
         deadline: u64,
         fee: Fee,
     ) -> Result<PreparedCredit> {
+        let template = CreditRepriceTemplate::Revoke(token, shard, slot, deadline);
         let anchor = self.chain.snapshot()?;
         let context = self.chain.context();
         fee.validate()?;
@@ -452,6 +481,9 @@ impl Invisi {
             phase: Phase::Prepared,
             authorization: None,
             proof: None,
+            provenance: self.provenance.clone(),
+            broadcaster: None,
+            reprice: Some(template),
         })
     }
 }
@@ -1103,6 +1135,356 @@ mod lifecycle_tests {
     use super::*;
     use k256::elliptic_curve::sec1::ToEncodedPoint;
     use std::sync::Mutex;
+    #[test]
+    fn credit_highlevel_relay_preserves_original_on_failure() {
+        let chain = chain();
+        let invisi = Invisi::new(chain.clone());
+        let prepared = invisi
+            .prepare_create_credit(
+                &wallet(1),
+                initial(chain.as_ref()),
+                2000000100,
+                Fee::default(),
+            )
+            .unwrap();
+        assert!(prepared
+            .with_broadcaster(
+                chain,
+                std::sync::Arc::new(RejectedRelay),
+                &BroadcasterOptions::default()
+            )
+            .is_err());
+        assert_eq!(prepared.phase(), Phase::Prepared);
+        assert!(prepared.broadcaster_state().is_none());
+    }
+    struct RejectedRelay;
+    impl PreparedBroadcaster for RejectedRelay {
+        fn configuration(&self) -> invisi_sdk_rpc::broadcaster::Configuration {
+            invisi_sdk_rpc::broadcaster::Configuration {
+                endpoint: "https://relay.example".into(),
+                quote_signer: Address::repeat_byte(3),
+                fee_recipient: Address::repeat_byte(4),
+            }
+        }
+        fn required_policy(&self) -> Option<B256> {
+            None
+        }
+        fn fee(&self, _: Address, _: Option<&[u8]>) -> Result<invisi_sdk_rpc::broadcaster::Fee> {
+            Err("unsupported token".into())
+        }
+        fn quote(
+            &self,
+            _: &[u8],
+            _: u64,
+            _: Address,
+            _: u64,
+            _: &[crate::provenance::ProofSidecar],
+        ) -> Result<invisi_sdk_rpc::broadcaster::VerifiedQuote> {
+            panic!("must not quote unsupported token")
+        }
+        fn submit(
+            &self,
+            _: &[u8],
+            _: &invisi_sdk_rpc::broadcaster::VerifiedQuote,
+            _: &str,
+            _: &[crate::provenance::ProofSidecar],
+        ) -> Result<invisi_sdk_rpc::broadcaster::Status> {
+            panic!("no submit")
+        }
+    }
+    #[test]
+    fn credit_relay_converges_before_consent_and_rebuilds_draw_note() {
+        let chain = chain();
+        let invisi = Invisi::new(chain.clone());
+        let owner = wallet(1);
+        let spender = wallet(2);
+        let recipient = wallet(91);
+        let state = initial(chain.as_ref());
+        let member = |state: CreditDeliveryState| CreditInput {
+            root: merkle_root(state.note.commitment().unwrap(), 0, &[U256::ZERO; 16]).unwrap(),
+            delivery: state,
+            tree_id: 1,
+            leaf_index: 0,
+            path: [U256::ZERO; 16],
+            debit: U256::from(7),
+        };
+        let plans = [
+            invisi
+                .prepare_create_credit(&owner, state.clone(), 2000000100, Fee::default())
+                .unwrap(),
+            invisi
+                .prepare_update_credit(
+                    &owner,
+                    member(state.clone()),
+                    crate::credit::CreditUpdateChanges {
+                        increase_available_credit: U256::from(10),
+                        ..Default::default()
+                    },
+                    2000000100,
+                    Fee::default(),
+                )
+                .unwrap(),
+            invisi
+                .prepare_draw_credit(
+                    &spender,
+                    vec![member(state)],
+                    &recipient,
+                    2000000100,
+                    Fee::default(),
+                    b"local-payload".to_vec(),
+                )
+                .unwrap(),
+        ];
+        for original in plans {
+            let relay = Arc::new(CreditRelay {
+                fees: std::sync::atomic::AtomicUsize::new(0),
+                submits: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let old = original.export_wallet_request("old-consent").unwrap();
+            let signing_secret = secret(if matches!(original.plan, CreditPlan::Draw { .. }) {
+                2
+            } else {
+                1
+            });
+            let response: WalletResponse = serde_json::from_value(
+                crate::wallet::execute(&signing_secret, &old.as_value()).unwrap(),
+            )
+            .unwrap();
+            let before_quote = journal::ManagedPrepared::Credit(original.clone())
+                .snapshot()
+                .unwrap();
+            let restored = before_quote.restore(original.wallet(), None).unwrap();
+            let restarted = match restored {
+                journal::ManagedPrepared::Credit(v) => v,
+                _ => panic!("Credit"),
+            };
+            assert!(restarted.reprice.is_some());
+            let prepared = restarted
+                .with_broadcaster(chain.clone(), relay.clone(), &BroadcasterOptions::default())
+                .unwrap();
+            assert!(original.broadcaster_state().is_none());
+            assert_eq!(relay.fees.load(std::sync::atomic::Ordering::SeqCst), 3);
+            assert!(prepared
+                .clone()
+                .with_wallet_response(&old, &response)
+                .is_err());
+            let saved = prepared.broadcaster_state().unwrap();
+            assert!(saved.sidecars.is_empty());
+            assert!(saved.tracking.is_none());
+            assert_eq!(saved.quote.quote.fee_amount, "2");
+            if let (
+                CreditPlan::Draw {
+                    params: old_params,
+                    output: old_output,
+                    successors: old_successors,
+                    ..
+                },
+                CreditPlan::Draw {
+                    params,
+                    output,
+                    successors,
+                    ..
+                },
+            ) = (&original.plan, &prepared.plan)
+            {
+                assert_eq!(params.totalAmount, old_params.totalAmount);
+                assert_eq!(
+                    params.payers.iter().map(|p| p.amount).collect::<Vec<_>>(),
+                    old_params
+                        .payers
+                        .iter()
+                        .map(|p| p.amount)
+                        .collect::<Vec<_>>()
+                );
+                assert_eq!(output.amount(), U256::from(5));
+                assert_ne!(output.commitment(), old_output.commitment());
+                assert_ne!(
+                    output.delivery().ciphertext,
+                    old_output.delivery().ciphertext
+                );
+                assert_eq!(
+                    successors[0].note.available_credit,
+                    old_successors[0].note.available_credit
+                );
+                let context = DeliveryContext {
+                    context: chain.context,
+                    token_address: address_word(prepared.token),
+                    output_commitment: U256::from_be_bytes(output.commitment().0),
+                };
+                let key = crate::wallet::viewing_key(&secret(91)).unwrap();
+                let decoded = crate::delivery::decrypt_note(
+                    &*key,
+                    &output.delivery().ciphertext,
+                    &context,
+                    address_word(recipient.owner),
+                )
+                .unwrap();
+                assert_eq!(decoded.amount, U256::from(5));
+                assert_eq!(decoded.payload, b"local-payload");
+            }
+            let snapshot = journal::ManagedPrepared::Credit(prepared.clone())
+                .snapshot()
+                .unwrap();
+            let bytes = serde_json::to_vec(&snapshot).unwrap();
+            let snapshot: journal::PreparedSnapshot = serde_json::from_slice(&bytes).unwrap();
+            let restored = snapshot.restore(prepared.wallet(), None).unwrap();
+            match restored {
+                journal::ManagedPrepared::Credit(v) => {
+                    assert_eq!(
+                        v.broadcaster_state().unwrap().intent_hash,
+                        saved.intent_hash
+                    );
+                    assert!(v.reprice.is_none());
+                }
+                _ => panic!("Credit"),
+            }
+            let request = prepared.export_wallet_request("final-consent").unwrap();
+            let response: WalletResponse = serde_json::from_value(
+                crate::wallet::execute(&signing_secret, &request.as_value()).unwrap(),
+            )
+            .unwrap();
+            // Synthetic main proof bytes exercise orchestration only; no cryptographic proof claim.
+            let proved = prepared
+                .with_wallet_response(&request, &response)
+                .unwrap()
+                .prove(&SyntheticCreditBackend)
+                .unwrap();
+            let snapshot = journal::ManagedPrepared::Credit(proved.clone())
+                .snapshot()
+                .unwrap();
+            let restored = snapshot
+                .restore(proved.wallet(), Some(&SyntheticCreditBackend))
+                .unwrap();
+            match restored {
+                journal::ManagedPrepared::Credit(v) => {
+                    v.submit_broadcaster(chain.as_ref(), relay.as_ref(), "credit-restart")
+                        .unwrap();
+                }
+                _ => panic!("Credit"),
+            }
+            assert_eq!(relay.submits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+    }
+    struct SyntheticCreditBackend;
+    impl Prover for SyntheticCreditBackend {
+        fn prove(&self, r: &prover::ProvingRequest) -> Result<ProofBundle> {
+            let s = &r.statement;
+            let proof = vec![0; 32];
+            Ok(ProofBundle {
+                format_version: 1,
+                circuit_name: s.circuit_name.clone(),
+                target: s.target.clone(),
+                bb_version: "6.0.0".into(),
+                artifact_sha256: s.artifact_sha256.clone(),
+                vk_sha256: s.vk_sha256.clone(),
+                proof_sha256: prover::sha256(&proof),
+                proof,
+                public_inputs: s.expected_public_inputs.clone(),
+            })
+        }
+        fn verify(&self, _: &ProofBundle, _: &prover::ProofStatement) -> Result<bool> {
+            Ok(true)
+        }
+    }
+    pub(super) struct CreditRelay {
+        pub(super) fees: std::sync::atomic::AtomicUsize,
+        pub(super) submits: std::sync::atomic::AtomicUsize,
+    }
+    impl PreparedBroadcaster for CreditRelay {
+        fn configuration(&self) -> invisi_sdk_rpc::broadcaster::Configuration {
+            let key = k256::ecdsa::SigningKey::from_slice(&secret(7)).unwrap();
+            let public = key.verifying_key().to_encoded_point(false);
+            invisi_sdk_rpc::broadcaster::Configuration {
+                endpoint: "https://relay.example".into(),
+                quote_signer: Address::from_slice(&keccak256(&public.as_bytes()[1..])[12..]),
+                fee_recipient: Address::repeat_byte(4),
+            }
+        }
+        fn required_policy(&self) -> Option<B256> {
+            Some(B256::repeat_byte(7))
+        }
+        fn fee(&self, _: Address, _: Option<&[u8]>) -> Result<invisi_sdk_rpc::broadcaster::Fee> {
+            let n = self.fees.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(invisi_sdk_rpc::broadcaster::Fee {
+                fee_recipient: self.configuration().fee_recipient,
+                fee_amount: if n == 0 { "1" } else { "2" }.into(),
+                max_gas: "100000".into(),
+            })
+        }
+        fn quote(
+            &self,
+            data: &[u8],
+            chain_id: u64,
+            protocol: Address,
+            now: u64,
+            sidecars: &[crate::provenance::ProofSidecar],
+        ) -> Result<invisi_sdk_rpc::broadcaster::VerifiedQuote> {
+            use invisi_sdk_rpc::broadcaster::*;
+            assert!(sidecars.is_empty());
+            let i = decode_intent(data).unwrap();
+            let trust = Trust {
+                chain_id,
+                protocol,
+                signer: self.configuration().quote_signer,
+            };
+            let policy = self.required_policy().unwrap();
+            let quote = Quote {
+                token: i.token,
+                fee_recipient: i.fee_recipient,
+                fee_amount: i.fee_amount.to_string(),
+                deadline: i.deadline.to_string(),
+                max_gas: "100000".into(),
+                request_hash: B256::from(crate::provenance::provenance_intent_hash(
+                    request_hash(data).unwrap().0,
+                    U256::from_be_bytes(policy.0),
+                )),
+            };
+            let (sig, r) = k256::ecdsa::SigningKey::from_slice(&secret(7))
+                .unwrap()
+                .sign_prehash_recoverable(quote_digest(&quote, &trust).unwrap().as_slice())
+                .unwrap();
+            let mut bytes = sig.to_bytes().to_vec();
+            bytes.push(r.to_byte());
+            VerifiedQuote::authenticate(
+                SignedQuote {
+                    quote,
+                    signature: hex(&bytes),
+                    provenance_policy_id: Some(policy),
+                    request_hash_format: Some(REQUEST_HASH_FORMAT.into()),
+                    provenance_tracking: None,
+                },
+                trust,
+                data,
+                now,
+                Some(policy),
+            )
+            .map_err(|e| e.to_string())
+        }
+        fn submit(
+            &self,
+            data: &[u8],
+            quote: &invisi_sdk_rpc::broadcaster::VerifiedQuote,
+            id: &str,
+            sidecars: &[crate::provenance::ProofSidecar],
+        ) -> Result<invisi_sdk_rpc::broadcaster::Status> {
+            assert!(sidecars.is_empty());
+            invisi_sdk_rpc::broadcaster::verify_quote_for_policy(
+                quote.signed(),
+                quote.trust(),
+                data,
+                0,
+                self.required_policy(),
+            )
+            .map_err(|e| e.to_string())?;
+            self.submits
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(invisi_sdk_rpc::broadcaster::Status {
+                id: id.into(),
+                state: invisi_sdk_rpc::broadcaster::StatusState::Pending,
+                transaction_hash: None,
+            })
+        }
+    }
     fn secret(scalar: u8) -> [u8; 32] {
         let mut key = [0u8; 32];
         key[31] = scalar;
@@ -1564,6 +1946,68 @@ mod revocation_tests {
         ) -> Result<(u64, u16)> {
             Ok((1, 1))
         }
+    }
+    #[test]
+    fn highlevel_revocation_freezes_fee_before_evm_consent_and_survives_restore() {
+        let (inner, _, _, _) = super::super::test_support::note_fixture();
+        let chain = Arc::new(Chain(inner));
+        let runtime = Invisi::new(chain.clone());
+        let mut key = [0u8; 32];
+        key[31] = 1;
+        let signing = k256::ecdsa::SigningKey::from_slice(&key).unwrap();
+        let public = signing.verifying_key().to_encoded_point(false);
+        let owner = Wallet::from_owner(Address::from_slice(
+            &keccak256(&public.as_bytes()[1..])[12..],
+        ))
+        .unwrap();
+        let original = runtime
+            .prepare_revoke_credit(
+                &owner,
+                Address::repeat_byte(2),
+                1,
+                0,
+                2000000100,
+                Fee::default(),
+            )
+            .unwrap();
+        let relay = Arc::new(super::lifecycle_tests::CreditRelay {
+            fees: std::sync::atomic::AtomicUsize::new(0),
+            submits: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let prepared = original
+            .with_broadcaster(chain.clone(), relay.clone(), &BroadcasterOptions::default())
+            .unwrap();
+        assert!(original.broadcaster_state().is_none());
+        assert_ne!(
+            original.revocation_digest().unwrap(),
+            prepared.revocation_digest().unwrap()
+        );
+        let sign = |digest: B256| {
+            let (s, r) = signing.sign_prehash_recoverable(digest.as_slice()).unwrap();
+            let mut bytes = s.to_bytes().to_vec();
+            bytes.push(r.to_byte() + 27);
+            bytes
+        };
+        assert!(prepared
+            .clone()
+            .with_revocation_signature(chain.as_ref(), sign(original.revocation_digest().unwrap()))
+            .is_err());
+        let signature = sign(prepared.revocation_digest().unwrap());
+        let approved = prepared
+            .with_revocation_signature(chain.as_ref(), signature)
+            .unwrap();
+        let saved = journal::ManagedPrepared::Credit(approved)
+            .snapshot()
+            .unwrap();
+        let restored = saved.restore(&owner, None).unwrap();
+        match restored {
+            journal::ManagedPrepared::Credit(v) => {
+                v.submit_broadcaster(chain.as_ref(), relay.as_ref(), "revocation-restart")
+                    .unwrap();
+            }
+            _ => panic!("Credit"),
+        }
+        assert_eq!(relay.submits.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
     #[test]
     fn public_revocation_is_owner_direct_or_independently_verified_relay() {

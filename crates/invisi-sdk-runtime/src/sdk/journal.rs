@@ -1,5 +1,5 @@
 //! Durable, whitelisted prepared plans. Native authorization witnesses are never serialized.
-use super::credit::CreditPlan;
+use super::credit::{CreditPlan, CreditRepriceTemplate};
 use super::*;
 use crate::protocol::{IInvisiProtocol as abi, InvisiProtocol as P};
 use crate::sdk;
@@ -130,6 +130,7 @@ pub struct PreparedSnapshot {
     target: String,
     ready: bool,
     broadcaster: Option<PreparedBroadcasterState>,
+    credit_recipient: Option<String>,
 }
 pub enum ManagedPrepared {
     Funds(PreparedTransaction),
@@ -182,6 +183,7 @@ impl ManagedPrepared {
             target: "evm".into(),
             ready: false,
             broadcaster: None,
+            credit_recipient: None,
         };
         Ok(match self {
             Self::Funds(v) => {
@@ -234,6 +236,10 @@ impl ManagedPrepared {
             }
             Self::Credit(v) => {
                 let mut s = empty(v.context, v.token, v.anchor.clone());
+                s.broadcaster = v.broadcaster.clone();
+                if let Some(CreditRepriceTemplate::Draw(_, recipient, _, _)) = &v.reprice {
+                    s.credit_recipient = Some(recipient.address()?);
+                }
                 s.proof = v.proof.clone();
                 s.credit_inputs = v
                     .credit_inputs()
@@ -676,7 +682,8 @@ impl PreparedSnapshot {
                                 .ok_or("saved Credit debit overflow")?;
                         }
                         if c.p.totalAmount != total
-                            || outputs[0].amount() != total
+                            || total <= c.p.feeAmount
+                            || total.checked_sub(c.p.feeAmount) != Some(outputs[0].amount())
                             || outputs[0].commitment() != c.p.noteCommitment
                         {
                             return Err("saved Credit recipient amount mismatch".into());
@@ -709,6 +716,66 @@ impl PreparedSnapshot {
                     ),
                     _ => return Err("unsupported saved operation".into()),
                 };
+                let reprice = if self.broadcaster.is_none() {
+                    match &plan {
+                        CreditPlan::Create { params, created } => {
+                            Some(CreditRepriceTemplate::Create(
+                                created.clone(),
+                                u64::try_from(params.deadline)
+                                    .map_err(|_| "saved Credit deadline overflow")?,
+                            ))
+                        }
+                        CreditPlan::Update {
+                            params,
+                            input,
+                            changes,
+                            ..
+                        } => Some(CreditRepriceTemplate::Update(
+                            input.clone(),
+                            changes.clone(),
+                            u64::try_from(params.deadline)
+                                .map_err(|_| "saved Credit deadline overflow")?,
+                        )),
+                        CreditPlan::Draw {
+                            params,
+                            inputs,
+                            output,
+                            ..
+                        } => {
+                            let recipient = Wallet::from_address(
+                                self.credit_recipient
+                                    .as_deref()
+                                    .ok_or("saved Credit draw public recipient required")?,
+                            )?;
+                            let note = output
+                                .note()
+                                .ok_or("saved Credit draw output opening required")?;
+                            if recipient.receiving_keys().is_none()
+                                || address_word(recipient.owner) != note.owner_address
+                            {
+                                return Err("saved Credit draw recipient mismatch".into());
+                            }
+                            Some(CreditRepriceTemplate::Draw(
+                                inputs.clone(),
+                                recipient,
+                                u64::try_from(params.deadline)
+                                    .map_err(|_| "saved Credit deadline overflow")?,
+                                note.payload.clone(),
+                            ))
+                        }
+                        CreditPlan::Revoke {
+                            token,
+                            shard,
+                            slot,
+                            deadline,
+                            ..
+                        } => Some(CreditRepriceTemplate::Revoke(
+                            *token, *shard, *slot, *deadline,
+                        )),
+                    }
+                } else {
+                    None
+                };
                 ManagedPrepared::Credit(PreparedCredit {
                     wallet: wallet.clone(),
                     context: self.context,
@@ -719,6 +786,9 @@ impl PreparedSnapshot {
                     phase: Phase::Prepared,
                     authorization: None,
                     proof: None,
+                    provenance: None,
+                    broadcaster: self.broadcaster.clone(),
+                    reprice,
                 })
             }
         };
@@ -790,6 +860,9 @@ impl ManagedPrepared {
                 phase: v.phase,
                 authorization: v.authorization.clone(),
                 proof: v.proof.clone(),
+                provenance: v.provenance.clone(),
+                broadcaster: v.broadcaster.clone(),
+                reprice: v.reprice.clone(),
             }),
         }
     }

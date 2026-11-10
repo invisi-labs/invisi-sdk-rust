@@ -37,6 +37,7 @@ pub struct OperationRecord {
     pub transaction_hash: Option<B256>,
     pub call: Option<StoredCall>,
     pub externalized: bool,
+    pub broadcaster_id: Option<String>,
     pub resolved_at: Option<CanonicalBlock>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

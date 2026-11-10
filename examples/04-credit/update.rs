@@ -15,11 +15,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    if env::args().any(|a| a == "--submit") && env::var("BROADCASTER_CONFIG").is_err() {
+        return Err("BROADCASTER_CONFIG required for explicit relay submission".into());
+    }
+
     let deployment: ProtocolDeployment =
         serde_json::from_slice(&fs::read(env::var("DEPLOYMENT_JSON")?)?)?;
     let ethereum = EthereumChain::new(HttpTransport::new(&env::var("ETH_RPC_URL")?)?);
     let chain = Arc::new(RpcChainState::new(ethereum, deployment.clone())?);
     let invisi = Invisi::new(chain.clone());
+    let relay = if let Ok(path) = env::var("BROADCASTER_CONFIG") {
+        let config: invisi_sdk::broadcaster::Configuration =
+            serde_json::from_slice(&fs::read(path)?)?;
+        let mut relay = invisi_sdk::broadcaster::BroadcasterClient::connect(config)?;
+        if let Ok(policy) = env::var("BROADCASTER_POLICY_ID") {
+            relay = relay.with_provenance_policy(policy.parse()?)?;
+        }
+        Some(Arc::new(relay))
+    } else {
+        None
+    };
     let wallet = Wallet::from_address(&env::var("WALLET_ADDRESS")?)?;
     let token: Address = env::var("TOKEN_ADDRESS")?.parse()?;
     let deadline: u64 = env::var("DEADLINE")?.parse()?;
@@ -71,6 +86,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         invisi.prepare_update_credit(&wallet, input, changes, deadline, Fee::default())?;
 
     // Owner approval binds the successor state; historical gross usage is not reset by an update.
+    let prepared = if let Some(relay) = &relay {
+        prepared.with_broadcaster(
+            chain.clone(),
+            relay.clone(),
+            &sdk::BroadcasterOptions::default(),
+        )?
+    } else {
+        prepared
+    };
     let request = prepared.export_wallet_request("update-credit-example")?;
     println!(
         "Native wallet requests: {}",
@@ -102,6 +126,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let prepared = prepared.prove(&prover)?;
+
+    if let Some(relay) = &relay {
+        let caller = Address::ZERO;
+        let call = prepared.calldata(chain.as_ref(), caller)?;
+        let id = env::var("BROADCAST_ID")?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(env::var("BROADCAST_RECORD")?)?;
+        use std::io::Write;
+        file.write_all(&serde_json::to_vec_pretty(&json!({"data":format!("0x{}",hex::encode(&call.data)),"broadcastId":id,"context":prepared.broadcaster_state().ok_or("saved Credit relay context required")?}))?)?;
+        file.sync_all()?;
+        if env::args().any(|a| a == "--submit") {
+            println!(
+                "{:?}",
+                prepared.submit_broadcaster(chain.as_ref(), relay.as_ref(), &id)?
+            );
+        }
+        return Ok(());
+    }
 
     let caller: Address = env::var("CALLER_ADDRESS")?.parse()?;
     let call = prepared.calldata(&*chain, caller)?;

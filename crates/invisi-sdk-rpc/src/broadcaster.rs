@@ -34,6 +34,8 @@ pub struct SignedQuote {
     pub provenance_policy_id: Option<B256>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_hash_format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance_tracking: Option<crate::provenance_tracking::Tracking>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Intent {
@@ -172,7 +174,10 @@ pub fn verify_quote_for_policy(
                 U256::from_be_bytes(policy.0),
             ))
         }
-        None if signed.provenance_policy_id.is_none() && signed.request_hash_format.is_none() => {
+        None if signed.provenance_policy_id.is_none()
+            && signed.request_hash_format.is_none()
+            && signed.provenance_tracking.is_none() =>
+        {
             base
         }
         _ => return Err(Error::Invalid("broadcaster provenance policy mismatch")),
@@ -418,6 +423,7 @@ impl<T: RpcTransport> BroadcasterClient<T> {
         sidecars: &[ProofSidecar],
     ) -> Result<Status> {
         validate_id(idempotency_key)?;
+        decode_intent(data)?;
         if self.required_policy.is_none() && !sidecars.is_empty() {
             return Err(Error::Invalid("unexpected proof sidecars"));
         }
@@ -434,6 +440,13 @@ impl<T: RpcTransport> BroadcasterClient<T> {
         }
         let status:Status=serde_json::from_value(self.rpc.call("broadcaster_submitTransaction",json!([{"data":format!("0x{}",hex::encode(data)),"quote":verified.signed.quote,"signature":verified.signed.signature,"idempotencyKey":idempotency_key,"proofSidecars":wire}]))?).map_err(|_|Error::Invalid("invalid broadcaster status"))?;
         check_status(status, idempotency_key)
+    }
+    pub fn lookup_status(&self, id: &str) -> Result<Option<Status>> {
+        match self.status(id) {
+            Ok(status) => Ok(Some(status)),
+            Err(Error::Remote { code: -32001, .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
     pub fn status(&self, id: &str) -> Result<Status> {
         validate_id(id)?;

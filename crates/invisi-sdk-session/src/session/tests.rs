@@ -1056,3 +1056,289 @@ fn oversized_staged_batches_fail_before_returning_a_handle_or_writing_state() {
     assert_eq!(h.session.snapshot().unwrap().revision, before.revision);
     assert!(h.session.snapshot().unwrap().notes.is_empty());
 }
+
+#[test]
+fn credit_relay_context_survives_encrypted_restart_and_fences_uncertain_submission() {
+    let h = harness();
+    let alice = wallet(1);
+    let bob = wallet(2);
+    let records = Arc::new(MemoryAtomicRecords::default());
+    let store = Arc::new(EncryptedWalletStore::new(records.clone(), [9; 32]).unwrap());
+    let connect = || {
+        WalletSession::connect(
+            h.session.invisi.clone(),
+            alice.clone(),
+            store.clone(),
+            h.source.clone(),
+            "relay-credit",
+        )
+        .unwrap()
+    };
+    let session = connect();
+    let state = CreditDeliveryState {
+        note: crate::credit::CreditState {
+            context: context(),
+            token_address: h.note.token_address,
+            spender_wallet_identity: sdk::address_word(bob.owner_address()),
+            owner_wallet_identity: sdk::address_word(alice.owner_address()),
+            revocation_shard: 1,
+            revocation_slot: 0,
+            nonce: U256::from(74),
+            expiry: 2100000000,
+            credit_shared_key: U256::from(75),
+            policy: crate::credit::CreditPolicy::default(),
+            usage: crate::credit::CreditUsage::default(),
+            available_credit: U256::from(400),
+            unlimited: false,
+            payload: Vec::new(),
+        },
+        owner_receiving_keys: alice.receiving_keys().unwrap().clone(),
+        spender_receiving_keys: bob.receiving_keys().unwrap().clone(),
+    };
+    let operation = session
+        .prepare_create_credit(state, 2000000100, sdk::Fee::default())
+        .unwrap();
+    let id = operation.id().to_string();
+    drop(operation);
+    let restarted = connect();
+    let mut operation = restarted.resume(&id, None).unwrap();
+    let relay = Arc::new(SessionCreditRelay {
+        lookup_mode: std::sync::atomic::AtomicUsize::new(0),
+        attempts: std::sync::atomic::AtomicUsize::new(0),
+    });
+    operation
+        .with_broadcaster(relay.clone(), &sdk::BroadcasterOptions::default())
+        .unwrap();
+    assert!(operation.broadcaster_state().is_some());
+    let encrypted = records.read(&restarted.scope.key()).unwrap().unwrap();
+    assert!(!encrypted
+        .data
+        .windows(b"broadcaster".len())
+        .any(|v| v == b"broadcaster"));
+    let request = operation.export_wallet_request("credit-consent").unwrap();
+    let response: sdk::WalletResponse =
+        serde_json::from_value(crate::wallet::execute(&key(1), &request.as_value()).unwrap())
+            .unwrap();
+    // This backend intentionally exercises journal/state transitions with synthetic main proof bytes.
+    let operation = operation
+        .with_wallet_response(&response)
+        .unwrap()
+        .prove(&Backend, false)
+        .unwrap();
+    drop(operation);
+    let restarted = connect();
+    let mut operation = restarted.resume(&id, Some(&Backend)).unwrap();
+    assert!(operation.broadcaster_state().is_some());
+    assert!(operation
+        .submit_broadcaster(relay.as_ref(), "stable-credit")
+        .unwrap_err()
+        .contains("uncertain"));
+    assert_eq!(relay.attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(restarted.snapshot().unwrap().operations[&id].externalized);
+    assert!(restarted.cancel_operation(&id, None).is_err());
+    assert_eq!(
+        restarted.snapshot().unwrap().operations[&id]
+            .broadcaster_id
+            .as_deref(),
+        Some("stable-credit")
+    );
+    h.chain
+        .height
+        .store(200, std::sync::atomic::Ordering::SeqCst);
+    assert!(operation
+        .submit_broadcaster(relay.as_ref(), "different-credit")
+        .unwrap_err()
+        .contains("retry ID"));
+    assert_eq!(
+        operation
+            .submit_broadcaster(relay.as_ref(), "stable-credit")
+            .unwrap()
+            .id,
+        "stable-credit"
+    );
+    relay
+        .lookup_mode
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    assert!(operation
+        .submit_broadcaster(relay.as_ref(), "stable-credit")
+        .unwrap_err()
+        .contains("offline"));
+    relay
+        .lookup_mode
+        .store(2, std::sync::atomic::Ordering::SeqCst);
+    assert!(operation
+        .submit_broadcaster(relay.as_ref(), "stable-credit")
+        .unwrap_err()
+        .contains("deadline"));
+    assert_eq!(relay.attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+struct SessionCreditRelay {
+    lookup_mode: std::sync::atomic::AtomicUsize,
+    attempts: std::sync::atomic::AtomicUsize,
+}
+impl sdk::PreparedBroadcaster for SessionCreditRelay {
+    fn lookup_status(&self, id: &str) -> Result<Option<crate::broadcaster::Status>> {
+        match self.lookup_mode.load(std::sync::atomic::Ordering::SeqCst) {
+            0 => Ok(Some(crate::broadcaster::Status {
+                id: id.into(),
+                state: crate::broadcaster::StatusState::Pending,
+                transaction_hash: None,
+            })),
+            1 => Err("provider offline".into()),
+            _ => Ok(None),
+        }
+    }
+    fn configuration(&self) -> crate::broadcaster::Configuration {
+        let signing = k256::ecdsa::SigningKey::from_slice(&key(1)).unwrap();
+        let public = signing.verifying_key().to_encoded_point(false);
+        crate::broadcaster::Configuration {
+            endpoint: "https://relay.example".into(),
+            quote_signer: Address::from_slice(
+                &alloy_primitives::keccak256(&public.as_bytes()[1..])[12..],
+            ),
+            fee_recipient: Address::repeat_byte(4),
+        }
+    }
+    fn required_policy(&self) -> Option<B256> {
+        None
+    }
+    fn fee(&self, _: Address, _: Option<&[u8]>) -> Result<crate::broadcaster::Fee> {
+        Ok(crate::broadcaster::Fee {
+            fee_recipient: self.configuration().fee_recipient,
+            fee_amount: "1".into(),
+            max_gas: "100000".into(),
+        })
+    }
+    fn quote(
+        &self,
+        data: &[u8],
+        chain_id: u64,
+        protocol: Address,
+        now: u64,
+        sidecars: &[crate::provenance::ProofSidecar],
+    ) -> Result<crate::broadcaster::VerifiedQuote> {
+        use crate::broadcaster::*;
+        assert!(sidecars.is_empty());
+        let intent = decode_intent(data).unwrap();
+        let trust = Trust {
+            chain_id,
+            protocol,
+            signer: self.configuration().quote_signer,
+        };
+        let quote = Quote {
+            token: intent.token,
+            fee_recipient: intent.fee_recipient,
+            fee_amount: intent.fee_amount.to_string(),
+            deadline: intent.deadline.to_string(),
+            max_gas: "100000".into(),
+            request_hash: request_hash(data).unwrap(),
+        };
+        let (signature, recovery) = k256::ecdsa::SigningKey::from_slice(&key(1))
+            .unwrap()
+            .sign_prehash_recoverable(quote_digest(&quote, &trust).unwrap().as_slice())
+            .unwrap();
+        let mut bytes = signature.to_bytes().to_vec();
+        bytes.push(recovery.to_byte());
+        VerifiedQuote::authenticate(
+            SignedQuote {
+                quote,
+                signature: format!("0x{}", hex::encode(bytes)),
+                provenance_policy_id: None,
+                request_hash_format: None,
+                provenance_tracking: None,
+            },
+            trust,
+            data,
+            now,
+            None,
+        )
+        .map_err(|e| e.to_string())
+    }
+    fn submit(
+        &self,
+        data: &[u8],
+        quote: &crate::broadcaster::VerifiedQuote,
+        _: &str,
+        sidecars: &[crate::provenance::ProofSidecar],
+    ) -> Result<crate::broadcaster::Status> {
+        assert!(sidecars.is_empty());
+        crate::broadcaster::verify_quote(quote.signed(), quote.trust(), data, 0)
+            .map_err(|e| e.to_string())?;
+        self.attempts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err("uncertain relay response".into())
+    }
+}
+
+#[test]
+fn funds_relay_retry_reads_known_journal_even_when_inputs_are_spent() {
+    let h = synced();
+    let token = sdk::word_address(h.note.token_address).unwrap();
+    let output =
+        sdk::NoteOutput::for_recipient(context(), token, &wallet(2), U256::from(30), Vec::new())
+            .unwrap();
+    let mut op = h
+        .session
+        .prepare_transfer(sdk::TransferPreparation {
+            token,
+            inputs: Vec::new(),
+            outputs: vec![output],
+            withdrawal: None,
+            funding: sdk::empty_funding(),
+            fee: sdk::Fee::default(),
+            deadline: 2000000100,
+            automatic_change: true,
+        })
+        .unwrap();
+    let relay = Arc::new(SessionCreditRelay {
+        lookup_mode: std::sync::atomic::AtomicUsize::new(0),
+        attempts: std::sync::atomic::AtomicUsize::new(0),
+    });
+    op.with_broadcaster(relay.clone(), &sdk::BroadcasterOptions::default())
+        .unwrap();
+    let request = op.export_wallet_request("funds-relay").unwrap();
+    let response: sdk::WalletResponse =
+        serde_json::from_value(crate::wallet::execute(&key(1), &request.as_value()).unwrap())
+            .unwrap();
+    let mut op = op
+        .with_wallet_response(&response)
+        .unwrap()
+        .prove(&Backend, false)
+        .unwrap();
+    let id = op.id().to_string();
+    assert!(op
+        .submit_broadcaster(relay.as_ref(), "stable-funds")
+        .is_err());
+    drop(op);
+    h.chain
+        .spent
+        .lock()
+        .unwrap()
+        .insert(sdk::field_word(h.note.nullifier().unwrap()));
+    h.chain
+        .height
+        .store(200, std::sync::atomic::Ordering::SeqCst);
+    let mut op = h.session.resume(&id, Some(&Backend)).unwrap();
+    assert_eq!(
+        op.submit_broadcaster(relay.as_ref(), "stable-funds")
+            .unwrap()
+            .id,
+        "stable-funds"
+    );
+    assert!(op.submit_broadcaster(relay.as_ref(), "new-funds").is_err());
+    relay
+        .lookup_mode
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    assert!(op
+        .submit_broadcaster(relay.as_ref(), "stable-funds")
+        .unwrap_err()
+        .contains("offline"));
+    relay
+        .lookup_mode
+        .store(2, std::sync::atomic::Ordering::SeqCst);
+    assert!(op
+        .submit_broadcaster(relay.as_ref(), "stable-funds")
+        .unwrap_err()
+        .contains("spendable"));
+    assert_eq!(relay.attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+}

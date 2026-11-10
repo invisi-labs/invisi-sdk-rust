@@ -1,10 +1,10 @@
 //! Revoke a grant by its public reference; an owner call or verified EVM relay signature needs no
 //! private circuit proof.
 
-use alloy_primitives::{Address, U256};
+use alloy_primitives::Address;
 use invisi_sdk::{
     rpc::{EthereumChain, HttpTransport, ProtocolDeployment},
-    sdk::{ChainState, Fee, Invisi, RpcChainState, Wallet},
+    sdk::{self, ChainState, Fee, Invisi, RpcChainState, Wallet},
 };
 use serde_json::json;
 use std::{env, fs, sync::Arc};
@@ -35,7 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Ok(policy) = env::var("BROADCASTER_POLICY_ID") {
             relay = relay.with_provenance_policy(policy.parse()?)?;
         }
-        Some(relay)
+        Some(Arc::new(relay))
     } else {
         None
     };
@@ -45,40 +45,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let slot = env::var("GRANT_SLOT")?.parse()?;
     let mut prepared =
         invisi.prepare_revoke_credit(&wallet, token, shard, slot, deadline, Fee::default())?;
-    // Credit lifecycle has no private Note source proof. Its existing lowlevel relay API is explicit.
-    let quote = if let Some(relay) = &relay {
-        let mut fee = relay.fee(token, None)?;
-        let mut final_quote = None;
-        for _ in 0..8 {
-            let candidate = invisi.prepare_revoke_credit(
-                &wallet,
-                token,
-                shard,
-                slot,
-                deadline,
-                Fee {
-                    recipient: fee.fee_recipient,
-                    amount: U256::from_str_radix(&fee.fee_amount, 10)?,
-                },
-            )?;
-            let unsigned = candidate.calldata(chain.as_ref(), wallet.owner_address())?;
-            let next = relay.fee(token, Some(&unsigned.data))?;
-            if next.fee_amount == fee.fee_amount && next.fee_recipient == fee.fee_recipient {
-                final_quote = Some(relay.quote(
-                    &unsigned.data,
-                    chain.context().chain_id,
-                    unsigned.to,
-                    chain.snapshot()?.timestamp,
-                )?);
-                prepared = candidate;
-                break;
-            }
-            fee = next;
-        }
-        Some(final_quote.ok_or("Credit relay fee convergence budget exceeded")?)
-    } else {
-        None
-    };
+    if let Some(relay) = &relay {
+        prepared = prepared.with_broadcaster(
+            chain.clone(),
+            relay.clone(),
+            &sdk::BroadcasterOptions::default(),
+        )?;
+    }
     let caller: Address = if relay.is_some() {
         Address::ZERO
     } else {
@@ -106,7 +79,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let call = prepared.calldata(&*chain, caller)?;
 
-    if let (Some(relay), Some(quote)) = (&relay, &quote) {
+    if let Some(relay) = &relay {
+        let caller = Address::ZERO;
+        let call = prepared.calldata(chain.as_ref(), caller)?;
         let id = env::var("BROADCAST_ID")?;
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true);
@@ -117,10 +92,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let mut file = options.open(env::var("BROADCAST_RECORD")?)?;
         use std::io::Write;
-        file.write_all(&serde_json::to_vec_pretty(&json!({"data":format!("0x{}",hex::encode(&call.data)),"broadcastId":id,"quote":quote.signed()}))?)?;
+        file.write_all(&serde_json::to_vec_pretty(&json!({"data":format!("0x{}",hex::encode(&call.data)),"broadcastId":id,"context":prepared.broadcaster_state().ok_or("saved Credit relay context required")?}))?)?;
         file.sync_all()?;
         if env::args().any(|a| a == "--submit") {
-            println!("{:?}", relay.submit(&call.data, quote, &id)?);
+            println!(
+                "{:?}",
+                prepared.submit_broadcaster(chain.as_ref(), relay.as_ref(), &id)?
+            );
         }
         return Ok(());
     }

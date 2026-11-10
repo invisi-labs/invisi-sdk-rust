@@ -27,3 +27,6 @@ rusqlite = { version = "0.38", features = ["bundled"], optional = true }
 [features]
 default = []
 sqlite = ["dep:rusqlite"]
+
+[dev-dependencies]
+k256 = { version = "0.13", features = ["ecdsa"] }

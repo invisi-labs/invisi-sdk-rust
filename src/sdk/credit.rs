@@ -1406,10 +1406,30 @@ mod lifecycle_tests {
                 journal::ManagedPrepared::Credit(mut v) => {
                     v.submit_broadcaster(chain.as_ref(), relay.as_ref())
                         .unwrap();
+                    let saved = journal::ManagedPrepared::Credit(v.clone())
+                        .snapshot()
+                        .unwrap();
+                    let exact = saved.export_broadcaster_submission().unwrap();
+                    assert_eq!(exact.data, v.broadcaster_state().unwrap().submitted_data);
+                    assert!(exact.member_proof.is_none());
+                    v.broadcaster.as_mut().unwrap().submission_id = None;
+                    let saved = journal::ManagedPrepared::Credit(v).snapshot().unwrap();
+                    let mut restored = match saved.restore(proved.wallet(), None).unwrap() {
+                        journal::ManagedPrepared::Credit(v) => v,
+                        _ => panic!("Credit"),
+                    };
+                    assert_eq!(restored.phase(), Phase::Prepared);
+                    restored
+                        .submit_broadcaster(chain.as_ref(), relay.as_ref())
+                        .unwrap();
+                    assert_eq!(
+                        restored.broadcaster_state().unwrap().submitted_data,
+                        exact.data
+                    );
                 }
                 _ => panic!("Credit"),
             }
-            assert_eq!(relay.submits.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert_eq!(relay.submits.load(std::sync::atomic::Ordering::SeqCst), 2);
         }
     }
     #[derive(Clone, Default)]
@@ -1535,6 +1555,7 @@ mod lifecycle_tests {
             };
             let policy = self.provenance_mode().unwrap();
             let quote = Quote {
+                execution: invisi_sdk_rpc::broadcaster::Execution::Direct,
                 token: i.token,
                 fee_recipient: i.fee_recipient,
                 fee_amount: i.fee_amount.to_string(),
@@ -2121,10 +2142,28 @@ mod revocation_tests {
             journal::ManagedPrepared::Credit(mut v) => {
                 v.submit_broadcaster(chain.as_ref(), relay.as_ref())
                     .unwrap();
+                let saved = journal::ManagedPrepared::Credit(v.clone())
+                    .snapshot()
+                    .unwrap();
+                let exact = saved.export_broadcaster_submission().unwrap();
+                assert_eq!(exact.data, v.broadcaster_state().unwrap().submitted_data);
+                v.broadcaster.as_mut().unwrap().submission_id = None;
+                let saved = journal::ManagedPrepared::Credit(v).snapshot().unwrap();
+                let mut restored = match saved.restore(&owner, None).unwrap() {
+                    journal::ManagedPrepared::Credit(v) => v,
+                    _ => panic!("Credit"),
+                };
+                restored
+                    .submit_broadcaster(chain.as_ref(), relay.as_ref())
+                    .unwrap();
+                assert_eq!(
+                    restored.broadcaster_state().unwrap().submitted_data,
+                    exact.data
+                );
             }
             _ => panic!("Credit"),
         }
-        assert_eq!(relay.submits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(relay.submits.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
     #[test]
     fn public_revocation_is_owner_direct_or_independently_verified_relay() {

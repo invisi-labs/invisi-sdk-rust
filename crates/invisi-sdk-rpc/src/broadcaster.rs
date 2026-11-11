@@ -15,9 +15,24 @@ pub struct Trust {
     pub protocol: Address,
     pub signer: Address,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Execution {
+    Direct,
+    Aggregate,
+}
+impl Execution {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Aggregate => "aggregate",
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Quote {
+    pub execution: Execution,
     pub token: Address,
     pub fee_recipient: Address,
     pub fee_amount: String,
@@ -125,6 +140,98 @@ fn stripped_intent(data: &[u8]) -> Result<(Intent, Vec<u8>)> {
         }
     })
 }
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MemberProof {
+    pub format_version: u32,
+    pub circuit_name: String,
+    pub target: String,
+    pub bb_version: String,
+    pub artifact_sha256: String,
+    pub vk_sha256: String,
+    pub proof_hex: String,
+    pub proof_sha256: String,
+    pub public_inputs: Vec<B256>,
+}
+pub fn validate_member_proof(data: &[u8], proof: &MemberProof) -> Result<()> {
+    use sha2::{Digest, Sha256};
+    let capacity = aggregate_member_capacity(data)?;
+    let InvisiProtocol::InvisiProtocolCalls::transact_0(call) = ProtocolContract::decode_call(data)
+        .map_err(|_| Error::Invalid("invalid member calldata"))?
+    else {
+        unreachable!()
+    };
+    let expected = invisi_sdk_protocol::statements::statement(
+        &format!("transact_user_slots{capacity}"),
+        "noir-recursive",
+        proof.public_inputs.clone(),
+    )
+    .map_err(|_| Error::Invalid("invalid member statement"))?;
+    let bytes = rpc::bytes(&json!(proof.proof_hex), 458 * 32, 458 * 32)?;
+    if proof.format_version != 1
+        || proof.target != "noir-recursive"
+        || proof.bb_version != "6.0.0"
+        || proof.circuit_name != expected.circuit_name
+        || proof.artifact_sha256 != expected.artifact_sha256
+        || proof.vk_sha256 != expected.vk_sha256
+        || bytes.as_slice() != call._0.as_ref()
+        || hex::encode(Sha256::digest(&bytes)) != proof.proof_sha256
+        || U256::from_be_slice(proof.public_inputs[3].as_slice())
+            != U256::from(call.r.params.nullifiers.len())
+        || U256::from_be_slice(proof.public_inputs[4].as_slice())
+            != U256::from(call.r.params.noteCommitments.len())
+    {
+        return Err(Error::Invalid("invalid broadcaster member proof"));
+    }
+    Ok(())
+}
+/// Match the canonical outer transaction without trusting a relay's claimed member list.
+pub fn matches_execution_transaction(
+    member_data: &[u8],
+    execution: Execution,
+    transaction_data: &[u8],
+) -> bool {
+    if execution == Execution::Direct {
+        return member_data == transaction_data;
+    }
+    if aggregate_member_capacity(member_data).is_err() {
+        return false;
+    }
+    use InvisiProtocol::InvisiProtocolCalls as Calls;
+    let (Ok(Calls::transact_0(member)), Ok(Calls::transact_1(outer))) = (
+        ProtocolContract::decode_call(member_data),
+        ProtocolContract::decode_call(transaction_data),
+    ) else {
+        return false;
+    };
+    outer.abi_encode() == transaction_data
+        && outer
+            .requests
+            .iter()
+            .filter(|request| request.abi_encode() == member.r.abi_encode())
+            .count()
+            == 1
+}
+pub fn aggregate_member_capacity(data: &[u8]) -> Result<usize> {
+    use InvisiProtocol::InvisiProtocolCalls as Calls;
+    match ProtocolContract::decode_call(data) {
+        Ok(Calls::transact_0(c)) if c.abi_encode() == data => {
+            let capacity = c.r.params.nullifiers.len() + c.r.params.noteCommitments.len();
+            if c.r.params.nullifiers.is_empty()
+                || !(1..=10).contains(&capacity)
+                || c.r.funding.amount != U256::ZERO
+            {
+                return Err(Error::Invalid(
+                    "unfunded private C1 through C10 member required",
+                ));
+            }
+            Ok(capacity)
+        }
+        _ => Err(Error::Invalid(
+            "unfunded private C1 through C10 member required",
+        )),
+    }
+}
 pub fn decode_intent(data: &[u8]) -> Result<Intent> {
     Ok(stripped_intent(data)?.0)
 }
@@ -144,7 +251,7 @@ pub fn quote_digest(quote: &Quote, trust: &Trust) -> Result<B256> {
         return Err(Error::Invalid("invalid broadcaster trust"));
     }
     let domain=keccak256((keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),keccak256("InvisiBroadcaster"),keccak256("1"),U256::from(trust.chain_id),trust.protocol).abi_encode());
-    let structure=keccak256((keccak256("Quote(address token,address feeRecipient,uint256 feeAmount,uint256 deadline,uint256 maxGas,bytes32 requestHash)"),quote.token,quote.fee_recipient,decimal(&json!(quote.fee_amount))?,decimal(&json!(quote.deadline))?,decimal(&json!(quote.max_gas))?,quote.request_hash).abi_encode());
+    let structure=keccak256((keccak256("Quote(address token,address feeRecipient,uint256 feeAmount,uint256 deadline,uint256 maxGas,bytes32 requestHash,string execution)"),quote.token,quote.fee_recipient,decimal(&json!(quote.fee_amount))?,decimal(&json!(quote.deadline))?,decimal(&json!(quote.max_gas))?,quote.request_hash,keccak256(quote.execution.as_str())).abi_encode());
     let mut message = vec![0x19, 0x01];
     message.extend_from_slice(domain.as_slice());
     message.extend_from_slice(structure.as_slice());
@@ -188,6 +295,9 @@ pub(crate) fn verify_quote_with_hash(
 ) -> Result<()> {
     let intent = decode_intent(data)?;
     let quote = &signed.quote;
+    if quote.execution == Execution::Aggregate {
+        aggregate_member_capacity(data)?;
+    }
     let amount = decimal(&json!(quote.fee_amount))?;
     let deadline = decimal(&json!(quote.deadline))?;
     let gas = decimal(&json!(quote.max_gas))?;
@@ -289,6 +399,10 @@ pub struct Fee {
 #[serde(rename_all = "snake_case")]
 pub enum StatusState {
     Pending,
+    Queued,
+    Proving,
+    Rejected,
+    Expired,
     Submitted,
     Confirmed,
     Reverted,
@@ -391,6 +505,8 @@ impl<T: RpcTransport> BroadcasterClient<T> {
                 .and_then(|v| v.parse::<Address>().ok())
                 != Some(self.configuration.fee_recipient)
             || value["submissionHalted"] != false
+            || (quote.signed.quote.execution == Execution::Aggregate
+                && p["aggregateSupported"] != true)
             || required != (quote.signed.provenance_required == Some(true))
             || (required
                 && (p["requestHashFormat"] != REQUEST_HASH_FORMAT
@@ -488,7 +604,22 @@ impl<T: RpcTransport> BroadcasterClient<T> {
         verified: &VerifiedQuote,
         sidecars: &[ProofSidecar],
     ) -> Result<Status> {
+        self.submit_with_member_proof(data, verified, sidecars, None)
+    }
+    pub fn submit_with_member_proof(
+        &self,
+        data: &[u8],
+        verified: &VerifiedQuote,
+        sidecars: &[ProofSidecar],
+        member_proof: Option<&MemberProof>,
+    ) -> Result<Status> {
         decode_intent(data)?;
+        if (verified.signed.quote.execution == Execution::Aggregate) != member_proof.is_some() {
+            return Err(Error::Invalid("quote execution and member proof mismatch"));
+        }
+        if let Some(proof) = member_proof {
+            validate_member_proof(data, proof)?;
+        }
         if verified.signed.provenance_required != Some(true) && !sidecars.is_empty() {
             return Err(Error::Invalid("unexpected proof sidecars"));
         }
@@ -503,7 +634,16 @@ impl<T: RpcTransport> BroadcasterClient<T> {
         if verified.signed.quote.fee_recipient != self.configuration.fee_recipient {
             return Err(Error::Invalid("unregistered quote fee recipient"));
         }
-        let status:Status=serde_json::from_value(self.rpc.call("broadcaster_submitTransaction",json!([{"data":format!("0x{}",hex::encode(data)),"quote":verified.signed.quote,"signature":verified.signed.signature,"proofSidecars":wire}]))?).map_err(|_|Error::Invalid("invalid broadcaster status"))?;
+        let mut request = json!({"data":format!("0x{}",hex::encode(data)),"quote":verified.signed.quote,"signature":verified.signed.signature,"proofSidecars":wire});
+        if let Some(proof) = member_proof {
+            request["memberProof"] = serde_json::to_value(proof)
+                .map_err(|_| Error::Invalid("invalid broadcaster member proof"))?;
+        }
+        let status: Status = serde_json::from_value(
+            self.rpc
+                .call("broadcaster_submitTransaction", json!([request]))?,
+        )
+        .map_err(|_| Error::Invalid("invalid broadcaster status"))?;
         validate_id(&status.id)?;
         Ok(status)
     }

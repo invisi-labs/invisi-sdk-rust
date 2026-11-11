@@ -105,7 +105,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }),
     };
 
-    let mut prepared = prepared.prove(&prover, false)?;
+    let mut prepared = prepared.prove(&prover, None)?;
     prepared.freeze_broadcaster_evidence(chain.as_ref(), relay.as_ref())?;
     let status = prepared.submit_broadcaster(chain.as_ref(), relay.as_ref())?;
     println!("{}", serde_json::to_string_pretty(&status)?);

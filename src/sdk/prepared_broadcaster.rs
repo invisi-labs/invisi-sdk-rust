@@ -9,7 +9,7 @@ use invisi_sdk_rpc::provenance_tracking::Tracking;
 use invisi_sdk_rpc::rpc::RpcTransport;
 use invisi_sdk_rpc::{
     broadcaster::{
-        request_hash, BroadcasterClient, Configuration, Fee as RelayFee, SignedQuote,
+        request_hash, BroadcasterClient, Configuration, Fee as RelayFee, MemberProof, SignedQuote,
         Status as RelayStatus, Trust, VerifiedQuote,
     },
     provenance_client::ProvenanceClient,
@@ -162,6 +162,14 @@ pub(crate) enum RepriceTemplate {
     Transfer(TransferPreparation),
     Shield(ShieldPreparation),
 }
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BroadcasterSubmission {
+    #[serde(with = "crate::note::bytes_hex")]
+    pub data: Vec<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub member_proof: Option<MemberProof>,
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PreparedBroadcasterState {
@@ -177,6 +185,8 @@ pub struct PreparedBroadcasterState {
     pub submission_id: Option<String>,
     #[serde(default)]
     pub submitted_data: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_proof: Option<MemberProof>,
 }
 impl PreparedBroadcasterState {
     pub fn provenance_mode(&self) -> Option<()> {
@@ -186,6 +196,18 @@ impl PreparedBroadcasterState {
 pub trait PreparedBroadcaster: Send + Sync {
     fn lookup_status(&self, _id: &str) -> Result<Option<RelayStatus>> {
         Err("broadcaster status lookup capability required".into())
+    }
+    fn submit_member(
+        &self,
+        data: &[u8],
+        quote: &VerifiedQuote,
+        sidecars: &[ProofSidecar],
+        member: Option<&MemberProof>,
+    ) -> Result<RelayStatus> {
+        if member.is_some() {
+            return Err("broadcaster recursive member capability required".into());
+        }
+        self.submit(data, quote, sidecars)
     }
     fn configuration(&self) -> Configuration;
     fn provenance_mode(&self) -> Option<()>;
@@ -207,6 +229,16 @@ pub trait PreparedBroadcaster: Send + Sync {
     ) -> Result<RelayStatus>;
 }
 impl<T: RpcTransport + Send + Sync> PreparedBroadcaster for BroadcasterClient<T> {
+    fn submit_member(
+        &self,
+        data: &[u8],
+        quote: &VerifiedQuote,
+        sidecars: &[ProofSidecar],
+        member: Option<&MemberProof>,
+    ) -> Result<RelayStatus> {
+        self.submit_with_member_proof(data, quote, sidecars, member)
+            .map_err(|e| e.to_string())
+    }
     fn lookup_status(&self, id: &str) -> Result<Option<RelayStatus>> {
         BroadcasterClient::lookup_status(self, id).map_err(|e| e.to_string())
     }
@@ -264,6 +296,12 @@ impl PreparedProvenance {
     }
 }
 impl PreparedTransaction {
+    /// Export only public relay fields without a chain read or proof generation.
+    pub fn export_broadcaster_submission(&self) -> Result<BroadcasterSubmission> {
+        journal::ManagedPrepared::snapshot_funds(self)
+            .snapshot()?
+            .export_broadcaster_submission()
+    }
     pub fn broadcaster_state(&self) -> Option<&PreparedBroadcasterState> {
         self.broadcaster.as_ref()
     }
@@ -393,6 +431,7 @@ impl PreparedTransaction {
             attempted: false,
             submission_id: None,
             submitted_data: Vec::new(),
+            member_proof: None,
         });
         Ok(candidate)
     }
@@ -405,7 +444,28 @@ impl PreparedTransaction {
             .broadcaster
             .as_ref()
             .ok_or("saved broadcaster context required")?;
-        let data = self.calldata(chain, Address::ZERO)?.data;
+        let data = self.broadcaster_submission_call(chain)?.data;
+        let member = if self.target == "noir-recursive" {
+            let proof = self.export_aggregate_member()?.bundle;
+            Some(MemberProof {
+                format_version: proof.format_version,
+                circuit_name: proof.circuit_name,
+                target: proof.target,
+                bb_version: proof.bb_version,
+                artifact_sha256: proof.artifact_sha256,
+                vk_sha256: proof.vk_sha256,
+                proof_hex: hex(&proof.proof),
+                proof_sha256: proof.proof_sha256,
+                public_inputs: proof.public_inputs,
+            })
+        } else {
+            None
+        };
+        if !saved.submitted_data.is_empty()
+            && (saved.submitted_data != data || saved.member_proof != member)
+        {
+            return Err("prepared broadcaster submission changed".into());
+        }
         let verified = VerifiedQuote::authenticate(
             saved.quote.clone(),
             Trust {
@@ -433,8 +493,9 @@ impl PreparedTransaction {
                 .provenance
                 .as_ref()
                 .ok_or("trusted provenance capability required")?;
-            let sidecar = self.build_source_sidecar(chain, cap)?.0;
-            self.broadcaster.as_mut().unwrap().sidecars = vec![sidecar];
+            cap.validate(self.context, saved.provenance_mode())?;
+            let packet = self.prove_provenance(chain)?;
+            self.broadcaster.as_mut().unwrap().sidecars = packet.sidecars;
         }
         if required && !self.inputs().is_empty() {
             let cap = self
@@ -470,6 +531,9 @@ impl PreparedTransaction {
                 return Err("saved Source statement mismatch".into());
             }
         }
+        let saved = self.broadcaster.as_mut().unwrap();
+        saved.submitted_data = data;
+        saved.member_proof = member;
         Ok(())
     }
     pub fn submit_broadcaster(
@@ -489,14 +553,9 @@ impl PreparedTransaction {
             return Err("broadcaster saved configuration mismatch".into());
         }
         if let Some(saved) = self.broadcaster.as_ref().filter(|s| s.attempted).cloned() {
-            if let Some(id) = &saved.submission_id {
-                if let Some(status) = relay.lookup_status(id)? {
-                    if &status.id != id {
-                        return Err("broadcaster submission ID mismatch".into());
-                    }
-                    return Ok(status);
-                }
-            }
+            journal::ManagedPrepared::snapshot_funds(self)
+                .snapshot()?
+                .validate_broadcaster_submission(&saved.submitted_data)?;
             let verified = VerifiedQuote::authenticate(
                 saved.quote.clone(),
                 Trust {
@@ -509,7 +568,21 @@ impl PreparedTransaction {
                 saved.provenance_mode(),
             )
             .map_err(|e| e.to_string())?;
-            let result = relay.submit(&saved.submitted_data, &verified, &saved.sidecars)?;
+            if let Some(id) = &saved.submission_id {
+                let status = relay
+                    .lookup_status(id)?
+                    .ok_or("broadcaster submission not found; retain reservation")?;
+                if &status.id != id {
+                    return Err("broadcaster submission ID mismatch".into());
+                }
+                return Ok(status);
+            }
+            let result = relay.submit_member(
+                &saved.submitted_data,
+                &verified,
+                &saved.sidecars,
+                saved.member_proof.as_ref(),
+            )?;
             if saved
                 .submission_id
                 .as_ref()
@@ -533,7 +606,7 @@ impl PreparedTransaction {
             return Err("broadcaster saved configuration mismatch".into());
         }
         let block = chain.snapshot()?;
-        let data = self.calldata(chain, Address::ZERO)?.data;
+        let data = self.broadcaster_submission_call(chain)?.data;
         if request_hash(&data).map_err(|e| e.to_string())? != s.intent_hash {
             return Err("frozen broadcaster intent mismatch".into());
         }
@@ -606,7 +679,12 @@ impl PreparedTransaction {
         saved.sidecars = frozen_sidecars.clone();
         saved.submitted_data = data.clone();
         saved.attempted = true;
-        let result = relay.submit(&data, &quote, &frozen_sidecars)?;
+        let result = relay.submit_member(
+            &data,
+            &quote,
+            &frozen_sidecars,
+            self.broadcaster.as_ref().unwrap().member_proof.as_ref(),
+        )?;
         self.broadcaster.as_mut().unwrap().submission_id = Some(result.id.clone());
         Ok(result)
     }
@@ -644,6 +722,9 @@ impl PreparedTransaction {
             .is_some_and(|data| packet.data != hex(data))
         {
             return Err("cached provenance final calldata mismatch".into());
+        }
+        if self.proof.is_some() && packet.data != hex(&self.provenance_calldata()?) {
+            return Err("cached provenance final proof bytes mismatch".into());
         }
         let data = hex::decode(
             packet
@@ -768,9 +849,9 @@ impl PreparedTransaction {
         }
         Ok(self)
     }
-    fn provenance_calldata(&self) -> Result<Vec<u8>> {
-        if self.target != "evm" {
-            return Err("ready EVM transaction required for provenance".into());
+    pub(super) fn provenance_calldata(&self) -> Result<Vec<u8>> {
+        if !["evm", "noir-recursive"].contains(&self.target.as_str()) {
+            return Err("ready transaction required for provenance".into());
         }
         let proof = self
             .proof
@@ -787,11 +868,11 @@ impl PreparedTransaction {
         };
         let statement = prover::statement(
             &proof.circuit_name,
-            "evm",
+            &self.target,
             self.public_inputs()?.into_iter().map(field_word).collect(),
         )?;
         prover::assert_bundle(proof, &statement)?;
-        Ok(InvisiProtocol::transact_0Call {
+        let data = InvisiProtocol::transact_0Call {
             _0: proof.proof.clone().into(),
             r: abi::TransactRequest {
                 params: params.clone(),
@@ -799,7 +880,12 @@ impl PreparedTransaction {
                 funding: funding.clone(),
             },
         }
-        .abi_encode())
+        .abi_encode();
+        if self.target == "noir-recursive" {
+            invisi_sdk_rpc::broadcaster::aggregate_member_capacity(&data)
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(data)
     }
     fn build_source_sidecar(
         &self,
@@ -1440,7 +1526,7 @@ mod tests {
         assert!(attempted
             .submit_broadcaster(chain.as_ref(), &wrong)
             .unwrap_err()
-            .contains("ID mismatch"));
+            .contains("not found"));
         assert_eq!(
             attempted
                 .broadcaster
@@ -1561,6 +1647,69 @@ mod tests {
         assert_eq!(loaded.client.trust.scope.chain_id, 31337);
         assert_eq!(loaded.manifest.sha256, loaded.client.trust.manifest_sha256);
     }
+    #[test]
+    fn cached_source_packet_binds_the_actual_recursive_main_proof_bytes() {
+        let (chain, wallet, preparation, _) = note_fixture();
+        let mut prepared = Invisi::new(chain)
+            .prepare_transfer(&wallet, preparation)
+            .unwrap();
+        prepared.target = "noir-recursive".into();
+        let capacity = match &prepared.plan {
+            Plan::Transfer { capacity, .. } => *capacity,
+            _ => unreachable!(),
+        };
+        let statement = prover::statement(
+            &format!("transact_user_slots{capacity}"),
+            &prepared.target,
+            prepared
+                .public_inputs()
+                .unwrap()
+                .into_iter()
+                .map(field_word)
+                .collect(),
+        )
+        .unwrap();
+        let proof = vec![0; 458 * 32];
+        prepared.proof = Some(ProofBundle {
+            format_version: 1,
+            circuit_name: statement.circuit_name,
+            target: statement.target,
+            bb_version: "6.0.0".into(),
+            artifact_sha256: statement.artifact_sha256,
+            vk_sha256: statement.vk_sha256,
+            proof_sha256: prover::sha256(&proof),
+            proof,
+            public_inputs: statement.expected_public_inputs,
+        });
+        let packet = source::ProvenanceProof {
+            format: "invisi-provenance-submission-v1".into(),
+            data: hex(&prepared.provenance_calldata().unwrap()),
+            context: source::ProofContext {
+                chain_id: prepared.context.chain_id.to_string(),
+                protocol_address: hex(word_address(prepared.context.protocol_address)
+                    .unwrap()
+                    .as_slice()),
+                token_address: hex(prepared.token.as_slice()),
+            },
+            main_circuit_capacity: capacity,
+            public_inputs: prepared
+                .public_inputs()
+                .unwrap()
+                .into_iter()
+                .map(|v| hex(&v.to_be_bytes::<32>()))
+                .collect(),
+            operation_digest: "unused".into(),
+            sidecars: vec![],
+        };
+        prepared.validate_cached_native_statement(&packet).unwrap();
+        let proof = prepared.proof.as_mut().unwrap();
+        proof.proof[0] = 1;
+        proof.proof_sha256 = prover::sha256(&proof.proof);
+        assert!(prepared
+            .validate_cached_native_statement(&packet)
+            .unwrap_err()
+            .contains("proof bytes"));
+    }
     struct NoProver;
     impl OfflineProver for NoProver {
         fn prove(
@@ -1671,6 +1820,7 @@ mod tests {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let i = invisi_sdk_rpc::broadcaster::decode_intent(data).unwrap();
             let q = invisi_sdk_rpc::broadcaster::Quote {
+                execution: invisi_sdk_rpc::broadcaster::Execution::Direct,
                 token: i.token,
                 fee_recipient: i.fee_recipient,
                 fee_amount: i.fee_amount.to_string(),

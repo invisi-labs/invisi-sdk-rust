@@ -1590,7 +1590,20 @@ impl PreparedTransaction {
         self.phase = Phase::Authorized;
         Ok(self)
     }
-    pub fn prove(mut self, backend: &dyn Prover, recursive: bool) -> Result<Self> {
+    pub fn prove(
+        mut self,
+        backend: &dyn Prover,
+        recursive: impl Into<Option<bool>>,
+    ) -> Result<Self> {
+        let supplied = recursive.into();
+        let quoted = self
+            .broadcaster
+            .as_ref()
+            .map(|s| s.quote.quote.execution == invisi_sdk_rpc::broadcaster::Execution::Aggregate);
+        if supplied.zip(quoted).is_some_and(|(a, b)| a != b) {
+            return Err("signed broadcaster execution differs from proof target".into());
+        }
+        let recursive = quoted.or(supplied).unwrap_or(false);
         if ![Phase::Prepared, Phase::Authorized].contains(&self.phase)
             || self.needs_authorization && self.authorization.is_none()
         {
@@ -1673,6 +1686,29 @@ impl PreparedTransaction {
         self.proof.as_ref()
     }
     pub fn calldata(&self, chain: &dyn ChainState, caller: Address) -> Result<TransactionCall> {
+        self.operation_call(chain, caller, false)
+    }
+    pub(crate) fn broadcaster_submission_call(
+        &self,
+        chain: &dyn ChainState,
+    ) -> Result<TransactionCall> {
+        let state = self
+            .broadcaster
+            .as_ref()
+            .ok_or("saved broadcaster context required")?;
+        if (state.quote.quote.execution == invisi_sdk_rpc::broadcaster::Execution::Aggregate)
+            != (self.target == "noir-recursive")
+        {
+            return Err("broadcaster execution does not match proof target".into());
+        }
+        self.operation_call(chain, Address::ZERO, true)
+    }
+    fn operation_call(
+        &self,
+        chain: &dyn ChainState,
+        caller: Address,
+        allow_recursive: bool,
+    ) -> Result<TransactionCall> {
         let anchor = chain.snapshot()?;
         if chain.context() != self.context {
             return Err("submission deployment mismatch".into());
@@ -1717,7 +1753,10 @@ impl PreparedTransaction {
                 funding,
                 ..
             } => {
-                if self.phase != Phase::Proved || self.target != "evm" {
+                if self.phase != Phase::Proved
+                    || (self.target != "evm"
+                        && !(allow_recursive && self.target == "noir-recursive"))
+                {
                     return Err(
                         "verified EVM proof required; recursive members require aggregate export"
                             .into(),
@@ -1727,10 +1766,16 @@ impl PreparedTransaction {
                 let proof = self.proof.as_ref().ok_or("proof required")?;
                 let s = prover::statement(
                     &proof.circuit_name,
-                    "evm",
+                    &self.target,
                     self.public_inputs()?.into_iter().map(field_word).collect(),
                 )?;
                 prover::assert_bundle(proof, &s)?;
+                if self.target == "noir-recursive" {
+                    invisi_sdk_rpc::broadcaster::aggregate_member_capacity(
+                        &self.provenance_calldata()?,
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
                 Ok(contract.call(&InvisiProtocol::transact_0Call {
                     _0: proof.proof.clone().into(),
                     r: abi::TransactRequest {

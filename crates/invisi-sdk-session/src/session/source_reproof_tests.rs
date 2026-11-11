@@ -282,7 +282,10 @@ fn terminal_source_reproof_rotates_generation_after_restart_without_changing_pay
         _ => panic!("private Note required"),
     };
     assert!(!terminal["operations"][&id]["snapshot"]["proof"].is_null());
-    assert!(serde_json::to_value(restored.snapshot().unwrap()).unwrap()["proof"].is_null());
+    assert_eq!(
+        serde_json::to_value(restored.snapshot().unwrap()).unwrap()["proof"],
+        terminal["operations"][&id]["snapshot"]["proof"]
+    );
     assert!(restarted.resume(&id, None).is_err());
     assert_eq!(
         restarted

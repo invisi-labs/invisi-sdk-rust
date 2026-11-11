@@ -841,7 +841,10 @@ impl PendingWalletRefresh {
                 if transaction.hash != hash
                     || transaction.chain_id != session.scope.context.chain_id
                     || transaction.to != Some(call.to)
-                    || transaction.input != call.data
+                    || !super::operation::record_matches_transaction_data(
+                        record,
+                        &transaction.input,
+                    )
                     || transaction.value != call.value
                     || transaction.block.as_ref().is_none_or(|block| {
                         completion_receipts

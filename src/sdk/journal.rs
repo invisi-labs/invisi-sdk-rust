@@ -806,28 +806,34 @@ impl PreparedSnapshot {
                 })
             }
         };
-        if let (Some(proof), Some(backend)) = (&self.proof, backend) {
+        if let Some(proof) = &self.proof {
             let words = match &managed {
                 ManagedPrepared::Funds(v) => v.public_inputs()?,
                 ManagedPrepared::Credit(v) => v.public_inputs()?,
             };
             let statement = prover::statement(
                 &proof.circuit_name,
-                &proof.target,
+                &self.target,
                 words.into_iter().map(sdk::field_word).collect(),
             )?;
             prover::assert_bundle(proof, &statement)?;
-            if !backend.verify(proof, &statement)? {
-                return Err("recovered proof verification failed".into());
+            if let Some(backend) = backend {
+                if !backend.verify(proof, &statement)? {
+                    return Err("recovered proof verification failed".into());
+                }
             }
             match &mut managed {
                 ManagedPrepared::Funds(v) => {
                     v.proof = Some(proof.clone());
-                    v.phase = Phase::Proved;
+                    if backend.is_some() {
+                        v.phase = Phase::Proved;
+                    }
                 }
                 ManagedPrepared::Credit(v) => {
                     v.proof = Some(proof.clone());
-                    v.phase = Phase::Proved;
+                    if backend.is_some() {
+                        v.phase = Phase::Proved;
+                    }
                 }
             }
         }
@@ -836,6 +842,116 @@ impl PreparedSnapshot {
 }
 
 impl PreparedSnapshot {
+    pub fn broadcaster_execution(&self) -> Option<invisi_sdk_rpc::broadcaster::Execution> {
+        self.broadcaster.as_ref().map(|s| s.quote.quote.execution)
+    }
+    /// Validate retained public bytes offline; retry never regenerates a proof or reads the chain.
+    pub fn export_broadcaster_submission(&self) -> Result<BroadcasterSubmission> {
+        use invisi_sdk_rpc::broadcaster::{Execution, MemberProof};
+        let saved = self
+            .broadcaster
+            .as_ref()
+            .ok_or("saved broadcaster context required")?;
+        let recursive = self.target == "noir-recursive";
+        if (saved.quote.quote.execution == Execution::Aggregate) != recursive {
+            return Err("broadcaster execution does not match proof target".into());
+        }
+        let mut call = P::InvisiProtocolCalls::abi_decode(&self.unsigned_call, true)
+            .map_err(|e| e.to_string())?;
+        let mut member = None;
+        if let Some(proof) = &self.proof {
+            let owner = match &call {
+                P::InvisiProtocolCalls::transact_0(c) => self
+                    .inputs
+                    .first()
+                    .map(|i| sdk::word_address(i.note.owner_address))
+                    .transpose()?
+                    .unwrap_or_else(|| {
+                        if c.r.funding.payer == Address::ZERO {
+                            Address::with_last_byte(1)
+                        } else {
+                            c.r.funding.payer
+                        }
+                    }),
+                P::InvisiProtocolCalls::createCredit(c) => c.p.owner,
+                P::InvisiProtocolCalls::updateCredit(c) => c.p.owner,
+                P::InvisiProtocolCalls::creditDraw(_) => sdk::word_address(
+                    self.credit_inputs
+                        .first()
+                        .ok_or("saved Credit input required")?
+                        .delivery
+                        .note
+                        .spender_wallet_identity,
+                )?,
+                _ => return Err("unexpected saved proof".into()),
+            };
+            self.restore(&Wallet::from_owner(owner)?, None)?;
+            let statement = prover::statement(
+                &proof.circuit_name,
+                &self.target,
+                proof.public_inputs.clone(),
+            )?;
+            prover::assert_bundle(proof, &statement)?;
+            let credit_proof = || {
+                <(
+                    alloy_sol_types::sol_data::Uint<8>,
+                    alloy_sol_types::sol_data::Bytes,
+                ) as alloy_sol_types::SolType>::abi_encode_params(&(
+                    0u8,
+                    Bytes::copy_from_slice(&proof.proof),
+                ))
+                .into()
+            };
+            match &mut call {
+                P::InvisiProtocolCalls::transact_0(c) => c._0 = proof.proof.clone().into(),
+                P::InvisiProtocolCalls::createCredit(c) => c._0 = credit_proof(),
+                P::InvisiProtocolCalls::updateCredit(c) => c._0 = credit_proof(),
+                P::InvisiProtocolCalls::creditDraw(c) => c._0 = credit_proof(),
+                _ => return Err("unexpected saved proof".into()),
+            }
+            if recursive {
+                member = Some(MemberProof {
+                    format_version: proof.format_version,
+                    circuit_name: proof.circuit_name.clone(),
+                    target: proof.target.clone(),
+                    bb_version: proof.bb_version.clone(),
+                    artifact_sha256: proof.artifact_sha256.clone(),
+                    vk_sha256: proof.vk_sha256.clone(),
+                    proof_hex: hex(&proof.proof),
+                    proof_sha256: proof.proof_sha256.clone(),
+                    public_inputs: proof.public_inputs.clone(),
+                });
+            }
+        } else if matches!(
+            call,
+            P::InvisiProtocolCalls::transact_0(_)
+                | P::InvisiProtocolCalls::createCredit(_)
+                | P::InvisiProtocolCalls::updateCredit(_)
+                | P::InvisiProtocolCalls::creditDraw(_)
+        ) {
+            return Err("saved public proof required".into());
+        }
+        let data = call.abi_encode();
+        if !saved.submitted_data.is_empty()
+            && (saved.submitted_data != data || saved.member_proof != member)
+        {
+            return Err("prepared broadcaster submission changed".into());
+        }
+        if let Some(proof) = &member {
+            invisi_sdk_rpc::broadcaster::validate_member_proof(&data, proof)
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(BroadcasterSubmission {
+            data,
+            member_proof: member,
+        })
+    }
+    pub fn validate_broadcaster_submission(&self, data: &[u8]) -> Result<()> {
+        if self.export_broadcaster_submission()?.data != data {
+            return Err("prepared broadcaster submission changed".into());
+        }
+        Ok(())
+    }
     /// Reconstructs retained final Note calldata for Source-only proof recovery.
     pub fn provenance_calldata(&self) -> Result<Option<Vec<u8>>> {
         let Some(proof) = &self.proof else {
@@ -925,11 +1041,12 @@ impl ManagedPrepared {
             Self::Credit(v) => Ok(Self::Credit(v.with_wallet_response(q, r)?)),
         }
     }
-    pub fn prove(self, backend: &dyn Prover, recursive: bool) -> Result<Self> {
+    pub fn prove(self, backend: &dyn Prover, recursive: impl Into<Option<bool>>) -> Result<Self> {
+        let recursive = recursive.into();
         match self {
             Self::Funds(v) => Ok(Self::Funds(v.prove(backend, recursive)?)),
             Self::Credit(v) => {
-                if recursive {
+                if recursive == Some(true) {
                     return Err("Credit operations cannot use funds aggregation".into());
                 }
                 Ok(Self::Credit(v.prove(backend)?))

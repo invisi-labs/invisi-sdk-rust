@@ -1203,11 +1203,11 @@ fn credit_relay_context_survives_encrypted_restart_and_fences_uncertain_submissi
     relay
         .lookup_mode
         .store(2, std::sync::atomic::Ordering::SeqCst);
-    assert_eq!(
-        operation.submit_broadcaster(relay.as_ref()).unwrap().id,
-        "server-owned"
-    );
-    assert_eq!(relay.attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
+    assert!(operation
+        .submit_broadcaster(relay.as_ref())
+        .unwrap_err()
+        .contains("not found"));
+    assert_eq!(relay.attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
 struct SessionCreditRelay {
     lookup_mode: std::sync::atomic::AtomicUsize,
@@ -1269,6 +1269,7 @@ impl sdk::PreparedBroadcaster for SessionCreditRelay {
             signer: self.configuration().quote_signer,
         };
         let quote = Quote {
+            execution: invisi_sdk_rpc::broadcaster::Execution::Direct,
             token: intent.token,
             fee_recipient: intent.fee_recipient,
             fee_amount: intent.fee_amount.to_string(),
@@ -1387,11 +1388,11 @@ fn funds_relay_retry_reads_known_journal_even_when_inputs_are_spent() {
     relay
         .lookup_mode
         .store(2, std::sync::atomic::Ordering::SeqCst);
-    assert_eq!(
-        op.submit_broadcaster(relay.as_ref()).unwrap().id,
-        "server-owned"
-    );
-    assert_eq!(relay.attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
+    assert!(op
+        .submit_broadcaster(relay.as_ref())
+        .unwrap_err()
+        .contains("not found"));
+    assert_eq!(relay.attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
 
 #[derive(Clone)]
@@ -2658,4 +2659,274 @@ fn acquired_page_generation_cannot_be_relabelled_after_rewind_during_handoff() {
         assert!(pending.decrypt(&AppDecryptor::default()).is_err());
     }
     assert!(session.snapshot().unwrap().notes.is_empty());
+}
+
+#[test]
+fn signed_direct_quote_rejects_manual_recursive_proving() {
+    let h = synced();
+    let mut preparation = transfer(&h);
+    preparation.withdrawal.as_mut().unwrap().1 -= U256::from(10);
+    preparation.automatic_change = true;
+    let mut operation = h.session.prepare_transfer(preparation).unwrap();
+    let relay = Arc::new(SessionCreditRelay {
+        lookup_mode: std::sync::atomic::AtomicUsize::new(0),
+        attempts: std::sync::atomic::AtomicUsize::new(0),
+    });
+    operation
+        .with_broadcaster(
+            relay,
+            &sdk::BroadcasterOptions {
+                max_fee_amount: Some(U256::from(100)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let request = operation.export_wallet_request("quoted-direct").unwrap();
+    let response: sdk::WalletResponse =
+        serde_json::from_value(crate::wallet::execute(&key(1), &request.as_value()).unwrap())
+            .unwrap();
+    assert!(operation
+        .with_wallet_response(&response)
+        .unwrap()
+        .prove(&Backend, true)
+        .is_err());
+}
+
+struct SessionAggregateRelay {
+    base: SessionCreditRelay,
+    request: std::sync::Mutex<Option<serde_json::Value>>,
+}
+impl sdk::PreparedBroadcaster for SessionAggregateRelay {
+    fn configuration(&self) -> crate::broadcaster::Configuration {
+        self.base.configuration()
+    }
+    fn provenance_mode(&self) -> Option<()> {
+        None
+    }
+    fn fee(&self, token: Address, data: Option<&[u8]>) -> Result<crate::broadcaster::Fee> {
+        self.base.fee(token, data)
+    }
+    fn submission_requirements(&self, _: &crate::broadcaster::VerifiedQuote) -> Result<bool> {
+        Ok(false)
+    }
+    fn quote(
+        &self,
+        data: &[u8],
+        chain: u64,
+        protocol: Address,
+        now: u64,
+        sidecars: &[crate::provenance::ProofSidecar],
+    ) -> Result<crate::broadcaster::VerifiedQuote> {
+        use crate::broadcaster::*;
+        let base = self.base.quote(data, chain, protocol, now, sidecars)?;
+        let mut signed = base.signed().clone();
+        signed.quote.execution = Execution::Aggregate;
+        let (signature, recovery) = k256::ecdsa::SigningKey::from_slice(&key(1))
+            .unwrap()
+            .sign_prehash_recoverable(
+                quote_digest(&signed.quote, base.trust())
+                    .unwrap()
+                    .as_slice(),
+            )
+            .unwrap();
+        let mut bytes = signature.to_bytes().to_vec();
+        bytes.push(recovery.to_byte());
+        signed.signature = format!("0x{}", hex::encode(bytes));
+        VerifiedQuote::authenticate(signed, base.trust().clone(), data, now, None)
+            .map_err(|e| e.to_string())
+    }
+    fn submit(
+        &self,
+        _: &[u8],
+        _: &crate::broadcaster::VerifiedQuote,
+        _: &[crate::provenance::ProofSidecar],
+    ) -> Result<crate::broadcaster::Status> {
+        panic!("recursive submission must carry memberProof")
+    }
+    fn submit_member(
+        &self,
+        data: &[u8],
+        quote: &crate::broadcaster::VerifiedQuote,
+        sidecars: &[crate::provenance::ProofSidecar],
+        member: Option<&crate::broadcaster::MemberProof>,
+    ) -> Result<crate::broadcaster::Status> {
+        let member = member.ok_or("member required")?;
+        crate::broadcaster::validate_member_proof(data, member).map_err(|e| e.to_string())?;
+        let request = serde_json::json!({"data":hex::encode(data),"quote":quote.signed(),"proofSidecars":sidecars,"memberProof":member});
+        let mut saved = self.request.lock().unwrap();
+        if let Some(previous) = &*saved {
+            assert_eq!(previous, &request);
+        } else {
+            *saved = Some(request);
+        }
+        let attempt = self
+            .base
+            .attempts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if attempt == 0 {
+            return Err("response lost".into());
+        }
+        self.lookup_status("aggregate-owned")?
+            .ok_or("status missing".into())
+    }
+    fn lookup_status(&self, id: &str) -> Result<Option<crate::broadcaster::Status>> {
+        use crate::broadcaster::StatusState::*;
+        let state = match self
+            .base
+            .lookup_mode
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            0 => Queued,
+            1 => Proving,
+            2 => Rejected,
+            3 => Expired,
+            _ => return Ok(None),
+        };
+        Ok(Some(crate::broadcaster::Status {
+            id: id.into(),
+            state,
+            transaction_hash: None,
+        }))
+    }
+}
+
+#[test]
+fn signed_aggregate_defaults_recursive_and_restores_exact_request_without_reproving() {
+    let h = synced();
+    let mut preparation = transfer(&h);
+    preparation.withdrawal.as_mut().unwrap().1 -= U256::from(10);
+    preparation.automatic_change = true;
+    let mut operation = h.session.prepare_transfer(preparation).unwrap();
+    let relay = Arc::new(SessionAggregateRelay {
+        base: SessionCreditRelay {
+            lookup_mode: std::sync::atomic::AtomicUsize::new(0),
+            attempts: std::sync::atomic::AtomicUsize::new(0),
+        },
+        request: std::sync::Mutex::new(None),
+    });
+    operation
+        .with_broadcaster(
+            relay.clone(),
+            &sdk::BroadcasterOptions {
+                max_fee_amount: Some(U256::from(100)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let request = operation
+        .export_wallet_request("aggregate-consent")
+        .unwrap();
+    let response: sdk::WalletResponse =
+        serde_json::from_value(crate::wallet::execute(&key(1), &request.as_value()).unwrap())
+            .unwrap();
+    let mut operation = operation
+        .with_wallet_response(&response)
+        .unwrap()
+        .prove(&Backend, None)
+        .unwrap();
+    assert!(operation.calldata(Address::ZERO).is_err());
+    let id = operation.id().to_string();
+    assert!(operation
+        .submit_broadcaster(relay.as_ref())
+        .unwrap_err()
+        .contains("response lost"));
+    let snapshot = h.session.snapshot().unwrap();
+    let saved = serde_json::to_value(&snapshot.operations[&id].snapshot).unwrap();
+    assert_eq!(
+        saved["broadcaster"]["memberProof"]["target"],
+        "noir-recursive"
+    );
+    let mut forged = saved.clone();
+    forged["proof"]["publicInputs"][6] = serde_json::json!(format!("0x{}", "00".repeat(32)));
+    forged["broadcaster"]["memberProof"]["publicInputs"][6] =
+        forged["proof"]["publicInputs"][6].clone();
+    let forged: sdk::journal::PreparedSnapshot = serde_json::from_value(forged).unwrap();
+    assert!(forged.export_broadcaster_submission().is_err());
+    drop(operation);
+    h.chain
+        .spent
+        .lock()
+        .unwrap()
+        .insert(sdk::field_word(h.note.nullifier().unwrap()));
+    h.chain
+        .height
+        .store(200, std::sync::atomic::Ordering::SeqCst);
+    let mut operation = h.session.resume(&id, None).unwrap();
+    assert_eq!(
+        operation.submit_broadcaster(relay.as_ref()).unwrap().id,
+        "aggregate-owned"
+    );
+    for mode in 0..4 {
+        relay
+            .base
+            .lookup_mode
+            .store(mode, std::sync::atomic::Ordering::SeqCst);
+        operation.submit_broadcaster(relay.as_ref()).unwrap();
+        let state = h.session.snapshot().unwrap();
+        assert!(!state.operations[&id].status.terminal());
+        assert!(state
+            .notes
+            .values()
+            .any(|n| n.reserved_by.as_deref() == Some(&id)));
+    }
+    relay
+        .base
+        .lookup_mode
+        .store(4, std::sync::atomic::Ordering::SeqCst);
+    assert!(operation
+        .submit_broadcaster(relay.as_ref())
+        .unwrap_err()
+        .contains("not found"));
+    assert_eq!(
+        relay
+            .base
+            .attempts
+            .load(std::sync::atomic::Ordering::SeqCst),
+        2
+    );
+    use alloy_sol_types::SolCall;
+    let state = h.session.snapshot().unwrap();
+    let call = state.operations[&id].call.as_ref().unwrap();
+    let member = P::transact_0Call::abi_decode(&call.data, true).unwrap();
+    let mut outer = P::transact_1Call {
+        _0: vec![1; 32].into(),
+        requests: vec![member.r.clone(), member.r.clone()],
+    };
+    let hash = B256::with_last_byte(8);
+    operation.track_transaction(hash).unwrap();
+    *h.source.transaction.lock().unwrap() = Some(CanonicalTransaction {
+        hash,
+        to: Some(call.to),
+        input: outer.abi_encode(),
+        value: U256::ZERO,
+        chain_id: context().chain_id,
+        block: Some(block(10)),
+    });
+    {
+        let mut receipt = h.source.receipt.lock().unwrap();
+        receipt.transaction_hash = hash;
+        receipt.success = true;
+        receipt.logs.clear();
+    }
+    assert!(h.session.reconcile(&id).is_err());
+    assert!(h
+        .session
+        .snapshot()
+        .unwrap()
+        .notes
+        .values()
+        .any(|n| n.reserved_by.as_deref() == Some(&id)));
+    outer.requests.pop();
+    h.source.transaction.lock().unwrap().as_mut().unwrap().input = outer.abi_encode();
+    let pending = match h.session.reconcile(&id).unwrap() {
+        Reconciliation::Ready(v) => v,
+        _ => panic!("canonical aggregate reconciliation expected"),
+    };
+    pending.decrypt(&AppDecryptor::default()).unwrap();
+    let state = h.session.snapshot().unwrap();
+    assert_eq!(state.operations[&id].status, OperationStatus::Confirmed);
+    assert!(state
+        .notes
+        .values()
+        .all(|n| n.reserved_by.as_deref() != Some(&id)));
 }

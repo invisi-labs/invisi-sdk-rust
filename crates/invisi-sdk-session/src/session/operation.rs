@@ -14,6 +14,24 @@ pub struct Operation {
     prepared: ManagedPrepared,
     requests: BTreeMap<String, WalletRequest>,
 }
+pub(super) fn record_matches_transaction_data(record: &OperationRecord, data: &[u8]) -> bool {
+    let Some(call) = &record.call else {
+        return false;
+    };
+    if record.broadcaster_id.is_some() {
+        if record
+            .snapshot
+            .validate_broadcaster_submission(&call.data)
+            .is_err()
+        {
+            return false;
+        }
+        if let Some(execution) = record.snapshot.broadcaster_execution() {
+            return crate::broadcaster::matches_execution_transaction(&call.data, execution, data);
+        }
+    }
+    data == call.data
+}
 fn bind_provenance_call(
     record: &OperationRecord,
     value: sdk::PreparedTransaction,
@@ -189,6 +207,9 @@ impl Operation {
                 .call
                 .as_ref()
                 .ok_or("saved broadcaster calldata required")?;
+            record
+                .snapshot
+                .validate_broadcaster_submission(&call.data)?;
             if crate::broadcaster::request_hash(&call.data).map_err(|e| e.to_string())?
                 != saved.intent_hash
                 || sdk::address_word(call.to) != self.session.scope.context.protocol_address
@@ -208,14 +229,11 @@ impl Operation {
                 saved.provenance_mode(),
             )
             .map_err(|e| e.to_string())?;
-            if let Some(status) = record
-                .broadcaster_submission_id
-                .as_deref()
-                .map(|submission_id| relay.lookup_status(submission_id))
-                .transpose()?
-                .flatten()
-            {
-                if Some(status.id.as_str()) != record.broadcaster_submission_id.as_deref() {
+            if let Some(submission_id) = record.broadcaster_submission_id.as_deref() {
+                let status = relay
+                    .lookup_status(submission_id)?
+                    .ok_or("broadcaster submission not found; retain reservation")?;
+                if status.id != submission_id {
                     return Err("broadcaster status ID mismatch".into());
                 }
                 if let Some(hash) = status.transaction_hash {
@@ -235,7 +253,12 @@ impl Operation {
                 saved.provenance_mode(),
             )
             .map_err(|e| e.to_string())?;
-            let status = relay.submit(&call.data, &verified, &saved.sidecars)?;
+            let status = relay.submit_member(
+                &call.data,
+                &verified,
+                &saved.sidecars,
+                saved.member_proof.as_ref(),
+            )?;
             if record
                 .broadcaster_submission_id
                 .as_ref()
@@ -255,9 +278,11 @@ impl Operation {
             return Ok(status);
         }
         let call = match &self.prepared {
-            ManagedPrepared::Funds(v) => {
-                v.calldata(self.session.invisi.chain.as_ref(), Address::ZERO)?
-            }
+            ManagedPrepared::Funds(v) => crate::protocol::TransactionCall {
+                to: sdk::word_address(self.session.scope.context.protocol_address)?,
+                value: U256::ZERO,
+                data: v.export_broadcaster_submission()?.data,
+            },
             ManagedPrepared::Credit(v) => {
                 v.calldata(self.session.invisi.chain.as_ref(), Address::ZERO)?
             }
@@ -424,7 +449,7 @@ impl Operation {
         self.prepared = staged;
         Ok(packet)
     }
-    pub fn prove(self, backend: &dyn Prover, recursive: bool) -> Result<Self> {
+    pub fn prove(self, backend: &dyn Prover, recursive: impl Into<Option<bool>>) -> Result<Self> {
         self.current()?;
         let prepared = self.prepared.clone_for_stage().prove(backend, recursive)?;
         self.persist(prepared)
@@ -832,8 +857,8 @@ impl WalletSession {
         let generation = record.generation;
         if !record.externalized {
             record.status = phase_status(prepared.phase());
+            record.snapshot = prepared.snapshot()?;
         }
-        record.snapshot = prepared.snapshot()?;
         self.commit(state)?;
         Ok(Operation {
             session: self.clone(),
@@ -888,7 +913,7 @@ impl WalletSession {
         if receipt.transaction_hash != hash
             || transaction.hash != hash
             || transaction.to != Some(call.to)
-            || transaction.input != call.data
+            || !record_matches_transaction_data(record, &transaction.input)
             || transaction.value != call.value
             || transaction.chain_id != self.scope.context.chain_id
             || transaction.block.as_ref() != Some(&receipt.block)

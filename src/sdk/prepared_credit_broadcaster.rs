@@ -170,6 +170,7 @@ impl PreparedCredit {
                 attempted: false,
                 submission_id: None,
                 submitted_data: Vec::new(),
+                member_proof: None,
             });
             return Ok(candidate);
         }
@@ -194,14 +195,9 @@ impl PreparedCredit {
         }
         if state.attempted {
             let state = state.clone();
-            if let Some(id) = &state.submission_id {
-                if let Some(status) = relay.lookup_status(id)? {
-                    if &status.id != id {
-                        return Err("broadcaster submission ID mismatch".into());
-                    }
-                    return Ok(status);
-                }
-            }
+            journal::ManagedPrepared::Credit(self.clone())
+                .snapshot()?
+                .validate_broadcaster_submission(&state.submitted_data)?;
             let quote = VerifiedQuote::authenticate(
                 state.quote.clone(),
                 Trust {
@@ -214,6 +210,15 @@ impl PreparedCredit {
                 state.provenance_mode(),
             )
             .map_err(|e| e.to_string())?;
+            if let Some(id) = &state.submission_id {
+                let status = relay
+                    .lookup_status(id)?
+                    .ok_or("broadcaster submission not found; retain reservation")?;
+                if &status.id != id {
+                    return Err("broadcaster submission ID mismatch".into());
+                }
+                return Ok(status);
+            }
             let result = relay.submit(&state.submitted_data, &quote, &[])?;
             if state
                 .submission_id

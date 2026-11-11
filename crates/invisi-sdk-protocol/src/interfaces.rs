@@ -163,8 +163,6 @@ impl ProtocolDeployment {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProtocolStatus {
     pub indexed_head: Option<CanonicalBlock>,
-    pub detection_enabled: bool,
-    pub checked_bits: u8,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LeafMetadata {

@@ -59,7 +59,7 @@ fn deployment() -> ProtocolDeployment {
     }
 }
 fn status() -> Value {
-    json!({"apiVersion":"v1","protocolVersion":"1","deployment":deployment(),"indexedHead":block(10),"detectionEnabled":true,"checkedBits":8})
+    json!({"apiVersion":"v1","protocolVersion":"1","deployment":deployment(),"indexedHead":block(10)})
 }
 fn client(
     handler: impl Fn(&str, &Value) -> Value + Send + Sync + 'static,
@@ -223,22 +223,6 @@ fn membership_is_bound_to_chain_known_root_and_exact_poseidon_path() {
         ..input
     };
     assert!(good.get_membership(&wrong, &block(10)).is_err());
-}
-
-#[test]
-fn delegated_detection_rejects_zero_key_before_network_access() {
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let count = calls.clone();
-    let rpc = client(move |method, _| {
-        count.fetch_add(1, Ordering::SeqCst);
-        if method == "invisi_getStatus" {
-            status()
-        } else {
-            json!({"blockHash":block(10).hash,"checkedBits":8,"candidates":[]})
-        }
-    });
-    assert!(rpc.detect_notes(1, 10, &[0; 32]).is_err());
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
 #[test]
@@ -480,26 +464,10 @@ fn empty_range_null_collections_match_current_service_encoding() {
         "invisi_getStatus" => status(),
         "invisi_getNoteUpdates" => json!({"blockHash":block(10).hash,"notes":null}),
         "invisi_getCreditTransitions" => Value::Null,
-        "invisi_detectNotes" | "invisi_detectCreditStates" => {
-            json!({"blockHash":block(10).hash,"checkedBits":8,"candidates":null})
-        }
         _ => panic!("unexpected method"),
     });
     assert!(rpc.get_note_updates(1, 10).unwrap().items.is_empty());
     assert!(rpc.get_credit_transitions(1, 10).unwrap().items.is_empty());
-    let mut key = [0; 32];
-    key[31] = 1;
-    let detection = *invisi_sdk::wallet::detection_key(&key).unwrap();
-    assert!(rpc
-        .detect_notes(1, 10, &detection)
-        .unwrap()
-        .items
-        .is_empty());
-    assert!(rpc
-        .detect_credit_states(1, 10, &detection)
-        .unwrap()
-        .items
-        .is_empty());
 }
 
 #[test]

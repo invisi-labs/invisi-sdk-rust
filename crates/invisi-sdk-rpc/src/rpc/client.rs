@@ -163,17 +163,7 @@ impl<T: RpcTransport, C: CanonicalChain> ProtocolRpcClient<T, C> {
                 return Err(Error::Invalid("index predates deployment"));
             }
         }
-        let bits = uint(&v["checkedBits"], 8)? as u8;
-        if !(1..=24).contains(&bits) {
-            return Err(Error::Invalid("invalid detection precision"));
-        }
-        Ok(ProtocolStatus {
-            indexed_head: head,
-            detection_enabled: v["detectionEnabled"]
-                .as_bool()
-                .ok_or(Error::Invalid("detection flag required"))?,
-            checked_bits: bits,
-        })
+        Ok(ProtocolStatus { indexed_head: head })
     }
     fn read_at(&self, block: &CanonicalBlock) -> Result<()> {
         self.read_status_metadata()?;
@@ -314,13 +304,7 @@ impl RootAnchor {
     }
 }
 impl<T: RpcTransport, C: CanonicalChain> ProtocolRpcClient<T, C> {
-    fn update_page(
-        &self,
-        from: u64,
-        to: u64,
-        method: &str,
-        detection_key: Option<&[u8; 32]>,
-    ) -> Result<(CanonicalBlock, Value)> {
+    fn update_page(&self, from: u64, to: u64, method: &str) -> Result<(CanonicalBlock, Value)> {
         if from < self.deployment.protocol.from_block
             || to < from
             || to - from >= MAX_UPDATE_BLOCKS
@@ -329,13 +313,6 @@ impl<T: RpcTransport, C: CanonicalChain> ProtocolRpcClient<T, C> {
             return Err(Error::Invalid(
                 "updates require at most 10000 deployment blocks",
             ));
-        }
-        if let Some(key) = detection_key {
-            if key.iter().all(|byte| *byte == 0) {
-                return Err(Error::Invalid("invalid detection key"));
-            }
-            decaf377_fmd::DetectionKey::from_bytes(*key)
-                .map_err(|_| Error::Invalid("invalid detection key"))?;
         }
         let status = self.read_status_metadata()?;
         let head = status
@@ -353,21 +330,11 @@ impl<T: RpcTransport, C: CanonicalChain> ProtocolRpcClient<T, C> {
                 "indexed head disagrees with requested canonical block",
             ));
         }
-        let mut params = vec![json!({"fromBlock":from,"toBlock":to,"blockHash":block.hash})];
-        if let Some(key) = detection_key {
-            if !status.detection_enabled {
-                return Err(Error::Invalid("delegated detection disabled"));
-            }
-            params.push(json!(format!("0x{}", hex::encode(key))));
-        }
+        let params = vec![json!({"fromBlock":from,"toBlock":to,"blockHash":block.hash})];
         let v = self.rpc.call(method, Value::Array(params))?;
         if method != "invisi_getCreditTransitions" {
             if hash(&v["blockHash"])? != block.hash {
                 return Err(Error::Invalid("update anchor mismatch"));
-            }
-            if detection_key.is_some() && uint(&v["checkedBits"], 8)? != status.checked_bits as u64
-            {
-                return Err(Error::Invalid("detection precision mismatch"));
             }
         }
         self.canonical(&block)?;
@@ -428,21 +395,9 @@ impl<T: RpcTransport, C: CanonicalChain> ProtocolRpcClient<T, C> {
         Ok(out)
     }
     pub fn get_note_updates(&self, from: u64, to: u64) -> Result<UpdatePage<NoteOutput>> {
-        let (block, v) = self.update_page(from, to, "invisi_getNoteUpdates", None)?;
+        let (block, v) = self.update_page(from, to, "invisi_getNoteUpdates")?;
         let rows = list_or_null(v.get("notes").ok_or(Error::Invalid("Note list required"))?)?;
         let items = self.leaf_rows(rows, from, to, NoteOutput::parse)?;
-        self.canonical(&block)?;
-        Ok(UpdatePage { block, items })
-    }
-    pub fn detect_notes(
-        &self,
-        from: u64,
-        to: u64,
-        key: &[u8; 32],
-    ) -> Result<UpdatePage<NoteOutput>> {
-        let (block, v) = self.update_page(from, to, "invisi_detectNotes", Some(key))?;
-        let rows = detected_rows(&v, "note")?;
-        let items = self.leaf_rows(&rows, from, to, NoteOutput::parse)?;
         self.canonical(&block)?;
         Ok(UpdatePage { block, items })
     }
@@ -451,21 +406,9 @@ impl<T: RpcTransport, C: CanonicalChain> ProtocolRpcClient<T, C> {
         from: u64,
         to: u64,
     ) -> Result<UpdatePage<CreditTransition>> {
-        let (block, v) = self.update_page(from, to, "invisi_getCreditTransitions", None)?;
+        let (block, v) = self.update_page(from, to, "invisi_getCreditTransitions")?;
         let rows = list_or_null(&v)?;
         let items = self.transitions(rows, from, to)?;
-        self.canonical(&block)?;
-        Ok(UpdatePage { block, items })
-    }
-    pub fn detect_credit_states(
-        &self,
-        from: u64,
-        to: u64,
-        key: &[u8; 32],
-    ) -> Result<UpdatePage<IndexedCreditState>> {
-        let (block, v) = self.update_page(from, to, "invisi_detectCreditStates", Some(key))?;
-        let rows = detected_rows(&v, "state")?;
-        let items = self.leaf_rows(&rows, from, to, IndexedCreditState::parse)?;
         self.canonical(&block)?;
         Ok(UpdatePage { block, items })
     }
@@ -633,20 +576,6 @@ impl<T: RpcTransport, C: CanonicalChain> ProtocolRpcClient<T, C> {
     pub fn is_credit_consumed(&self, nullifier: B256, block: &CanonicalBlock) -> Result<bool> {
         self.consumption(nullifier, block, true)
     }
-}
-fn detected_rows(v: &Value, field: &str) -> Result<Vec<Value>> {
-    list_or_null(
-        v.get("candidates")
-            .ok_or(Error::Invalid("detection candidates required"))?,
-    )?
-    .iter()
-    .map(|row| {
-        if !row["fallback"].is_boolean() || !row[field].is_object() {
-            return Err(Error::Invalid("invalid detection candidate"));
-        }
-        Ok(row[field].clone())
-    })
-    .collect()
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndexedLookup<A> {

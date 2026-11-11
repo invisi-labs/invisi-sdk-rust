@@ -56,6 +56,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     )?;
 
+    // Available before authorization, proof generation and token approval.
+    println!("{}", serde_json::to_string(&prepared.estimate_gas()?)?);
+
     // Only the restricted owner sweep can omit private approval; ordinary withdrawals require it.
     if prepared.needs_authorization() {
         let request = prepared.export_wallet_authorization()?;

@@ -291,20 +291,14 @@ fn http_transport_maps_service_chain_paths_and_reports_retry_after() {
 }
 
 #[test]
-fn final_gas_estimation_and_signed_relay_bind_chain_caller_calldata_and_hash() {
+fn signed_relay_binds_chain_nonce_price_and_hash() {
     use alloy_primitives::U256;
-    use invisi_sdk::protocol::TransactionCall;
     let raw = vec![1, 2, 3];
     let expected = keccak256(&raw);
     let chain = EthereumChain::new(Transport {
         handler: Box::new(move |r| {
             let result = match r["method"].as_str().unwrap() {
                 "eth_chainId" => json!("0x7a69"),
-                "eth_estimateGas" => {
-                    assert_eq!(r["params"][0]["from"], json!(Address::repeat_byte(3)));
-                    assert_eq!(r["params"][0]["data"], "0x0102");
-                    json!("0x5208")
-                }
                 "eth_getTransactionCount" => {
                     assert_eq!(r["params"][1], "pending");
                     json!("0x2")
@@ -319,20 +313,6 @@ fn final_gas_estimation_and_signed_relay_bind_chain_caller_calldata_and_hash() {
             Ok(json!({"jsonrpc":"2.0","id":r["id"],"result":result}))
         }),
     });
-    let call = TransactionCall {
-        to: Address::repeat_byte(1),
-        data: vec![1, 2],
-        value: U256::ZERO,
-    };
-    assert_eq!(
-        chain
-            .estimate_gas(31337, Address::repeat_byte(3), &call)
-            .unwrap(),
-        U256::from(21000)
-    );
-    assert!(chain
-        .estimate_gas(1, Address::repeat_byte(3), &call)
-        .is_err());
     assert_eq!(chain.pending_nonce(Address::repeat_byte(3)).unwrap(), 2);
     assert_eq!(chain.gas_price().unwrap(), U256::from(1_000_000_000));
     assert_eq!(chain.send_raw_transaction(31337, &raw).unwrap(), expected);

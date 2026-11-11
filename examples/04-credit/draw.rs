@@ -58,6 +58,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // One ordinary Note receives the total debit. Each owner's grant remains separately accounted.
 
     // Spender approval binds every grant debit and the recipient Note in this prepared plan.
+    // Available before authorization, proof generation and token approval.
+    println!("{}", serde_json::to_string(&prepared.estimate_gas()?)?);
+
     let request = prepared.export_wallet_authorization()?;
     let signature = invisi_sdk_examples::sign_authorization(&request)?;
     let prepared = prepared.with_wallet_signature(&signature)?;

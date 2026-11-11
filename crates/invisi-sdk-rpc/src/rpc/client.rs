@@ -1105,14 +1105,8 @@ impl<T: RpcTransport> CanonicalHead for EthereumChain<T> {
     }
 }
 
-/// Final calldata estimation and signed transaction relay; key custody stays with the caller.
-pub trait ChainGas: CanonicalChain {
-    fn estimate_gas(
-        &self,
-        expected_chain_id: u64,
-        from: Address,
-        call: &crate::protocol::TransactionCall,
-    ) -> Result<U256>;
+/// Transaction pricing, nonce reads and signed relay; key custody stays with the caller.
+pub trait ChainTransaction: CanonicalChain {
     fn gas_price(&self) -> Result<U256>;
     fn pending_nonce(&self, address: Address) -> Result<u64>;
     fn send_raw_transaction(
@@ -1135,27 +1129,7 @@ fn quantity_u256(value: &Value) -> Result<U256> {
     }
     U256::from_str_radix(text, 16).map_err(|_| Error::Invalid("Ethereum quantity overflow"))
 }
-impl<T: RpcTransport> ChainGas for EthereumChain<T> {
-    fn estimate_gas(
-        &self,
-        expected_chain_id: u64,
-        from: Address,
-        call: &crate::protocol::TransactionCall,
-    ) -> Result<U256> {
-        if expected_chain_id == 0 || self.chain_id()? != expected_chain_id {
-            return Err(Error::Invalid("gas estimation chain mismatch"));
-        }
-        if from == Address::ZERO || call.to == Address::ZERO {
-            return Err(Error::Invalid(
-                "real caller and destination required for gas estimation",
-            ));
-        }
-        let result=quantity_u256(&self.rpc.call("eth_estimateGas",json!([{"from":from,"to":call.to,"data":format!("0x{}",hex::encode(&call.data)),"value":format!("{:#x}",call.value)}]))?)?;
-        if result == U256::ZERO {
-            return Err(Error::Invalid("zero gas estimate"));
-        }
-        Ok(result)
-    }
+impl<T: RpcTransport> ChainTransaction for EthereumChain<T> {
     fn gas_price(&self) -> Result<U256> {
         quantity_u256(&self.rpc.call("eth_gasPrice", json!([]))?)
     }

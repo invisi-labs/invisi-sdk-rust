@@ -33,6 +33,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Relayers need owner EVM consent; this signature is separate from native circuit
     // authorization.
+    // Available before authorization, proof generation and token approval.
+    println!("{}", serde_json::to_string(&prepared.estimate_gas()?)?);
+
     if caller != wallet.owner_address() {
         let request = prepared.export_revocation_signing_request()?;
         let signature = invisi_sdk_examples::sign_authorization(&request)?;

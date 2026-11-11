@@ -56,6 +56,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         invisi.prepare_update_credit(&wallet, input, changes, deadline, Fee::default())?;
 
     // Owner approval binds the successor state; historical gross usage is not reset by an update.
+    // Available before authorization, proof generation and token approval.
+    println!("{}", serde_json::to_string(&prepared.estimate_gas()?)?);
+
     let request = prepared.export_wallet_authorization()?;
     let signature = invisi_sdk_examples::sign_authorization(&request)?;
     let prepared = prepared.with_wallet_signature(&signature)?;

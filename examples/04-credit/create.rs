@@ -62,6 +62,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let prepared = invisi.prepare_create_credit(&wallet, state, deadline, Fee::default())?;
 
     // Owner approval binds the allocated grant, spender, expiry and policy before proving.
+    // Available before authorization, proof generation and token approval.
+    println!("{}", serde_json::to_string(&prepared.estimate_gas()?)?);
+
     let request = prepared.export_wallet_authorization()?;
     let signature = invisi_sdk_examples::sign_authorization(&request)?;
     let prepared = prepared.with_wallet_signature(&signature)?;

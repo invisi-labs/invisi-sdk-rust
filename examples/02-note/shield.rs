@@ -32,18 +32,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut funding = sdk::empty_funding();
     funding.amount = amount;
     funding.payer = wallet.owner_address();
-    let prepared = invisi
-        .prepare_shield(
-            &wallet,
-            sdk::ShieldPreparation {
-                token,
-                outputs: vec![output],
-                funding,
-                fee: Fee::default(),
-                deadline,
-            },
-        )?
-        .ready()?;
+    let prepared = invisi.prepare_shield(
+        &wallet,
+        sdk::ShieldPreparation {
+            token,
+            outputs: vec![output],
+            funding,
+            fee: Fee::default(),
+            deadline,
+        },
+    )?;
+    println!("{}", serde_json::to_string(&prepared.estimate_gas()?)?);
+    let prepared = prepared.ready()?;
 
     // Direct funding requires CALLER_ADDRESS to equal the public funding payer.
     let caller: Address = env::var("CALLER_ADDRESS")?.parse()?;

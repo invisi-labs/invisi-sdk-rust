@@ -535,14 +535,13 @@ impl Operation {
         self.session.commit(state)?;
         Ok(call)
     }
-    pub fn estimate_gas<G: crate::rpc::ChainGas>(
-        &mut self,
-        gas: &G,
-        caller: Address,
-    ) -> Result<U256> {
-        let call = self.calldata(caller)?;
-        gas.estimate_gas(self.session.scope.context.chain_id, caller, &call)
-            .map_err(|e| e.to_string())
+
+    /// Estimate the prepared workload locally without exporting or changing wallet state.
+    pub fn estimate_gas(&self) -> Result<invisi_sdk_protocol::gas::GasEstimate> {
+        match &self.prepared {
+            ManagedPrepared::Funds(v) => v.estimate_gas(),
+            ManagedPrepared::Credit(v) => v.estimate_gas(),
+        }
     }
     pub fn track_transaction(&mut self, hash: B256) -> Result<()> {
         if hash == B256::ZERO {

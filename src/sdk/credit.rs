@@ -801,16 +801,7 @@ impl PreparedCredit {
     pub fn proof(&self) -> Option<&ProofBundle> {
         self.proof.as_ref()
     }
-    pub fn estimate_gas<G: crate::rpc::ChainGas>(
-        &self,
-        chain: &dyn ChainState,
-        gas: &G,
-        caller: Address,
-    ) -> Result<U256> {
-        let call = self.calldata(chain, caller)?;
-        gas.estimate_gas(self.context.chain_id, caller, &call)
-            .map_err(|e| e.to_string())
-    }
+
     pub fn calldata(&self, chain: &dyn ChainState, caller: Address) -> Result<TransactionCall> {
         let block = chain.snapshot()?;
         if chain.context() != self.context {
@@ -1432,56 +1423,26 @@ mod lifecycle_tests {
             assert_eq!(relay.submits.load(std::sync::atomic::Ordering::SeqCst), 2);
         }
     }
-    #[derive(Clone, Default)]
-    pub(super) struct GasProbe {
-        pub(super) chain_id: u64,
-        pub(super) calls: Arc<Mutex<Vec<serde_json::Value>>>,
-        pub(super) fail: Arc<std::sync::atomic::AtomicBool>,
-    }
-    impl crate::rpc::RpcTransport for GasProbe {
-        fn send(&self, request: &serde_json::Value) -> crate::rpc::Result<serde_json::Value> {
-            if request["method"] == "eth_estimateGas" {
-                self.calls
-                    .lock()
-                    .unwrap()
-                    .push(request["params"][0].clone());
-                if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
-                    return Err(crate::rpc::Error::Invalid("estimate rejected"));
-                }
-            }
-            Ok(
-                serde_json::json!({"jsonrpc":"2.0","id":request["id"],"result":if request["method"]=="eth_chainId" {format!("{:#x}", self.chain_id)} else {"0x1e240".to_owned()}}),
-            )
-        }
-    }
     #[test]
-    fn final_credit_gas_uses_verified_calldata_and_caller() {
+    fn prepared_credit_estimates_are_local_before_proof_and_stable() {
         for label in ["create_credit", "credit_draw_slots1", "credit_update"] {
-            let (chain, p) = prepared(label);
-            let caller = p.wallet.owner;
-            let probe = GasProbe {
-                chain_id: chain.context().chain_id,
-                ..Default::default()
-            };
-            let gas = crate::rpc::EthereumChain::new(probe.clone());
-            assert!(p.estimate_gas(chain.as_ref(), &gas, caller).is_err());
-            assert!(probe.calls.lock().unwrap().is_empty());
-            let proved = p.prove(&SyntheticCreditBackend).unwrap();
-            let expected = proved.calldata(chain.as_ref(), caller).unwrap();
+            let (_, p) = prepared(label);
+            assert!(p.proof().is_none());
+            let estimate = p.estimate_gas().unwrap();
+            assert!(estimate.available());
             assert_eq!(
-                proved.estimate_gas(chain.as_ref(), &gas, caller).unwrap(),
-                U256::from(123456)
+                serde_json::to_value(&estimate).unwrap()["source"],
+                "benchmark"
             );
-            let request = probe.calls.lock().unwrap()[0].clone();
-            assert_eq!(request["from"], serde_json::json!(caller));
-            assert_eq!(request["to"], serde_json::json!(expected.to));
-            assert_eq!(request["data"], format!("0x{}", hex::encode(expected.data)));
-            assert_eq!(request["value"], "0x0");
-            probe.fail.store(true, std::sync::atomic::Ordering::SeqCst);
-            assert!(proved
-                .estimate_gas(chain.as_ref(), &gas, caller)
-                .unwrap_err()
-                .contains("estimate rejected"));
+            let mut nonstandard = p.clone();
+            nonstandard.deliveries[0].clue.clear();
+            let unsupported = nonstandard.estimate_gas().unwrap();
+            assert_eq!(
+                serde_json::to_value(unsupported).unwrap()["reason"],
+                "shape-not-covered"
+            );
+            let proved = p.prove(&SyntheticCreditBackend).unwrap();
+            assert_eq!(estimate, proved.estimate_gas().unwrap());
         }
     }
     struct SyntheticCreditBackend;
@@ -1823,6 +1784,9 @@ mod lifecycle_tests {
                 .collect::<Vec<_>>(),
             expected
         );
+        assert_eq!(prepared.phase(), Phase::Prepared);
+        let unsigned_estimate = prepared.estimate_gas().unwrap();
+        assert!(prepared.proof().is_none());
         let request = prepared.export_wallet_authorization().unwrap();
         let scalar = if label == "credit_draw_slots1" { 2 } else { 1 };
         let key = k256::ecdsa::SigningKey::from_slice(&secret(scalar)).unwrap();
@@ -1834,7 +1798,9 @@ mod lifecycle_tests {
         let mut wrong = request.clone();
         wrong.digest = keccak256("different Credit intent");
         assert!(accept_wallet_signature(prepared.wallet.owner, &wrong, &bytes).is_err());
-        (chain, prepared.with_wallet_signature(&bytes).unwrap())
+        let authorized = prepared.with_wallet_signature(&bytes).unwrap();
+        assert_eq!(unsigned_estimate, authorized.estimate_gas().unwrap());
+        (chain, authorized)
     }
     fn prepared_live(
         label: &str,
@@ -1905,9 +1871,9 @@ mod lifecycle_tests {
     fn constructed_create_draw_and_update_witnesses_match_independent_protocol() {
         for label in ["create_credit", "credit_draw_slots1", "credit_update"] {
             let (_, p) = prepared(label);
-            let reference = serde_json::to_value(p.documented_gas_reference().unwrap()).unwrap();
-            assert_eq!(reference["available"], false);
-            assert_eq!(reference["reason"], "release-not-covered");
+            let reference = serde_json::to_value(p.estimate_gas().unwrap()).unwrap();
+            assert_eq!(reference["available"], true);
+            assert_eq!(reference["source"], "benchmark");
             let request = p.proving_request().unwrap();
             request
                 .witness
@@ -2176,29 +2142,12 @@ mod revocation_tests {
         let direct = invisi
             .prepare_revoke_credit(&wallet, token, 1, 0, deadline, Fee::default())
             .unwrap();
-        let probe = super::lifecycle_tests::GasProbe {
-            chain_id: chain.context().chain_id,
-            ..Default::default()
-        };
-        let gas = crate::rpc::EthereumChain::new(probe.clone());
-        assert!(direct
-            .estimate_gas(chain.as_ref(), &gas, Address::repeat_byte(9))
-            .is_err());
-        assert!(probe.calls.lock().unwrap().is_empty());
-        let expected = direct.calldata(chain.as_ref(), owner).unwrap();
+        let estimate = direct.estimate_gas().unwrap();
+        assert!(!estimate.available());
         assert_eq!(
-            direct.estimate_gas(chain.as_ref(), &gas, owner).unwrap(),
-            U256::from(123456)
+            serde_json::to_value(estimate).unwrap()["reason"],
+            "shape-not-covered"
         );
-        let request = probe.calls.lock().unwrap()[0].clone();
-        assert_eq!(request["from"], serde_json::json!(owner));
-        assert_eq!(request["to"], serde_json::json!(expected.to));
-        assert_eq!(request["data"], format!("0x{}", hex::encode(expected.data)));
-        probe.fail.store(true, std::sync::atomic::Ordering::SeqCst);
-        assert!(direct
-            .estimate_gas(chain.as_ref(), &gas, owner)
-            .unwrap_err()
-            .contains("estimate rejected"));
         assert!(!direct.needs_authorization());
         assert!(direct.calldata(&*chain, owner).is_ok());
         assert!(direct.calldata(&*chain, Address::repeat_byte(9)).is_err());
@@ -2246,7 +2195,9 @@ mod revocation_tests {
 }
 
 impl PreparedCredit {
-    pub fn documented_gas_reference(&self) -> Result<crate::gas::DocumentedGasReference> {
+    /// Look up a local measured workload before authorization or proving.
+    /// Returned medians are conditional benchmarks, not gas limits or monetary fees.
+    pub fn estimate_gas(&self) -> Result<crate::gas::GasEstimate> {
         let (mut query, fee, draw) = match &self.plan {
             CreditPlan::Create { params, .. } => (
                 json!({"kind":"create-credit","scenario":"first-allocation-empty-tree"}),
@@ -2264,11 +2215,15 @@ impl PreparedCredit {
                 successors,
                 ..
             } => (
-                json!({"kind":"draw-credit","capacity":credit_capacity(inputs.len())?,"creditInputs":inputs.len(),"distinctPayers":params.payers.len(),"sourceTrees":params.sources.len(),"noteOutputs":1,"creditOutputs":successors.len(),"creditCiphertextBytes":485,"noteCiphertextBytes":160,"clueBytes":68,"scenario":"distinct-payers"}),
+                json!({"kind":"draw-credit","capacity":credit_capacity(inputs.len())?,"creditInputs":inputs.len(),"distinctPayers":params.payers.iter().map(|p| p.payer).collect::<std::collections::BTreeSet<_>>().len(),"sourceTrees":params.sources.len(),"noteOutputs":1,"creditOutputs":successors.len(),"creditCiphertextBytes":485,"noteCiphertextBytes":160,"clueBytes":68,"scenario":"distinct-payers"}),
                 params.feeAmount,
                 true,
             ),
-            CreditPlan::Revoke { fee, .. } => (json!({"kind":"revoke-credit"}), fee.amount, false),
+            CreditPlan::Revoke { fee, .. } => (
+                json!({"kind":"revoke-credit","authorization":"unknown","bitmapWord":"unknown"}),
+                fee.amount,
+                false,
+            ),
         };
         query["feeEnabled"] = json!(fee != U256::ZERO);
         query["feeMechanism"] = json!(if fee == U256::ZERO {
@@ -2283,15 +2238,12 @@ impl PreparedCredit {
             CreditPlan::Draw { inputs, .. } => 2 * inputs.len(),
             CreditPlan::Revoke { .. } => 0,
         };
-        if self
-            .deliveries
-            .iter()
-            .enumerate()
-            .any(|(i, d)| d.ciphertext.len() != if i < credit_count { 485 } else { 160 })
-        {
+        if self.deliveries.iter().enumerate().any(|(i, d)| {
+            d.clue.len() != 68 || d.ciphertext.len() != if i < credit_count { 485 } else { 160 }
+        }) {
             query = json!({"kind":"unmeasured-delivery-size"});
         }
-        model(crate::gas::get_documented_gas_reference(
+        model(crate::gas::estimate_gas(
             query.as_object().ok_or("invalid gas shape")?,
         ))
     }

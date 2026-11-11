@@ -46,6 +46,7 @@ fn wallet(n: u8) -> Wallet {
 }
 #[derive(Default)]
 struct Chain {
+    gas_forbidden: AtomicBool,
     height: std::sync::atomic::AtomicU64,
     reorg: AtomicBool,
     source_anchors: AtomicBool,
@@ -54,9 +55,17 @@ struct Chain {
 }
 impl ChainState for Chain {
     fn context(&self) -> ProtocolContext {
+        assert!(
+            !self.gas_forbidden.load(Ordering::SeqCst),
+            "estimator read chain context"
+        );
         context()
     }
     fn snapshot(&self) -> Result<CanonicalBlock> {
+        assert!(
+            !self.gas_forbidden.load(Ordering::SeqCst),
+            "estimator read chain"
+        );
         Ok(block(self.height.load(Ordering::SeqCst).max(10)))
     }
     fn canonical(&self, b: &CanonicalBlock) -> Result<()> {
@@ -194,9 +203,33 @@ fn log<E: SolEvent>(event: &E, index: u32) -> CanonicalLog {
         log_index: index,
     }
 }
+#[derive(Default)]
+struct GasGuardStore {
+    inner: MemoryWalletStore,
+    forbidden: AtomicBool,
+}
+impl WalletStore for GasGuardStore {
+    fn snapshot(&self, scope: &str) -> Result<WalletState> {
+        assert!(
+            !self.forbidden.load(Ordering::SeqCst),
+            "estimator accessed wallet store"
+        );
+        self.inner.snapshot(scope)
+    }
+    fn compare_and_swap(&self, scope: &str, revision: u64, next: WalletState) -> Result<()> {
+        assert!(
+            !self.forbidden.load(Ordering::SeqCst),
+            "estimator wrote wallet store"
+        );
+        self.inner.compare_and_swap(scope, revision, next)
+    }
+    fn persistent(&self) -> bool {
+        false
+    }
+}
 struct Harness {
     session: WalletSession,
-    store: Arc<MemoryWalletStore>,
+    store: Arc<GasGuardStore>,
     chain: Arc<Chain>,
     source: Arc<Source>,
     note: crate::note::Note,
@@ -263,7 +296,7 @@ fn harness() -> Harness {
         transaction: Mutex::new(None),
         proofs: Mutex::new(proofs),
     });
-    let store = Arc::new(MemoryWalletStore::default());
+    let store = Arc::new(GasGuardStore::default());
     let session = WalletSession::connect(
         Invisi::new(chain.clone()),
         wallet,
@@ -1395,40 +1428,8 @@ fn funds_relay_retry_reads_known_journal_even_when_inputs_are_spent() {
     assert_eq!(relay.attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
 
-#[derive(Clone)]
-struct ManagedGasProbe {
-    session: WalletSession,
-    id: String,
-    caller: Address,
-    calls: Arc<std::sync::atomic::AtomicUsize>,
-    fail: bool,
-}
-impl crate::rpc::RpcTransport for ManagedGasProbe {
-    fn send(&self, request: &serde_json::Value) -> crate::rpc::Result<serde_json::Value> {
-        let state = self.session.snapshot().unwrap();
-        let record = &state.operations[&self.id];
-        assert!(record.externalized);
-        assert_eq!(record.status, OperationStatus::Exported);
-        let call = record.call.as_ref().unwrap();
-        if request["method"] == "eth_estimateGas" {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            assert_eq!(request["params"][0]["from"], serde_json::json!(self.caller));
-            assert_eq!(request["params"][0]["to"], serde_json::json!(call.to));
-            assert_eq!(
-                request["params"][0]["data"],
-                format!("0x{}", hex::encode(&call.data))
-            );
-            if self.fail {
-                return Err(crate::rpc::Error::Invalid("managed estimate rejected"));
-            }
-        }
-        Ok(
-            serde_json::json!({"jsonrpc":"2.0","id":request["id"],"result":if request["method"]=="eth_chainId" {"0x7a69"} else {"0x1e240"}}),
-        )
-    }
-}
 #[test]
-fn managed_note_and_credit_gas_export_fence_precedes_provider() {
+fn managed_note_and_credit_estimate_without_externalizing() {
     for credit in [false, true] {
         let h = synced();
         let caller = h.session.wallet.owner_address();
@@ -1459,17 +1460,21 @@ fn managed_note_and_credit_gas_export_fence_precedes_provider() {
         } else {
             h.session.prepare_transfer(transfer(&h)).unwrap()
         };
-        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let probe = ManagedGasProbe {
-            session: h.session.clone(),
-            id: operation.id().to_owned(),
-            caller,
-            calls: calls.clone(),
-            fail: false,
-        };
-        let gas = crate::rpc::EthereumChain::new(probe.clone());
-        assert!(operation.estimate_gas(&gas, caller).is_err());
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let before = serde_json::to_value(h.session.snapshot().unwrap()).unwrap();
+        h.store.forbidden.store(true, Ordering::SeqCst);
+        h.chain.gas_forbidden.store(true, Ordering::SeqCst);
+        let estimate = operation.estimate_gas().unwrap();
+        h.store.forbidden.store(false, Ordering::SeqCst);
+        h.chain.gas_forbidden.store(false, Ordering::SeqCst);
+        assert_eq!(
+            serde_json::to_value(&estimate).unwrap()["source"],
+            "benchmark"
+        );
+        assert_eq!(
+            before,
+            serde_json::to_value(h.session.snapshot().unwrap()).unwrap()
+        );
+        assert_eq!(estimate, operation.estimate_gas().unwrap());
         assert!(!h.session.snapshot().unwrap().operations[operation.id()].externalized);
         if credit {
             let request = operation.export_wallet_request("gas-consent").unwrap();
@@ -1479,21 +1484,11 @@ fn managed_note_and_credit_gas_export_fence_precedes_provider() {
             .unwrap();
             operation = operation.with_wallet_response(&response).unwrap();
         }
-        let mut operation = operation.prove(&Backend, false).unwrap();
-        assert_eq!(
-            operation.estimate_gas(&gas, caller).unwrap(),
-            U256::from(123456)
-        );
-        let failed_gas = crate::rpc::EthereumChain::new(ManagedGasProbe {
-            fail: true,
-            ..probe
-        });
-        assert!(operation
-            .estimate_gas(&failed_gas, caller)
-            .unwrap_err()
-            .contains("managed estimate rejected"));
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
-        assert!(h.session.snapshot().unwrap().operations[operation.id()].externalized);
+        let operation = operation.prove(&Backend, false).unwrap();
+        h.store.forbidden.store(true, Ordering::SeqCst);
+        assert_eq!(estimate, operation.estimate_gas().unwrap());
+        h.store.forbidden.store(false, Ordering::SeqCst);
+        assert!(!h.session.snapshot().unwrap().operations[operation.id()].externalized);
     }
 }
 

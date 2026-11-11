@@ -3073,16 +3073,6 @@ impl PreparedTransaction {
             }
         }
     }
-    pub fn estimate_gas<G: crate::rpc::ChainGas>(
-        &self,
-        chain: &dyn ChainState,
-        gas: &G,
-        caller: Address,
-    ) -> Result<U256> {
-        let call = self.calldata(chain, caller)?;
-        gas.estimate_gas(self.context.chain_id, caller, &call)
-            .map_err(|e| e.to_string())
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3104,21 +3094,52 @@ impl PreparedTransaction {
             }]
         }
     }
-    pub fn documented_gas_reference(
-        &self,
-        scenario: &str,
-    ) -> Result<crate::gas::DocumentedGasReference> {
+    /// Look up a local measured workload before authorization or proving.
+    /// Returned medians are conditional benchmarks, not gas limits or monetary fees.
+    pub fn estimate_gas(&self) -> Result<crate::gas::GasEstimate> {
         let query = match &self.plan {
             Plan::Shield { outputs, .. } => {
-                json!({"kind":"shield","noteOutputs":outputs.len(),"scenario":scenario})
+                json!({"kind":"shield","noteOutputs":outputs.len()})
             }
             Plan::Transfer {
                 params,
                 inputs,
                 outputs,
                 capacity,
+                funding,
                 ..
             } => {
+                let scenario = if inputs.is_empty() {
+                    "public-funding"
+                } else if !inputs.is_empty()
+                    && funding.amount == U256::ZERO
+                    && params.withdrawalAmount == U256::ZERO
+                    && params.feeAmount == U256::ZERO
+                {
+                    "private"
+                } else if !inputs.is_empty()
+                    && funding.amount == U256::ZERO
+                    && outputs.is_empty()
+                    && params.feeAmount == U256::ZERO
+                {
+                    "withdrawal"
+                } else {
+                    "mixed"
+                };
+                if outputs
+                    .iter()
+                    .any(|o| o.delivery.ciphertext.len() != 160 || o.delivery.clue.len() != 68)
+                    || self.target != "evm"
+                    || self.broadcaster.as_ref().is_some_and(|s| {
+                        s.quote.quote.execution == invisi_sdk_rpc::broadcaster::Execution::Aggregate
+                    })
+                {
+                    return model(crate::gas::estimate_gas(
+                        json!({"kind":"unmeasured-delivery-or-target"})
+                            .as_object()
+                            .unwrap(),
+                    ));
+                }
                 let ciphertext_bytes = outputs
                     .iter()
                     .map(|o| o.delivery.ciphertext.len())
@@ -3132,7 +3153,7 @@ impl PreparedTransaction {
                 json!({"kind":"transact","capacity":capacity,"noteInputs":inputs.len(),"noteOutputs":outputs.len(),"sourceTrees":params.sources.len(),"noteCiphertextBytes":ciphertext_bytes,"clueBytes":clues,"scenario":scenario})
             }
         };
-        model(crate::gas::get_documented_gas_reference(
+        model(crate::gas::estimate_gas(
             query.as_object().ok_or("invalid gas shape")?,
         ))
     }
@@ -3432,4 +3453,89 @@ pub fn submit_provenance_proof(
     packet: &ProvenanceProof,
 ) -> Result<Value> {
     invisi_sdk_rpc::provenance_packet::submit_provenance_proof(client, packet)
+}
+
+#[cfg(test)]
+mod local_gas_tests {
+    use super::*;
+    #[test]
+    fn fee_paying_private_shape_does_not_use_fee_free_benchmark() {
+        let (chain, wallet, request, _) = test_support::note_fixture();
+        let public = wallet
+            .prepare_request("gas-recipient", "wallet.public", json!({}))
+            .unwrap();
+        let mut key = [0u8; 32];
+        key[31] = 1;
+        let response: WalletResponse =
+            serde_json::from_value(crate::wallet::execute(&key, &public.as_value()).unwrap())
+                .unwrap();
+        let recipient = Wallet::from_response(&public, &response).unwrap();
+        let prepare = |fee: u64| {
+            let mut request = request.clone();
+            request.withdrawal = None;
+            request.fee = Fee {
+                recipient: if fee == 0 {
+                    Address::ZERO
+                } else {
+                    Address::repeat_byte(7)
+                },
+                amount: U256::from(fee),
+            };
+            request.outputs = vec![NoteOutput::for_recipient(
+                chain.context(),
+                request.token,
+                &recipient,
+                request.inputs[0].note.amount - U256::from(fee),
+                Vec::new(),
+            )
+            .unwrap()];
+            Invisi::new(chain.clone())
+                .prepare_transfer(&wallet, request)
+                .unwrap()
+        };
+        let ordinary = prepare(0);
+        assert_eq!(
+            ordinary.estimate_gas().unwrap().gas_units(),
+            Some(U256::from(1541975))
+        );
+        let fee_paying = prepare(1);
+        assert_eq!(fee_paying.phase(), Phase::Prepared);
+        assert!(fee_paying.proof().is_none());
+        let estimate = fee_paying.estimate_gas().unwrap();
+        assert!(!estimate.available());
+        assert!(estimate.gas_units().is_none());
+        assert_eq!(
+            serde_json::to_value(estimate).unwrap()["reason"],
+            "shape-not-covered"
+        );
+    }
+    #[test]
+    fn prepared_note_estimate_is_local_stable_and_exact() {
+        let (chain, wallet, mut request, _) = test_support::note_fixture();
+        request.fee = Fee {
+            recipient: Address::repeat_byte(7),
+            amount: U256::from(1),
+        };
+        request.withdrawal.as_mut().unwrap().1 -= U256::from(1);
+        let p = Invisi::new(chain.clone())
+            .prepare_transfer(&wallet, request)
+            .unwrap();
+        // A poisoned chain lock makes accidental chain reads fail immediately.
+        let poisoned = chain.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned.block.lock().unwrap();
+            panic!("chain access forbidden during estimation");
+        })
+        .join();
+        assert_eq!(p.phase(), Phase::Prepared);
+        let before = p.estimate_gas().unwrap();
+        assert_eq!(
+            serde_json::to_value(&before).unwrap()["source"],
+            "benchmark"
+        );
+        assert_eq!(before.gas_units(), Some(U256::from(1083512)));
+        assert_eq!(before, p.estimate_gas().unwrap());
+        assert_eq!(p.phase(), Phase::Prepared);
+        assert!(p.proof().is_none());
+    }
 }

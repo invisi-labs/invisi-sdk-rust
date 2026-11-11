@@ -60,6 +60,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Authorize the frozen inputs and outputs so the proof cannot silently change the recipient or
     // amount.
+    // Available before authorization, proof generation and token approval.
+    println!("{}", serde_json::to_string(&prepared.estimate_gas()?)?);
+
     let request = prepared.export_wallet_authorization()?;
     let signature = invisi_sdk_examples::sign_authorization(&request)?;
     let prepared = prepared.with_wallet_signature(&signature)?;

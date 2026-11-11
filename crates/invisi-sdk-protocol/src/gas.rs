@@ -5,14 +5,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 const CATALOG: &str = include_str!("../assets/gas/documented-references.json");
-const RELEASE: &str = include_str!("../assets/gas/circuit-release.json");
 pub const DOCUMENTED_CATALOG_SHA256: &str =
     "a74b8250ef45de20a3f3d54ca0b35fb54dff50db4c1066e9a76c5592124e8129";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum UnavailableReason {
     ShapeNotCovered,
-    ReleaseNotCovered,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -40,11 +38,11 @@ pub struct AvailableReference {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
-pub enum DocumentedGasReference {
+pub enum GasEstimate {
     Available(AvailableReference),
     Unavailable(UnavailableReference),
 }
-impl DocumentedGasReference {
+impl GasEstimate {
     pub fn available(&self) -> bool {
         matches!(self, Self::Available(_))
     }
@@ -55,9 +53,9 @@ impl DocumentedGasReference {
         }
     }
 }
-fn unavailable(reason: UnavailableReason) -> DocumentedGasReference {
-    DocumentedGasReference::Unavailable(UnavailableReference {
-        source: "documented-reference".into(),
+fn unavailable(reason: UnavailableReason) -> GasEstimate {
+    GasEstimate::Unavailable(UnavailableReference {
+        source: "benchmark".into(),
         available: false,
         reason,
     })
@@ -68,15 +66,12 @@ fn invalid() -> ModelError {
 fn text<'a>(v: &'a Value, name: &str) -> ModelResult<&'a str> {
     v[name].as_str().ok_or_else(invalid)
 }
-/// Match every workload key exactly and verify the pinned credit release before returning measurements.
-pub fn get_documented_gas_reference(
-    query: &Map<String, Value>,
-) -> ModelResult<DocumentedGasReference> {
+/// Match every workload key exactly; measured release identity is provenance only.
+fn documented_reference(query: &Map<String, Value>) -> ModelResult<GasEstimate> {
     if hex::encode(Sha256::digest(CATALOG.as_bytes())) != DOCUMENTED_CATALOG_SHA256 {
         return Err(invalid());
     }
     let catalog: Value = serde_json::from_str(CATALOG).map_err(|_| invalid())?;
-    let release: Value = serde_json::from_str(RELEASE).map_err(|_| invalid())?;
     let row = catalog["references"]
         .as_array()
         .ok_or_else(invalid)?
@@ -86,27 +81,6 @@ pub fn get_documented_gas_reference(
         return Ok(unavailable(UnavailableReason::ShapeNotCovered));
     };
     let identity = &row["releaseIdentity"];
-    if identity.get("creditManifestVersion").is_some() {
-        let pinned = release["manifests"]
-            .as_array()
-            .ok_or_else(invalid)?
-            .iter()
-            .find(|row| row["name"] == "credit")
-            .ok_or_else(invalid)?;
-        let sha = identity["creditManifestSha256"]
-            .as_str()
-            .unwrap_or_default();
-        if identity["creditManifestVersion"] != pinned["version"]
-            || identity["creditFormatVersion"] != pinned["formatVersion"]
-            || sha.len() != 64
-            || !sha
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            || identity["creditManifestSha256"] != pinned["sha256"]
-        {
-            return Ok(unavailable(UnavailableReason::ReleaseNotCovered));
-        }
-    }
     let document = text(row, "source")?;
     let source = catalog["sources"]
         .as_array()
@@ -121,8 +95,8 @@ pub fn get_documented_gas_reference(
         .iter()
         .map(|v| v.as_str().map(str::to_owned).ok_or_else(invalid))
         .collect::<ModelResult<Vec<_>>>()?;
-    Ok(DocumentedGasReference::Available(AvailableReference {
-        source: "documented-reference".into(),
+    Ok(GasEstimate::Available(AvailableReference {
+        source: "benchmark".into(),
         available: true,
         gas_units,
         statistic: text(row, "statistic")?.into(),
@@ -138,4 +112,9 @@ pub fn get_documented_gas_reference(
         assumptions,
         release_identity: identity.clone(),
     }))
+}
+
+/// Estimate an exact prepared workload from bundled measurements without network access.
+pub fn estimate_gas(shape: &Map<String, Value>) -> ModelResult<GasEstimate> {
+    documented_reference(shape)
 }

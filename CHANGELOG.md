@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Make `estimate_gas()` a local prepared-plan benchmark lookup for Note, all Credit forms and managed operations before authorization or proving; return explicit unsupported-shape reasons and retain measurement provenance across SDK/circuit versions.
+- Remove public raw gas reference getters and SDK RPC gas simulation; applications and Broadcasters own final simulation and current prices.
+
 - Share bounded canonical public history across accounts and persist independent private scan coverage.
 - Prioritize recent assets, recover historical gaps and replay causal Credit state with durable checkpoints.
 - Expose scan completeness and known spendable funds separately; support offline recovery from validated public proofs.

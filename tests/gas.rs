@@ -11,7 +11,11 @@ fn documented_measurements_match_ts_go_and_pinned_asset_digest() {
         DOCUMENTED_CATALOG_SHA256
     );
     for row in fixtures["vectors"].as_array().unwrap() {
-        let reference = get_documented_gas_reference(row["query"].as_object().unwrap()).unwrap();
+        let reference = estimate_gas(row["query"].as_object().unwrap()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&reference).unwrap()["source"],
+            "benchmark"
+        );
         assert_eq!(reference.available(), row["available"].as_bool().unwrap());
         if reference.available() {
             assert_eq!(reference.gas_units().unwrap().to_string(), row["gasUnits"]);
@@ -54,7 +58,7 @@ fn compact_catalog_provenance_and_unsupported_shapes_remain_exact() {
         fixtures["catalogSha256"]
     );
     for query in fixtures["unsupported"].as_array().unwrap() {
-        let reference = get_documented_gas_reference(query.as_object().unwrap()).unwrap();
+        let reference = estimate_gas(query.as_object().unwrap()).unwrap();
         assert!(!reference.available());
         assert!(reference.gas_units().is_none());
     }

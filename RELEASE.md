@@ -1,15 +1,15 @@
-# Rust SDK 1.2.0 local release validation
+# Rust SDK 1.2.2 local release validation
 
-All seven public crates use version `1.2.0`. Workspace sibling dependencies carry both
-the development path and exact registry version `=1.2.0`. The examples package remains private at `0.1.0` and consumes SDK
-`1.2.0`. This release does not change the C ABI version.
+All seven public crates use version `1.2.2`. Workspace sibling dependencies carry both
+the development path and exact registry version `=1.2.2`. The examples package remains private at `0.1.0` and consumes SDK
+`1.2.2`. This release does not change the C ABI version.
 
 Run from the repository root with Rust/Cargo and Python 3.12 or newer:
 
 ```sh
 python3 scripts/check-boundaries.py
 cargo test --locked --workspace --all-features
-python3 scripts/check-release.py --work-dir /tmp/invisi-rust-release-1.2.0
+python3 scripts/check-release.py --work-dir /tmp/invisi-rust-release-1.2.2
 ```
 
 The release check vendors locked third-party dependencies into its temporary working
@@ -46,7 +46,7 @@ order and wait for each preceding registry version to become available.
 
 ## Publish from GitHub Actions
 
-The seven packages retain the `invisi-sdk` names and version `1.2.0`.
+The seven packages retain the `invisi-sdk` names and version `1.2.2`.
 Publishing runs in [Release Rust SDK](https://github.com/invisi-lab/invisi-sdk-rust/actions/workflows/release.yml)
 on a pushed `vMAJOR.MINOR.PATCH` tag, or a manual dispatch naming an existing tag.
 If GitHub has not registered a newly added release workflow yet, manually dispatch
@@ -57,20 +57,15 @@ The checked-out commit must match that tag; all seven public package versions an
 exact sibling requirements must match it. Fork repositories and dirty checkouts
 are rejected. Rust/Cargo is pinned to 1.94.0 so retries produce the same archive format.
 
-Before the first release, a repository administrator must configure one secret:
-
-1. Sign in to [crates.io API tokens](https://crates.io/settings/tokens) using the account that will own the seven new crates.
-2. Create an API token with endpoint scopes **`publish-new`** and **`publish-update`**. Because these seven names are not registered yet, a token restricted to existing crate ownership cannot bootstrap this release. Use a short expiry; revoke or narrow it after the first release.
-3. Open [the repository Actions secret form](https://github.com/invisi-lab/invisi-sdk-rust/settings/secrets/actions/new), name the secret `CARGO_REGISTRY_TOKEN`, and paste the token into the secret value there. Never put it in source, workflow inputs, logs, or chat.
-
+The repository's existing `CARGO_REGISTRY_TOKEN` Actions secret publishes the seven
+registered crates. Never put the token in source, workflow inputs, logs, or chat.
 No local `cargo login` or local `cargo publish` is required. The workflow checks
-for the secret before expensive validation and gives a direct setup link if it is
-missing. Initial registration uses this API token; [crates.io trusted publishing](https://blog.rust-lang.org/2025/07/11/crates-io-development-update-2025-07/) can be configured after the crates exist and ownership is established. [Scoped API tokens](https://blog.rust-lang.org/2023/06/23/improved-api-tokens-for-crates-io/) support endpoint permissions and expiration.
+for the secret before expensive validation.
 
-After configuring the secret, push the approved release commit and its `v1.2.0`
-tag. Do not create or push the release tag before the secret is ready. A workflow
+Push the approved release commit and its `v1.2.2` tag only after review. A workflow
 dispatch can retry the same existing tag after an interrupted run; it must not
-move the tag or change its source to bypass a registry conflict.
+move the tag or change its source to bypass a registry conflict. Rust intentionally
+skips 1.2.1; the 1.2.2 changelog includes every capability added since 1.2.0.
 
 Before the first registry write, the workflow runs release-helper regression
 tests, English and module-boundary checks, formatting, clippy, debug/release

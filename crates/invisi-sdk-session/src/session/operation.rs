@@ -600,7 +600,11 @@ fn phase_status(phase: Phase) -> OperationStatus {
 }
 impl WalletSession {
     pub fn register(&self, prepared: ManagedPrepared) -> Result<Operation> {
-        if prepared.wallet() != &self.wallet {
+        if prepared.owner_address() != self.wallet.owner_address()
+            || prepared
+                .wallet()
+                .is_some_and(|wallet| wallet != &self.wallet)
+        {
             return Err("operation wallet differs from session".into());
         }
         let snapshot = prepared.snapshot()?;
@@ -779,7 +783,7 @@ impl WalletSession {
         fee: sdk::Fee,
     ) -> Result<Operation> {
         self.register(ManagedPrepared::Credit(self.invisi.prepare_revoke_credit(
-            &self.wallet,
+            self.wallet.owner_address(),
             token,
             shard,
             slot,

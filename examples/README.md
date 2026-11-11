@@ -166,3 +166,18 @@ Broadcaster uses separate `estimateQuote` and `getQuote` requests. Its server as
 Example 01 uses `BROADCASTER_ENDPOINT`, `BROADCASTER_QUOTE_SIGNER`, `BROADCASTER_FEE_RECIPIENT` and a positive `MAX_FEE_AMOUNT`. Source trust uses `SOURCE_CHAIN_ID`, `SOURCE_PROTOCOL_ADDRESS`, `SOURCE_GENERATION`, `SOURCE_PROVIDER_ID`, `SOURCE_SIGNING_KEY_ID` and `SOURCE_SIGNING_PUBLIC_KEY`; `SOURCE_ENDPOINT` defaults to the official service. Local Source proving additionally requires `SOURCE_ASSET_ROOT`, `BB_BINARY` and `NOIR_EXECUTOR`. Example 03 takes the public packet in `SOURCE_PROOF_JSON`, without opening those proving assets. Examples print outputs and never create record/configuration files.
 
 The SQLite `restore-session` example uses `RecordWalletStore` for independently encrypted private rows and `SQLiteRecords::open_public` for a deployment-wide canonical cache in a separate table of the same database. `session.scan` recovers the current head first, then historical gaps; reuse the public store for other accounts while providing separate private account storage keys. `AppDecryptor` is a host integration stub: implement complete-context native detection and explicit nonrecipient/authentication-ambiguity/error outcomes before using `--execute`. Shared history never requires exporting detection or viewing keys.
+
+Credit revocation uses `OWNER_ADDRESS` (an EVM `0x` address) independently of `WALLET_ADDRESS`.
+
+### Public Wallet addresses
+
+`Wallet::from_address` accepts only complete `0i` receiving addresses. Use `Wallet::from_keys(owner_address, receiving_keys)` when the public materials are separate. `address()` encodes a complete `0i` address without RPC resolution. EVM owners are independent addresses; owner-only operations do not need a Wallet.
+
+```rust,ignore
+let request = sdk::prepare_wallet_request(owner_address, "public", "wallet.public", json!({}))?;
+let response = native_host.execute(&request)?;
+let wallet = Wallet::from_response(&request, &response)?;
+let receiving_address = wallet.address()?;
+assert_eq!(Wallet::from_address(&receiving_address)?, wallet);
+let revocation = invisi.prepare_revoke_credit(owner_address, token, shard, slot, deadline, Fee::default())?;
+```

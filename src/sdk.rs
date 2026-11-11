@@ -226,43 +226,41 @@ pub enum WalletResult {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Wallet {
-    owner: Address,
-    receiving_keys: Option<ReceivingKeys>,
+    owner_address: Address,
+    receiving_keys: ReceivingKeys,
 }
 impl Wallet {
-    pub fn from_owner(owner: Address) -> Result<Self> {
-        if owner == Address::ZERO {
-            return Err("nonzero wallet owner required".into());
-        }
-        Ok(Self {
-            owner,
-            receiving_keys: None,
-        })
-    }
     pub fn from_address(address: &str) -> Result<Self> {
         let parsed = model(ReceivingAddress::parse(address))?;
+        Self::from_keys(
+            word_address(parsed.owner_address)?,
+            parsed.keys.ok_or("complete receiving address required")?,
+        )
+    }
+    pub fn from_keys(owner_address: Address, receiving_keys: ReceivingKeys) -> Result<Self> {
+        if owner_address == Address::ZERO {
+            return Err("nonzero wallet owner required".into());
+        }
+        model(receiving_keys.validate())?;
         Ok(Self {
-            owner: word_address(parsed.owner_address)?,
-            receiving_keys: parsed.keys,
+            owner_address,
+            receiving_keys,
         })
     }
-    pub fn from_keys(owner: Address, keys: ReceivingKeys) -> Result<Self> {
-        let mut w = Self::from_owner(owner)?;
-        model(keys.validate())?;
-        w.receiving_keys = Some(keys);
-        Ok(w)
-    }
     pub fn owner_address(&self) -> Address {
-        self.owner
+        self.owner_address
     }
-    pub fn receiving_keys(&self) -> Option<&ReceivingKeys> {
-        self.receiving_keys.as_ref()
+    pub fn receiving_keys(&self) -> &ReceivingKeys {
+        &self.receiving_keys
     }
+    /// Encode the complete receiving address from validated public material.
     pub fn address(&self) -> Result<String> {
+        model(self.receiving_keys.validate())?;
+        let keys = &self.receiving_keys;
         model(
             ReceivingAddress {
-                owner_address: address_word(self.owner),
-                keys: self.receiving_keys.clone(),
+                owner_address: address_word(self.owner_address),
+                keys: Some(keys.clone()),
             }
             .encode(),
         )
@@ -273,26 +271,20 @@ impl Wallet {
         method: &str,
         params: Value,
     ) -> Result<WalletRequest> {
-        let q = WalletRequest {
-            version: 1,
-            id: id.into(),
-            owner_address: hex(self.owner.as_slice()),
-            method: method.into(),
-            params,
-        };
-        q.validate()?;
-        Ok(q)
+        prepare_wallet_request(self.owner_address, id, method, params)
     }
+
     pub fn from_response(q: &WalletRequest, r: &WalletResponse) -> Result<Self> {
         if q.method != "wallet.public" {
             return Err("public material response required".into());
         }
-        let w = Self::from_owner(Address::from_slice(&hex_bytes(&q.owner_address, Some(20))?))?;
-        match w.accept_response(q, r)? {
-            WalletResult::Public(keys) => Self::from_keys(w.owner, keys),
+        let owner = Address::from_slice(&hex_bytes(&q.owner_address, Some(20))?);
+        match accept_wallet_response(owner, None, q, r)? {
+            WalletResult::Public(keys) => Self::from_keys(owner, keys),
             _ => Err("public response required".into()),
         }
     }
+
     /// Validate all envelopes and return responses in request order without trusting their results.
     pub fn validate_batch<'a>(
         &self,
@@ -315,7 +307,7 @@ impl Wallet {
         let mut expected = BTreeMap::new();
         for request in requests {
             request.validate()?;
-            if request.owner_address != hex(self.owner.as_slice())
+            if request.owner_address != hex(self.owner_address.as_slice())
                 || expected.insert(request.id.as_str(), request).is_some()
             {
                 return Err("wallet batch owner or duplicate request id".into());
@@ -371,7 +363,8 @@ impl Wallet {
         context: &crate::delivery::DeliveryContext,
     ) -> Result<Option<Note>> {
         model(crate::delivery::validate_envelope(envelope, false))?;
-        let Some(plain) = decryptor.decrypt_note(envelope, context, address_word(self.owner))?
+        let Some(plain) =
+            decryptor.decrypt_note(envelope, context, address_word(self.owner_address))?
         else {
             return Ok(None);
         };
@@ -379,7 +372,7 @@ impl Wallet {
             return Err("plaintext exceeds resource bound".into());
         }
         let note = model(crate::delivery::decode_note(&plain, context))?;
-        if note.owner_address != address_word(self.owner) {
+        if note.owner_address != address_word(self.owner_address) {
             return Err("note recipient mismatch".into());
         }
         Ok(Some(note))
@@ -393,7 +386,7 @@ impl Wallet {
     ) -> Result<Option<crate::delivery::CreditDeliveryState>> {
         model(crate::delivery::validate_envelope(envelope, true))?;
         let Some(plain) =
-            decryptor.decrypt_credit(envelope, context, role, address_word(self.owner))?
+            decryptor.decrypt_credit(envelope, context, role, address_word(self.owner_address))?
         else {
             return Ok(None);
         };
@@ -411,11 +404,8 @@ impl Wallet {
                 &state.spender_receiving_keys,
             ),
         };
-        if identity != address_word(self.owner)
-            || self
-                .receiving_keys
-                .as_ref()
-                .is_none_or(|existing| existing.viewing_public_key != keys.viewing_public_key)
+        if identity != address_word(self.owner_address)
+            || self.receiving_keys.viewing_public_key != keys.viewing_public_key
         {
             return Err("Credit recipient or receiving snapshot mismatch".into());
         }
@@ -423,206 +413,226 @@ impl Wallet {
     }
 
     pub fn accept_response(&self, q: &WalletRequest, r: &WalletResponse) -> Result<WalletResult> {
-        q.validate()?;
-        if q.owner_address != hex(self.owner.as_slice())
-            || r.version != q.version
-            || r.id != q.id
-            || r.owner_address != q.owner_address
-            || r.method != q.method
-        {
-            return Err("wallet response request binding mismatch".into());
-        }
-        let result = r.result()?;
-        if !result.is_object() {
-            return Err("wallet result object required".into());
-        }
-        fn exact(value: &Value, keys: &[&str]) -> Result<()> {
-            let o = value.as_object().ok_or("wallet object required")?;
-            if o.len() != keys.len() || keys.iter().any(|k| !o.contains_key(*k)) {
-                return Err("wallet object fields mismatch".into());
-            }
-            Ok(())
-        }
-        match q.method.as_str() {
-            "wallet.public" => {
-                exact(&q.params, &[])?;
-                exact(
-                    result,
-                    &["viewingPublicKey", "spendingPublicKey", "clueKey"],
-                )?;
-                let public = hex_bytes(
-                    result["spendingPublicKey"]
-                        .as_str()
-                        .ok_or("public key required")?,
-                    Some(65),
-                )?;
-                validate_spending_key(self.owner, &public)?;
-                let keys = ReceivingKeys {
-                    viewing_public_key: hex_bytes(
-                        result["viewingPublicKey"]
-                            .as_str()
-                            .ok_or("viewing key required")?,
-                        Some(33),
-                    )?
-                    .try_into()
-                    .map_err(|_| "invalid viewing key")?,
-                    clue_key: hex_bytes(
-                        result["clueKey"].as_str().ok_or("clue key required")?,
-                        Some(32),
-                    )?
-                    .try_into()
-                    .map_err(|_| "invalid clue key")?,
-                };
-                model(keys.validate())?;
-                if self
-                    .receiving_keys
-                    .as_ref()
-                    .is_some_and(|existing| existing != &keys)
-                {
-                    return Err("resolved receiving keys mismatch".into());
-                }
-                Ok(WalletResult::Public(keys))
-            }
-            "wallet.detect" => {
-                exact(&q.params, &["clues"])?;
-                exact(result, &["matches"])?;
-                let clues = q.params["clues"].as_array().ok_or("clues required")?;
-                for clue in clues {
-                    hex_bytes(clue.as_str().ok_or("clue required")?, Some(68))?;
-                }
-                let matches: Vec<bool> = serde_json::from_value(result["matches"].clone())
-                    .map_err(|_| "boolean detection results required")?;
-                if matches.len() != clues.len() {
-                    return Err("detection length mismatch".into());
-                }
-                Ok(WalletResult::Detected(matches))
-            }
-            "wallet.authorize" => {
-                exact(&q.params, &["operation", "capacity", "context", "words"])?;
-                exact(&q.params["context"], &["chainId", "protocolAddress"])?;
-                protocol_context(&q.params["context"])?;
-                for v in q.params["words"]
-                    .as_array()
-                    .ok_or("public words required")?
-                {
-                    model(crate::note::field(decimal(v)?, "authorization field"))?;
-                }
-                exact(result, &["spendingPublicKey", "signature", "digest"])?;
-                let public = hex_bytes(
-                    result["spendingPublicKey"]
-                        .as_str()
-                        .ok_or("public key required")?,
-                    Some(65),
-                )?;
-                validate_spending_key(self.owner, &public)?;
-                let signature = hex_bytes(
-                    result["signature"].as_str().ok_or("signature required")?,
-                    Some(64),
-                )?;
-                let digest = crate::wallet::authorization_digest(&q.params)?;
-                if hex_bytes(
-                    result["digest"].as_str().ok_or("digest required")?,
-                    Some(32),
-                )? != digest
-                {
-                    return Err("authorization digest mismatch".into());
-                }
-                let sig =
-                    Signature::from_slice(&signature).map_err(|_| "invalid wallet signature")?;
-                if sig.normalize_s().is_some() {
-                    return Err("noncanonical wallet signature".into());
-                }
-                VerifyingKey::from_sec1_bytes(&public)
-                    .map_err(|_| "invalid spending key")?
-                    .verify_prehash(&digest, &sig)
-                    .map_err(|_| "wallet signature mismatch")?;
-                Ok(WalletResult::Authorized(WalletAuthorization {
-                    spending_public_key: public.try_into().map_err(|_| "invalid key length")?,
-                    signature: signature
-                        .try_into()
-                        .map_err(|_| "invalid signature length")?,
-                    digest: B256::from(digest),
-                }))
-            }
-            "wallet.decryptNote" | "wallet.decryptCredit" => {
-                exact(&q.params, &["envelope", "context"])?;
-                exact(result, &["plaintext"])?;
-                let credit = q.method == "wallet.decryptCredit";
-                exact(
-                    &q.params["context"],
-                    if credit {
-                        &[
-                            "chainId",
-                            "protocolAddress",
-                            "tokenAddress",
-                            "outputCommitment",
-                            "role",
-                        ]
-                    } else {
-                        &[
-                            "chainId",
-                            "protocolAddress",
-                            "tokenAddress",
-                            "outputCommitment",
-                        ]
-                    },
-                )?;
-                let context = DeliveryContext {
-                    context: protocol_context(&q.params["context"])?,
-                    token_address: decimal(&q.params["context"]["tokenAddress"])?,
-                    output_commitment: U256::from_be_slice(&hex_bytes(
-                        q.params["context"]["outputCommitment"]
-                            .as_str()
-                            .ok_or("commitment required")?,
-                        Some(32),
-                    )?),
-                };
-                model(context.validate())?;
-                let envelope = hex_bytes(
-                    q.params["envelope"].as_str().ok_or("envelope required")?,
-                    None,
-                )?;
-                model(crate::delivery::validate_envelope(&envelope, credit))?;
-                let plain = hex_bytes(
-                    result["plaintext"].as_str().ok_or("plaintext required")?,
-                    None,
-                )?;
-                if plain.len() > 4096 {
-                    return Err("wallet plaintext exceeds bound".into());
-                }
-                if !credit {
-                    let note = model(crate::delivery::decode_note(&plain, &context))?;
-                    if note.owner_address != address_word(self.owner) {
-                        return Err("note recipient mismatch".into());
-                    }
-                    Ok(WalletResult::Note(note))
-                } else {
-                    let state = model(crate::delivery::decode_credit(&plain, &context))?;
-                    let (identity, keys) = match q.params["context"]["role"].as_str() {
-                        Some("owner") => (
-                            state.note.owner_wallet_identity,
-                            &state.owner_receiving_keys,
-                        ),
-                        Some("spender") => (
-                            state.note.spender_wallet_identity,
-                            &state.spender_receiving_keys,
-                        ),
-                        _ => return Err("invalid Credit role".into()),
-                    };
-                    if identity != address_word(self.owner)
-                        || self.receiving_keys.as_ref().is_none_or(|existing| {
-                            existing.viewing_public_key != keys.viewing_public_key
-                        })
-                    {
-                        return Err("Credit recipient or receiving snapshot mismatch".into());
-                    }
-                    Ok(WalletResult::Credit(state))
-                }
-            }
-            _ => Err("unsupported wallet method".into()),
-        }
+        accept_wallet_response(self.owner_address, Some(&self.receiving_keys), q, r)
     }
 }
+pub fn prepare_wallet_request(
+    owner_address: Address,
+    id: impl Into<String>,
+    method: &str,
+    params: Value,
+) -> Result<WalletRequest> {
+    let q = WalletRequest {
+        version: 1,
+        id: id.into(),
+        owner_address: hex(owner_address.as_slice()),
+        method: method.into(),
+        params,
+    };
+    q.validate()?;
+    Ok(q)
+}
+pub fn accept_wallet_response(
+    owner_address: Address,
+    receiving_keys: Option<&ReceivingKeys>,
+    q: &WalletRequest,
+    r: &WalletResponse,
+) -> Result<WalletResult> {
+    q.validate()?;
+    if q.owner_address != hex(owner_address.as_slice())
+        || r.version != q.version
+        || r.id != q.id
+        || r.owner_address != q.owner_address
+        || r.method != q.method
+    {
+        return Err("wallet response request binding mismatch".into());
+    }
+    let result = r.result()?;
+    if !result.is_object() {
+        return Err("wallet result object required".into());
+    }
+    fn exact(value: &Value, keys: &[&str]) -> Result<()> {
+        let o = value.as_object().ok_or("wallet object required")?;
+        if o.len() != keys.len() || keys.iter().any(|k| !o.contains_key(*k)) {
+            return Err("wallet object fields mismatch".into());
+        }
+        Ok(())
+    }
+    match q.method.as_str() {
+        "wallet.public" => {
+            exact(&q.params, &[])?;
+            exact(
+                result,
+                &["viewingPublicKey", "spendingPublicKey", "clueKey"],
+            )?;
+            let public = hex_bytes(
+                result["spendingPublicKey"]
+                    .as_str()
+                    .ok_or("public key required")?,
+                Some(65),
+            )?;
+            validate_spending_key(owner_address, &public)?;
+            let keys = ReceivingKeys {
+                viewing_public_key: hex_bytes(
+                    result["viewingPublicKey"]
+                        .as_str()
+                        .ok_or("viewing key required")?,
+                    Some(33),
+                )?
+                .try_into()
+                .map_err(|_| "invalid viewing key")?,
+                clue_key: hex_bytes(
+                    result["clueKey"].as_str().ok_or("clue key required")?,
+                    Some(32),
+                )?
+                .try_into()
+                .map_err(|_| "invalid clue key")?,
+            };
+            model(keys.validate())?;
+            if receiving_keys.is_some_and(|existing| existing != &keys) {
+                return Err("resolved receiving keys mismatch".into());
+            }
+            Ok(WalletResult::Public(keys))
+        }
+        "wallet.detect" => {
+            exact(&q.params, &["clues"])?;
+            exact(result, &["matches"])?;
+            let clues = q.params["clues"].as_array().ok_or("clues required")?;
+            for clue in clues {
+                hex_bytes(clue.as_str().ok_or("clue required")?, Some(68))?;
+            }
+            let matches: Vec<bool> = serde_json::from_value(result["matches"].clone())
+                .map_err(|_| "boolean detection results required")?;
+            if matches.len() != clues.len() {
+                return Err("detection length mismatch".into());
+            }
+            Ok(WalletResult::Detected(matches))
+        }
+        "wallet.authorize" => {
+            exact(&q.params, &["operation", "capacity", "context", "words"])?;
+            exact(&q.params["context"], &["chainId", "protocolAddress"])?;
+            protocol_context(&q.params["context"])?;
+            for v in q.params["words"]
+                .as_array()
+                .ok_or("public words required")?
+            {
+                model(crate::note::field(decimal(v)?, "authorization field"))?;
+            }
+            exact(result, &["spendingPublicKey", "signature", "digest"])?;
+            let public = hex_bytes(
+                result["spendingPublicKey"]
+                    .as_str()
+                    .ok_or("public key required")?,
+                Some(65),
+            )?;
+            validate_spending_key(owner_address, &public)?;
+            let signature = hex_bytes(
+                result["signature"].as_str().ok_or("signature required")?,
+                Some(64),
+            )?;
+            let digest = crate::wallet::authorization_digest(&q.params)?;
+            if hex_bytes(
+                result["digest"].as_str().ok_or("digest required")?,
+                Some(32),
+            )? != digest
+            {
+                return Err("authorization digest mismatch".into());
+            }
+            let sig = Signature::from_slice(&signature).map_err(|_| "invalid wallet signature")?;
+            if sig.normalize_s().is_some() {
+                return Err("noncanonical wallet signature".into());
+            }
+            VerifyingKey::from_sec1_bytes(&public)
+                .map_err(|_| "invalid spending key")?
+                .verify_prehash(&digest, &sig)
+                .map_err(|_| "wallet signature mismatch")?;
+            Ok(WalletResult::Authorized(WalletAuthorization {
+                spending_public_key: public.try_into().map_err(|_| "invalid key length")?,
+                signature: signature
+                    .try_into()
+                    .map_err(|_| "invalid signature length")?,
+                digest: B256::from(digest),
+            }))
+        }
+        "wallet.decryptNote" | "wallet.decryptCredit" => {
+            exact(&q.params, &["envelope", "context"])?;
+            exact(result, &["plaintext"])?;
+            let credit = q.method == "wallet.decryptCredit";
+            exact(
+                &q.params["context"],
+                if credit {
+                    &[
+                        "chainId",
+                        "protocolAddress",
+                        "tokenAddress",
+                        "outputCommitment",
+                        "role",
+                    ]
+                } else {
+                    &[
+                        "chainId",
+                        "protocolAddress",
+                        "tokenAddress",
+                        "outputCommitment",
+                    ]
+                },
+            )?;
+            let context = DeliveryContext {
+                context: protocol_context(&q.params["context"])?,
+                token_address: decimal(&q.params["context"]["tokenAddress"])?,
+                output_commitment: U256::from_be_slice(&hex_bytes(
+                    q.params["context"]["outputCommitment"]
+                        .as_str()
+                        .ok_or("commitment required")?,
+                    Some(32),
+                )?),
+            };
+            model(context.validate())?;
+            let envelope = hex_bytes(
+                q.params["envelope"].as_str().ok_or("envelope required")?,
+                None,
+            )?;
+            model(crate::delivery::validate_envelope(&envelope, credit))?;
+            let plain = hex_bytes(
+                result["plaintext"].as_str().ok_or("plaintext required")?,
+                None,
+            )?;
+            if plain.len() > 4096 {
+                return Err("wallet plaintext exceeds bound".into());
+            }
+            if !credit {
+                let note = model(crate::delivery::decode_note(&plain, &context))?;
+                if note.owner_address != address_word(owner_address) {
+                    return Err("note recipient mismatch".into());
+                }
+                Ok(WalletResult::Note(note))
+            } else {
+                let state = model(crate::delivery::decode_credit(&plain, &context))?;
+                let (identity, keys) = match q.params["context"]["role"].as_str() {
+                    Some("owner") => (
+                        state.note.owner_wallet_identity,
+                        &state.owner_receiving_keys,
+                    ),
+                    Some("spender") => (
+                        state.note.spender_wallet_identity,
+                        &state.spender_receiving_keys,
+                    ),
+                    _ => return Err("invalid Credit role".into()),
+                };
+                if identity != address_word(owner_address)
+                    || receiving_keys.is_some_and(|existing| {
+                        existing.viewing_public_key != keys.viewing_public_key
+                    })
+                {
+                    return Err("Credit recipient or receiving snapshot mismatch".into());
+                }
+                Ok(WalletResult::Credit(state))
+            }
+        }
+        _ => Err("unsupported wallet method".into()),
+    }
+}
+
 fn validate_spending_key(owner: Address, public: &[u8]) -> Result<()> {
     if public.len() != 65 || public[0] != 4 {
         return Err("uncompressed spending key required".into());
@@ -946,13 +956,13 @@ impl NoteOutput {
     ) -> Result<Self> {
         let note = Note {
             context,
-            owner_address: address_word(recipient.owner),
+            owner_address: address_word(recipient.owner_address),
             token_address: address_word(token),
             amount,
             nonce: nonce(),
             payload,
         };
-        Self::from_note(note, recipient.receiving_keys.as_ref())
+        Self::from_note(note, Some(&recipient.receiving_keys))
     }
     pub fn from_note(note: Note, keys: Option<&ReceivingKeys>) -> Result<Self> {
         let context = note.context;
@@ -1101,7 +1111,8 @@ pub(crate) enum Plan {
 }
 #[derive(Clone)]
 pub struct PreparedTransaction {
-    pub(crate) wallet: Wallet,
+    pub(crate) wallet: Option<Wallet>,
+    pub(crate) owner_address: Address,
     pub(crate) context: ProtocolContext,
     pub(crate) token: Address,
     pub(crate) anchor: CanonicalBlock,
@@ -1232,7 +1243,8 @@ impl Invisi {
         };
         self.chain.canonical(&anchor)?;
         Ok(PreparedTransaction {
-            wallet: wallet.clone(),
+            wallet: Some(wallet.clone()),
+            owner_address: wallet.owner_address,
             context,
             token: p.token,
             anchor,
@@ -1256,6 +1268,14 @@ impl Invisi {
     pub fn prepare_transfer(
         &self,
         wallet: &Wallet,
+        p: TransferPreparation,
+    ) -> Result<PreparedTransaction> {
+        self.prepare_transfer_for_owner(wallet.owner_address, Some(wallet), p)
+    }
+    fn prepare_transfer_for_owner(
+        &self,
+        owner_address: Address,
+        wallet: Option<&Wallet>,
         mut p: TransferPreparation,
     ) -> Result<PreparedTransaction> {
         let template = RepriceTemplate::Transfer(p.clone());
@@ -1269,7 +1289,7 @@ impl Invisi {
         }
         let mut seen = BTreeSet::new();
         for input in &p.inputs {
-            input.validate(wallet.owner, context, p.token)?;
+            input.validate(owner_address, context, p.token)?;
             let n = field_word(model(input.note.nullifier())?);
             if !seen.insert(n)
                 || !self
@@ -1305,9 +1325,7 @@ impl Invisi {
             if !p.automatic_change {
                 return Err("explicit outputs must balance inputs/funding".into());
             }
-            if wallet.receiving_keys.is_none() {
-                return Err("resolved receiving keys required for change".into());
-            }
+            let wallet = wallet.ok_or("complete wallet required for change")?;
             p.outputs.push(NoteOutput::for_recipient(
                 context,
                 p.token,
@@ -1336,14 +1354,15 @@ impl Invisi {
             feeAmount: p.fee.amount,
         };
         let needs_authorization = !p.inputs.is_empty()
-            && !(withdrawal_address == wallet.owner
+            && !(withdrawal_address == owner_address
                 && withdrawal_amount == available
                 && p.outputs.is_empty()
                 && p.funding.amount == U256::ZERO
                 && p.fee.amount == U256::ZERO);
         self.chain.canonical(&anchor)?;
         Ok(PreparedTransaction {
-            wallet: wallet.clone(),
+            wallet: wallet.cloned(),
+            owner_address,
             context,
             token: p.token,
             anchor,
@@ -1464,8 +1483,11 @@ impl PreparedTransaction {
     pub fn needs_authorization(&self) -> bool {
         self.needs_authorization
     }
-    pub fn wallet(&self) -> &Wallet {
-        &self.wallet
+    pub fn wallet(&self) -> Option<&Wallet> {
+        self.wallet.as_ref()
+    }
+    pub fn owner_address(&self) -> Address {
+        self.owner_address
     }
     pub fn anchor(&self) -> &CanonicalBlock {
         &self.anchor
@@ -1555,7 +1577,7 @@ impl PreparedTransaction {
     }
     pub fn with_wallet_signature(mut self, signature: &[u8]) -> Result<Self> {
         self.authorization = Some(accept_wallet_signature(
-            self.wallet.owner,
+            self.owner_address,
             &self.export_wallet_authorization()?,
             signature,
         )?);
@@ -1572,7 +1594,8 @@ impl PreparedTransaction {
             Plan::Transfer { capacity, .. } => capacity,
             _ => return Err("no wallet authorization".into()),
         };
-        self.wallet.prepare_request(
+        prepare_wallet_request(
+            self.owner_address,
             id,
             "wallet.authorize",
             authorization_params(self.context, "transact", c, &words[..words.len() - 2]),
@@ -1583,7 +1606,12 @@ impl PreparedTransaction {
         if current.params != q.params {
             return Err("wallet response differs from frozen statement".into());
         }
-        match self.wallet.accept_response(q, r)? {
+        match accept_wallet_response(
+            self.owner_address,
+            self.wallet.as_ref().map(|w| &w.receiving_keys),
+            q,
+            r,
+        )? {
             WalletResult::Authorized(auth) => self.authorization = Some(auth),
             _ => return Err("wallet authorization response required".into()),
         }
@@ -1811,11 +1839,20 @@ fn validate_submission(
     Ok(())
 }
 #[cfg(test)]
+fn test_receiving_keys() -> ReceivingKeys {
+    let fixture: Value =
+        serde_json::from_str(include_str!("../tests/fixtures/current-address.json")).unwrap();
+    ReceivingAddress::parse(fixture["longAddress"].as_str().unwrap())
+        .unwrap()
+        .keys
+        .unwrap()
+}
+#[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn rejects_zero_wallet_owner() {
-        assert!(Wallet::from_owner(Address::ZERO).is_err());
+        assert!(Wallet::from_keys(Address::ZERO, test_receiving_keys()).is_err());
     }
 }
 
@@ -1959,7 +1996,7 @@ pub(crate) mod test_support {
             }),
             spent: Mutex::new(BTreeSet::new()),
         });
-        let wallet = Wallet::from_owner(owner).unwrap();
+        let wallet = Wallet::from_keys(owner, test_receiving_keys()).unwrap();
         let mut outputs = Vec::new();
         for i in 0..d("output_count").to::<usize>() {
             outputs.push(
@@ -2715,9 +2752,9 @@ impl Invisi {
             return Err("sweep inputs must share one owner".into());
         }
         let amount = sum(p.inputs.iter().map(|i| i.note.amount))?;
-        let wallet = Wallet::from_owner(owner)?;
-        self.prepare_transfer(
-            &wallet,
+        self.prepare_transfer_for_owner(
+            owner,
+            None,
             TransferPreparation {
                 token: p.token,
                 inputs: p.inputs,
@@ -2766,7 +2803,7 @@ mod sweep_tests {
             })
             .unwrap();
         assert!(!sweep.needs_authorization());
-        assert_eq!(address_word(sweep.wallet().owner_address()), owner);
+        assert_eq!(address_word(sweep.owner_address()), owner);
         let Plan::Transfer { params, .. } = &sweep.plan else {
             panic!("not sweep")
         };
@@ -2776,7 +2813,7 @@ mod sweep_tests {
     #[test]
     fn generic_transfer_cannot_spend_disclosed_other_owner() {
         let (chain, _, mut p, _) = test_support::note_fixture();
-        let other = Wallet::from_owner(Address::from([9; 20])).unwrap();
+        let other = Wallet::from_keys(Address::from([9; 20]), test_receiving_keys()).unwrap();
         p.withdrawal = Some((other.owner_address(), p.inputs[0].note.amount));
         assert!(Invisi::new(chain).prepare_transfer(&other, p).is_err());
     }
@@ -3386,7 +3423,7 @@ mod conventional_wallet_signature_tests {
         assert_eq!(request.typed_data["primaryType"], "WalletAuthorization");
         let signature = sign(1, request.digest);
         let wrong = sign(2, request.digest);
-        assert!(accept_wallet_signature(wallet.owner, &request, &wrong).is_err());
+        assert!(accept_wallet_signature(wallet.owner_address, &request, &wrong).is_err());
         let (other_chain, other_wallet, other_plan, _) =
             test_support::note_fixture_label("note5_omitted_deliveries");
         let other = Invisi::new(other_chain)
@@ -3406,7 +3443,7 @@ mod conventional_wallet_signature_tests {
 
         let mut changed = request.clone();
         changed.digest = keccak256("different frozen statement");
-        assert!(accept_wallet_signature(wallet.owner, &changed, &signature).is_err());
+        assert!(accept_wallet_signature(wallet.owner_address, &changed, &signature).is_err());
         let prepared = prepared.with_wallet_signature(&signature).unwrap();
         assert_eq!(prepared.phase, Phase::Authorized);
         assert_eq!(

@@ -222,7 +222,7 @@ mod tests {
         let request = serde_json::from_value(fixture["cases"][0]["request"].clone()).unwrap();
         let response = serde_json::from_value(fixture["cases"][0]["response"].clone()).unwrap();
         let wallet = Wallet::from_response(&request, &response).unwrap();
-        let keys = wallet.receiving_keys().unwrap().clone();
+        let keys = wallet.receiving_keys().clone();
         let note = CreditState {
             context: context(),
             token_address: U256::from(2),

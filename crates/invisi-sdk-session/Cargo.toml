@@ -1,6 +1,6 @@
 [package]
 name = "invisi-sdk-session"
-version = "1.2.0"
+version = "1.2.2"
 edition = "2021"
 license = "Apache-2.0"
 description = "Invisi SDK session capabilities"
@@ -10,10 +10,10 @@ repository = "https://github.com/invisi-lab/invisi-sdk-rust"
 include = ["Cargo.toml", "README.md", "LICENSE", "src/**", "assets/**", "provenance/**", "testdata/**", "tests/**", "include/**"]
 
 [dependencies]
-invisi-sdk-primitives = { path = "../invisi-sdk-primitives", version = "=1.2.0" }
-invisi-sdk-protocol = { path = "../invisi-sdk-protocol", version = "=1.2.0" }
-invisi-sdk-rpc = { path = "../invisi-sdk-rpc", version = "=1.2.0" }
-invisi-sdk = { path = "../..", version = "=1.2.0" }
+invisi-sdk-primitives = { path = "../invisi-sdk-primitives", version = "=1.2.2" }
+invisi-sdk-protocol = { path = "../invisi-sdk-protocol", version = "=1.2.2" }
+invisi-sdk-rpc = { path = "../invisi-sdk-rpc", version = "=1.2.2" }
+invisi-sdk = { path = "../..", version = "=1.2.2" }
 alloy-primitives = { version = "0.8", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

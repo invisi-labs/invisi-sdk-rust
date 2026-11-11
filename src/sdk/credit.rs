@@ -69,7 +69,8 @@ pub(crate) enum CreditPlan {
 }
 #[derive(Clone)]
 pub struct PreparedCredit {
-    pub(crate) wallet: Wallet,
+    pub(crate) wallet: Option<Wallet>,
+    pub(crate) owner_address: Address,
     pub(crate) context: ProtocolContext,
     pub(crate) token: Address,
     pub(crate) anchor: CanonicalBlock,
@@ -163,7 +164,7 @@ impl Invisi {
         let s = &state.note;
         let token = word_address(s.token_address)?;
         if s.context != context
-            || s.owner_wallet_identity != address_word(wallet.owner)
+            || s.owner_wallet_identity != address_word(wallet.owner_address)
             || s.expiry < deadline
             || s.expiry <= anchor.timestamp
             || deadline < anchor.timestamp
@@ -172,15 +173,23 @@ impl Invisi {
         {
             return Err("invalid initial Credit owner, usage, expiry or context".into());
         }
-        if self.chain.credit_allocation(wallet.owner, token, &anchor)?
+        if self
+            .chain
+            .credit_allocation(wallet.owner_address, token, &anchor)?
             != (s.revocation_shard, s.revocation_slot)
         {
             return Err("Credit allocation changed".into());
         }
-        fee_balance(&*self.chain, wallet.owner, token, fee.amount, &anchor)?;
+        fee_balance(
+            &*self.chain,
+            wallet.owner_address,
+            token,
+            fee.amount,
+            &anchor,
+        )?;
         let params = abi::CreateCreditParams {
             token,
-            owner: wallet.owner,
+            owner: wallet.owner_address,
             revocationShard: s.revocation_shard,
             revocationSlot: s.revocation_slot,
             creditCommitment: field_word(model(s.commitment())?),
@@ -191,7 +200,8 @@ impl Invisi {
         let deliveries = credit_deliveries(&state)?;
         self.chain.canonical(&anchor)?;
         Ok(PreparedCredit {
-            wallet: wallet.clone(),
+            wallet: Some(wallet.clone()),
+            owner_address: wallet.owner_address,
             context,
             token,
             anchor,
@@ -223,7 +233,9 @@ impl Invisi {
         let s = &input.delivery.note;
         let token = word_address(s.token_address)?;
         input.validate(&*self.chain, &anchor, context, token)?;
-        if s.owner_wallet_identity != address_word(wallet.owner) || deadline < anchor.timestamp {
+        if s.owner_wallet_identity != address_word(wallet.owner_address)
+            || deadline < anchor.timestamp
+        {
             return Err("Credit update owner or deadline mismatch".into());
         }
         let updated = model(crate::credit::derive_credit_update(s, &changes, deadline))?;
@@ -234,7 +246,7 @@ impl Invisi {
         };
         let params = abi::UpdateCreditParams {
             token,
-            owner: wallet.owner,
+            owner: wallet.owner_address,
             source: abi::InputSource {
                 treeId: U256::from(input.tree_id),
                 merkleRoot: field_word(input.root),
@@ -247,11 +259,18 @@ impl Invisi {
             feeRecipient: fee.recipient,
             feeAmount: fee.amount,
         };
-        fee_balance(&*self.chain, wallet.owner, token, fee.amount, &anchor)?;
+        fee_balance(
+            &*self.chain,
+            wallet.owner_address,
+            token,
+            fee.amount,
+            &anchor,
+        )?;
         let deliveries = credit_deliveries(&next)?;
         self.chain.canonical(&anchor)?;
         Ok(PreparedCredit {
-            wallet: wallet.clone(),
+            wallet: Some(wallet.clone()),
+            owner_address: wallet.owner_address,
             context,
             token,
             anchor,
@@ -292,9 +311,6 @@ impl Invisi {
         if deadline < anchor.timestamp {
             return Err("Credit draw deadline expired".into());
         }
-        if recipient.receiving_keys.is_none() {
-            return Err("resolved receiving keys required for Credit draw recipient".into());
-        }
         let token = word_address(inputs[0].delivery.note.token_address)?;
         inputs.sort_by_key(|input| {
             (
@@ -313,7 +329,7 @@ impl Invisi {
         for input in &inputs {
             input.validate(&*self.chain, &anchor, context, token)?;
             let s = &input.delivery.note;
-            if s.spender_wallet_identity != address_word(wallet.owner)
+            if s.spender_wallet_identity != address_word(wallet.owner_address)
                 || s.expiry < deadline
                 || !seen_refs.insert((
                     s.owner_wallet_identity,
@@ -419,7 +435,8 @@ impl Invisi {
         }
         self.chain.canonical(&anchor)?;
         Ok(PreparedCredit {
-            wallet: wallet.clone(),
+            wallet: Some(wallet.clone()),
+            owner_address: wallet.owner_address,
             context,
             token,
             anchor,
@@ -440,36 +457,42 @@ impl Invisi {
     }
     pub fn prepare_revoke_credit(
         &self,
-        wallet: &Wallet,
+        owner_address: Address,
         token: Address,
         shard: u64,
         slot: u16,
         deadline: u64,
         fee: Fee,
     ) -> Result<PreparedCredit> {
+        if owner_address == Address::ZERO {
+            return Err("nonzero owner address required".into());
+        }
         let template = CreditRepriceTemplate::Revoke(token, shard, slot, deadline);
         let anchor = self.chain.snapshot()?;
         let context = self.chain.context();
         fee.validate()?;
-        let current = self.chain.credit_allocation(wallet.owner, token, &anchor)?;
+        let current = self
+            .chain
+            .credit_allocation(owner_address, token, &anchor)?;
         if deadline < anchor.timestamp
             || shard == 0
             || (shard, slot) >= current
             || self
                 .chain
-                .credit_revoked(wallet.owner, token, shard, slot, &anchor)?
+                .credit_revoked(owner_address, token, shard, slot, &anchor)?
         {
             return Err("Credit revocation reference is unallocated, revoked or expired".into());
         }
-        fee_balance(&*self.chain, wallet.owner, token, fee.amount, &anchor)?;
+        fee_balance(&*self.chain, owner_address, token, fee.amount, &anchor)?;
         self.chain.canonical(&anchor)?;
         Ok(PreparedCredit {
-            wallet: wallet.clone(),
+            wallet: None,
+            owner_address: owner_address,
             context,
             token,
             anchor,
             plan: CreditPlan::Revoke {
-                owner: wallet.owner,
+                owner: owner_address,
                 token,
                 shard,
                 slot,
@@ -510,8 +533,11 @@ impl PreparedCredit {
     pub fn phase(&self) -> Phase {
         self.phase
     }
-    pub fn wallet(&self) -> &Wallet {
-        &self.wallet
+    pub fn wallet(&self) -> Option<&Wallet> {
+        self.wallet.as_ref()
+    }
+    pub fn owner_address(&self) -> Address {
+        self.owner_address
     }
     pub fn anchor(&self) -> &CanonicalBlock {
         &self.anchor
@@ -640,7 +666,7 @@ impl PreparedCredit {
     }
     pub fn with_wallet_signature(mut self, signature: &[u8]) -> Result<Self> {
         self.authorization = Some(accept_wallet_signature(
-            self.wallet.owner,
+            self.owner_address,
             &self.export_wallet_authorization()?,
             signature,
         )?);
@@ -653,7 +679,8 @@ impl PreparedCredit {
         }
         let (operation, _, capacity) = self.operation()?;
         let words = self.public_inputs()?;
-        self.wallet.prepare_request(
+        prepare_wallet_request(
+            self.owner_address,
             id,
             "wallet.authorize",
             authorization_params(self.context, operation, capacity, &words[..words.len() - 2]),
@@ -664,7 +691,12 @@ impl PreparedCredit {
         if expected.params != q.params {
             return Err("Credit response differs from frozen statement".into());
         }
-        match self.wallet.accept_response(q, r)? {
+        match accept_wallet_response(
+            self.owner_address,
+            self.wallet.as_ref().map(|w| &w.receiving_keys),
+            q,
+            r,
+        )? {
             WalletResult::Authorized(a) => self.authorization = Some(a),
             _ => return Err("wallet authorization response required".into()),
         }
@@ -722,7 +754,7 @@ impl PreparedCredit {
                 ..
             } => {
                 let c = credit_capacity(inputs.len())?;
-                v["spender_wallet_identity"] = json!(address_word(self.wallet.owner).to_string());
+                v["spender_wallet_identity"] = json!(address_word(self.owner_address).to_string());
                 let mut arrays: BTreeMap<&str, Vec<String>> = [
                     "input_nonces",
                     "expiries",
@@ -963,35 +995,11 @@ mod tests {
     #[test]
     fn create_requires_strictly_future_expiry() {
         let (chain, wallet, _, _) = super::super::test_support::note_fixture();
-        let mut state = state(&*chain, wallet.owner, Address::repeat_byte(7));
+        let mut state = state(&*chain, wallet.owner_address, Address::repeat_byte(7));
         state.note.expiry = chain.snapshot().unwrap().timestamp;
         let deadline = state.note.expiry;
         assert!(Invisi::new(chain)
             .prepare_create_credit(&wallet, state, deadline, Fee::default())
-            .is_err());
-    }
-    #[test]
-    fn draw_requires_resolved_recipient_delivery_keys() {
-        let (chain, wallet, _, _) = super::super::test_support::note_fixture();
-        let state = state(&*chain, Address::repeat_byte(5), wallet.owner);
-        let root = merkle_root(state.note.commitment().unwrap(), 0, &[U256::ZERO; 16]).unwrap();
-        let input = CreditInput {
-            delivery: state,
-            tree_id: 1,
-            leaf_index: 0,
-            path: [U256::ZERO; 16],
-            root,
-            debit: U256::from(7),
-        };
-        assert!(Invisi::new(chain)
-            .prepare_draw_credit(
-                &wallet,
-                vec![input],
-                &Wallet::from_owner(Address::repeat_byte(9)).unwrap(),
-                2000000001,
-                Fee::default(),
-                Vec::new()
-            )
             .is_err());
     }
 }
@@ -1285,7 +1293,9 @@ mod lifecycle_tests {
             let before_quote = journal::ManagedPrepared::Credit(original.clone())
                 .snapshot()
                 .unwrap();
-            let restored = before_quote.restore(original.wallet(), None).unwrap();
+            let restored = before_quote
+                .restore(original.wallet().unwrap(), None)
+                .unwrap();
             let restarted = match restored {
                 journal::ManagedPrepared::Credit(v) => v,
                 _ => panic!("Credit"),
@@ -1354,7 +1364,7 @@ mod lifecycle_tests {
                     &*key,
                     &output.delivery().ciphertext,
                     &context,
-                    address_word(recipient.owner),
+                    address_word(recipient.owner_address),
                 )
                 .unwrap();
                 assert_eq!(decoded.amount, U256::from(5));
@@ -1365,7 +1375,7 @@ mod lifecycle_tests {
                 .unwrap();
             let bytes = serde_json::to_vec(&snapshot).unwrap();
             let snapshot: journal::PreparedSnapshot = serde_json::from_slice(&bytes).unwrap();
-            let restored = snapshot.restore(prepared.wallet(), None).unwrap();
+            let restored = snapshot.restore(prepared.wallet().unwrap(), None).unwrap();
             match restored {
                 journal::ManagedPrepared::Credit(v) => {
                     assert_eq!(
@@ -1391,7 +1401,7 @@ mod lifecycle_tests {
                 .snapshot()
                 .unwrap();
             let restored = snapshot
-                .restore(proved.wallet(), Some(&SyntheticCreditBackend))
+                .restore(proved.wallet().unwrap(), Some(&SyntheticCreditBackend))
                 .unwrap();
             match restored {
                 journal::ManagedPrepared::Credit(mut v) => {
@@ -1405,7 +1415,8 @@ mod lifecycle_tests {
                     assert!(exact.member_proof.is_none());
                     v.broadcaster.as_mut().unwrap().submission_id = None;
                     let saved = journal::ManagedPrepared::Credit(v).snapshot().unwrap();
-                    let mut restored = match saved.restore(proved.wallet(), None).unwrap() {
+                    let mut restored = match saved.restore(proved.wallet().unwrap(), None).unwrap()
+                    {
                         journal::ManagedPrepared::Credit(v) => v,
                         _ => panic!("Credit"),
                     };
@@ -1620,8 +1631,8 @@ mod lifecycle_tests {
             note: crate::credit::CreditState {
                 context: chain.context(),
                 token_address: U256::from_be_slice(&[0x22; 20]),
-                spender_wallet_identity: address_word(wallet(2).owner),
-                owner_wallet_identity: address_word(wallet(1).owner),
+                spender_wallet_identity: address_word(wallet(2).owner_address),
+                owner_wallet_identity: address_word(wallet(1).owner_address),
                 revocation_shard: 1,
                 revocation_slot: 0,
                 nonce: U256::from(74),
@@ -1633,8 +1644,8 @@ mod lifecycle_tests {
                 unlimited: false,
                 payload: Vec::new(),
             },
-            owner_receiving_keys: wallet(1).receiving_keys.unwrap(),
-            spender_receiving_keys: wallet(2).receiving_keys.unwrap(),
+            owner_receiving_keys: wallet(1).receiving_keys,
+            spender_receiving_keys: wallet(2).receiving_keys,
         }
     }
     fn fixture(label: &str) -> Value {
@@ -1727,12 +1738,12 @@ mod lifecycle_tests {
                     Note {
                         context: chain.context(),
                         token_address: U256::from_be_slice(&[0x22; 20]),
-                        owner_address: address_word(wallet(91).owner),
+                        owner_address: address_word(wallet(91).owner_address),
                         amount: U256::from(6),
                         nonce: U256::from(8675309),
                         payload: Vec::new(),
                     },
-                    wallet(91).receiving_keys(),
+                    Some(wallet(91).receiving_keys()),
                 )
                 .unwrap();
                 if let CreditPlan::Draw {
@@ -1797,7 +1808,7 @@ mod lifecycle_tests {
         bytes.push(id.to_byte() + 27);
         let mut wrong = request.clone();
         wrong.digest = keccak256("different Credit intent");
-        assert!(accept_wallet_signature(prepared.wallet.owner, &wrong, &bytes).is_err());
+        assert!(accept_wallet_signature(prepared.owner_address, &wrong, &bytes).is_err());
         let authorized = prepared.with_wallet_signature(&bytes).unwrap();
         assert_eq!(unsigned_estimate, authorized.estimate_gas().unwrap());
         (chain, authorized)
@@ -1891,8 +1902,8 @@ mod lifecycle_tests {
         let spender = wallet(2);
         let first = initial(&*chain);
         let mut second = first.clone();
-        second.note.owner_wallet_identity = address_word(wallet(3).owner);
-        second.owner_receiving_keys = wallet(3).receiving_keys.unwrap();
+        second.note.owner_wallet_identity = address_word(wallet(3).owner_address);
+        second.owner_receiving_keys = wallet(3).receiving_keys;
         second.note.nonce = U256::from(76);
         let member = |state: CreditDeliveryState, tree_id, debit| CreditInput {
             root: merkle_root(state.note.commitment().unwrap(), 0, &[U256::ZERO; 16]).unwrap(),
@@ -1987,7 +1998,7 @@ mod lifecycle_tests {
             )
             .unwrap();
             assert!(backend.verify(prepared.proof().unwrap(), &request).unwrap());
-            let call = prepared.calldata(&*chain, prepared.wallet.owner).unwrap();
+            let call = prepared.calldata(&*chain, prepared.owner_address).unwrap();
             assert_eq!(
                 call.to,
                 word_address(prepared.context.protocol_address).unwrap()
@@ -2053,13 +2064,10 @@ mod revocation_tests {
         key[31] = 1;
         let signing = k256::ecdsa::SigningKey::from_slice(&key).unwrap();
         let public = signing.verifying_key().to_encoded_point(false);
-        let owner = Wallet::from_owner(Address::from_slice(
-            &keccak256(&public.as_bytes()[1..])[12..],
-        ))
-        .unwrap();
+        let owner = Address::from_slice(&keccak256(&public.as_bytes()[1..])[12..]);
         let original = runtime
             .prepare_revoke_credit(
-                &owner,
+                owner,
                 Address::repeat_byte(2),
                 1,
                 0,
@@ -2103,7 +2111,7 @@ mod revocation_tests {
         let saved = journal::ManagedPrepared::Credit(approved)
             .snapshot()
             .unwrap();
-        let restored = saved.restore(&owner, None).unwrap();
+        let restored = saved.restore_for_owner(owner, None).unwrap();
         match restored {
             journal::ManagedPrepared::Credit(mut v) => {
                 v.submit_broadcaster(chain.as_ref(), relay.as_ref())
@@ -2115,7 +2123,7 @@ mod revocation_tests {
                 assert_eq!(exact.data, v.broadcaster_state().unwrap().submitted_data);
                 v.broadcaster.as_mut().unwrap().submission_id = None;
                 let saved = journal::ManagedPrepared::Credit(v).snapshot().unwrap();
-                let mut restored = match saved.restore(&owner, None).unwrap() {
+                let mut restored = match saved.restore_for_owner(owner, None).unwrap() {
                     journal::ManagedPrepared::Credit(v) => v,
                     _ => panic!("Credit"),
                 };
@@ -2137,10 +2145,10 @@ mod revocation_tests {
         let chain = Arc::new(Chain(inner));
         let invisi = Invisi::new(chain.clone());
         let token = Address::repeat_byte(2);
-        let owner = wallet.owner;
+        let owner = wallet.owner_address;
         let deadline = 2000000100;
         let direct = invisi
-            .prepare_revoke_credit(&wallet, token, 1, 0, deadline, Fee::default())
+            .prepare_revoke_credit(owner, token, 1, 0, deadline, Fee::default())
             .unwrap();
         let estimate = direct.estimate_gas().unwrap();
         assert!(!estimate.available());
@@ -2159,9 +2167,8 @@ mod revocation_tests {
         let signing = k256::ecdsa::SigningKey::from_slice(&key).unwrap();
         let public = signing.verifying_key().to_encoded_point(false);
         let actual_owner = Address::from_slice(&keccak256(&public.as_bytes()[1..])[12..]);
-        let wallet = Wallet::from_owner(actual_owner).unwrap();
         let prepared = invisi
-            .prepare_revoke_credit(&wallet, token, 1, 0, deadline, Fee::default())
+            .prepare_revoke_credit(actual_owner, token, 1, 0, deadline, Fee::default())
             .unwrap();
         let (signature, recovery) = signing
             .sign_prehash_recoverable(prepared.revocation_digest().unwrap().as_slice())
@@ -2174,7 +2181,7 @@ mod revocation_tests {
         assert!(protocol::ProtocolContract::decode_call(&calldata.data).is_ok());
         let wrong = invisi
             .prepare_revoke_credit(
-                &wallet,
+                actual_owner,
                 token,
                 1,
                 0,

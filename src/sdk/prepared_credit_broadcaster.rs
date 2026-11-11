@@ -102,12 +102,19 @@ impl PreparedCredit {
                 return Err("positive Credit relay fee required".into());
             }
             let mut candidate = match template {
-                CreditRepriceTemplate::Create(state, deadline) => {
-                    runtime.prepare_create_credit(&self.wallet, state.clone(), *deadline, f)?
-                }
+                CreditRepriceTemplate::Create(state, deadline) => runtime.prepare_create_credit(
+                    self.wallet
+                        .as_ref()
+                        .ok_or("complete wallet required for Credit repricing")?,
+                    state.clone(),
+                    *deadline,
+                    f,
+                )?,
                 CreditRepriceTemplate::Update(input, changes, deadline) => runtime
                     .prepare_update_credit(
-                        &self.wallet,
+                        self.wallet
+                            .as_ref()
+                            .ok_or("complete wallet required for Credit repricing")?,
                         input.clone(),
                         changes.clone(),
                         *deadline,
@@ -115,7 +122,9 @@ impl PreparedCredit {
                     )?,
                 CreditRepriceTemplate::Draw(inputs, recipient, deadline, payload) => runtime
                     .prepare_draw_credit(
-                        &self.wallet,
+                        self.wallet
+                            .as_ref()
+                            .ok_or("complete wallet required for Credit repricing")?,
                         inputs.clone(),
                         recipient,
                         *deadline,
@@ -123,7 +132,14 @@ impl PreparedCredit {
                         payload.clone(),
                     )?,
                 CreditRepriceTemplate::Revoke(token, shard, slot, deadline) => runtime
-                    .prepare_revoke_credit(&self.wallet, *token, *shard, *slot, *deadline, f)?,
+                    .prepare_revoke_credit(
+                        self.owner_address,
+                        *token,
+                        *shard,
+                        *slot,
+                        *deadline,
+                        f,
+                    )?,
             };
             let data = candidate.broadcaster_intent()?.data;
             let next = relay.fee(self.token, Some(&data))?;

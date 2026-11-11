@@ -4,7 +4,7 @@
 use alloy_primitives::Address;
 use invisi_sdk::{
     rpc::{EthereumChain, HttpTransport, ProtocolDeployment},
-    sdk::{ChainState, Fee, Invisi, RpcChainState, Wallet},
+    sdk::{ChainState, Fee, Invisi, RpcChainState},
 };
 use serde_json::json;
 use std::{env, fs, sync::Arc};
@@ -20,15 +20,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ethereum = EthereumChain::new(HttpTransport::new(&env::var("ETH_RPC_URL")?)?);
     let chain = Arc::new(RpcChainState::new(ethereum, deployment)?);
     let invisi = Invisi::new(chain.clone());
-    let wallet = Wallet::from_address(&env::var("WALLET_ADDRESS")?)?;
+    let owner_address: Address = env::var("OWNER_ADDRESS")?.parse()?;
     let token: Address = env::var("TOKEN_ADDRESS")?.parse()?;
     let deadline: u64 = env::var("DEADLINE")?.parse()?;
 
     // These public references identify the earlier grant; no private Credit opening is needed.
     let shard = env::var("GRANT_SHARD")?.parse()?;
     let slot = env::var("GRANT_SLOT")?.parse()?;
-    let mut prepared =
-        invisi.prepare_revoke_credit(&wallet, token, shard, slot, deadline, Fee::default())?;
+    let mut prepared = invisi.prepare_revoke_credit(
+        owner_address,
+        token,
+        shard,
+        slot,
+        deadline,
+        Fee::default(),
+    )?;
     let caller: Address = env::var("CALLER_ADDRESS")?.parse()?;
 
     // Relayers need owner EVM consent; this signature is separate from native circuit
@@ -36,7 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Available before authorization, proof generation and token approval.
     println!("{}", serde_json::to_string(&prepared.estimate_gas()?)?);
 
-    if caller != wallet.owner_address() {
+    if caller != owner_address {
         let request = prepared.export_revocation_signing_request()?;
         let signature = invisi_sdk_examples::sign_authorization(&request)?;
         prepared = prepared.with_revocation_signature(&*chain, signature)?;

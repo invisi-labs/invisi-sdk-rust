@@ -364,7 +364,11 @@ impl PreparedTransaction {
                 RepriceTemplate::Transfer(p) => {
                     let mut p = p.clone();
                     p.fee = f;
-                    runtime.prepare_transfer(&self.wallet, p)?
+                    runtime.prepare_transfer_for_owner(
+                        self.owner_address,
+                        self.wallet.as_ref(),
+                        p,
+                    )?
                 }
                 RepriceTemplate::Shield(p) => {
                     let mut p = p.clone();
@@ -372,7 +376,12 @@ impl PreparedTransaction {
                     p.funding.amount = sum(p.outputs.iter().map(|o| o.amount))?
                         .checked_add(amount)
                         .ok_or("funding overflow")?;
-                    runtime.prepare_shield(&self.wallet, p)?
+                    runtime.prepare_shield(
+                        self.wallet
+                            .as_ref()
+                            .ok_or("complete wallet required for shield")?,
+                        p,
+                    )?
                 }
             };
             if candidate.funding().amount != U256::ZERO {
@@ -1404,7 +1413,7 @@ mod tests {
                     outputs: vec![output],
                     funding: abi::FundingParams {
                         amount: U256::from(20),
-                        payer: wallet.owner,
+                        payer: wallet.owner_address,
                         ..empty_funding()
                     },
                     fee: Fee::default(),
@@ -1571,7 +1580,7 @@ mod tests {
                     outputs: vec![output],
                     funding: abi::FundingParams {
                         amount: U256::from(20),
-                        payer: wallet.owner,
+                        payer: wallet.owner_address,
                         ..empty_funding()
                     },
                     fee: Fee::default(),

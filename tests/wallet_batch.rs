@@ -3,6 +3,11 @@ use invisi_sdk::{
     wallet,
 };
 use serde_json::{json, Value};
+fn full_wallet() -> Wallet {
+    let fixture: Value =
+        serde_json::from_str(include_str!("fixtures/current-address.json")).unwrap();
+    Wallet::from_address(fixture["longAddress"].as_str().unwrap()).unwrap()
+}
 fn key() -> [u8; 32] {
     let mut key = [0; 32];
     key[31] = 1;
@@ -32,12 +37,7 @@ fn native_batch_validates_every_item_and_keeps_errors_bound_to_ids() {
 }
 #[test]
 fn wallet_correlates_reordered_batches_and_rejects_missing_duplicate_unknown_and_errors() {
-    let wallet = Wallet::from_owner(
-        "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf"
-            .parse()
-            .unwrap(),
-    )
-    .unwrap();
+    let wallet = full_wallet();
     let requests = vec![
         wallet
             .prepare_request("public", "wallet.public", json!({}))
@@ -118,12 +118,7 @@ fn response_envelopes_require_exactly_one_bound_result_or_error() {
 
 #[test]
 fn private_key_execution_stays_in_native_test_and_resolves_only_a_public_profile() {
-    let wallet = Wallet::from_owner(
-        "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf"
-            .parse()
-            .unwrap(),
-    )
-    .unwrap();
+    let wallet = full_wallet();
     let request = wallet
         .prepare_request("profile", "wallet.public", json!({}))
         .unwrap();

@@ -101,14 +101,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .parse()?,
                 payload: Vec::new(),
             },
-            owner_receiving_keys: wallet
-                .receiving_keys()
-                .ok_or("WALLET_ADDRESS must be a complete receiving address")?
-                .clone(),
-            spender_receiving_keys: spender
-                .receiving_keys()
-                .ok_or("SPENDER_ADDRESS must be a complete receiving address")?
-                .clone(),
+            owner_receiving_keys: wallet.receiving_keys().clone(),
+            spender_receiving_keys: spender.receiving_keys().clone(),
         };
 
         session.prepare_create_credit(state, env::var("DEADLINE")?.parse()?, Fee::default())?

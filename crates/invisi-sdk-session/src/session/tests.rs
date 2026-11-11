@@ -36,10 +36,13 @@ fn wallet(n: u8) -> Wallet {
     } else {
         "0x2b5ad5c4795c026514f8317c7a215e218dccd6cf"
     };
-    let base = Wallet::from_owner(owner.parse().unwrap()).unwrap();
-    let q = base
-        .prepare_request("public", "wallet.public", serde_json::json!({}))
-        .unwrap();
+    let q = sdk::prepare_wallet_request(
+        owner.parse().unwrap(),
+        "public",
+        "wallet.public",
+        serde_json::json!({}),
+    )
+    .unwrap();
     let r: WalletResponse =
         serde_json::from_value(crate::wallet::execute(&key(n), &q.as_value()).unwrap()).unwrap();
     Wallet::from_response(&q, &r).unwrap()
@@ -251,7 +254,7 @@ fn harness() -> Harness {
         token_address: note.token_address,
         output_commitment: U256::from_be_slice(commitment.as_slice()),
     };
-    let keys = wallet.receiving_keys().unwrap();
+    let keys = wallet.receiving_keys();
     let ciphertext =
         crate::delivery::encrypt_note(&keys.viewing_public_key, &note, &delivery).unwrap();
     let clue = crate::fmd::create_clue(&keys.clue_key).unwrap();
@@ -642,7 +645,8 @@ fn successful_canonical_shield_reconciliation_commits_only_after_injected_app_de
     use alloy_sol_types::SolCall;
     let h = harness();
     let output =
-        sdk::NoteOutput::from_note(h.note.clone(), h.session.wallet.receiving_keys()).unwrap();
+        sdk::NoteOutput::from_note(h.note.clone(), Some(h.session.wallet.receiving_keys()))
+            .unwrap();
     let mut funding = sdk::empty_funding();
     funding.payer = h.session.wallet.owner_address();
     funding.amount = h.note.amount;
@@ -747,8 +751,8 @@ fn credit_inventory_is_separate_and_canonical_draw_recovers_owned_successor_with
             unlimited: false,
             payload: Vec::new(),
         },
-        owner_receiving_keys: alice.receiving_keys().unwrap().clone(),
-        spender_receiving_keys: bob.receiving_keys().unwrap().clone(),
+        owner_receiving_keys: alice.receiving_keys().clone(),
+        spender_receiving_keys: bob.receiving_keys().clone(),
     };
     let delivery_for = |state: &CreditDeliveryState, role: CreditRole| {
         let keys = if role == CreditRole::Owner {
@@ -1163,8 +1167,8 @@ fn credit_relay_context_survives_encrypted_restart_and_fences_uncertain_submissi
             unlimited: false,
             payload: Vec::new(),
         },
-        owner_receiving_keys: alice.receiving_keys().unwrap().clone(),
-        spender_receiving_keys: bob.receiving_keys().unwrap().clone(),
+        owner_receiving_keys: alice.receiving_keys().clone(),
+        spender_receiving_keys: bob.receiving_keys().clone(),
     };
     let operation = session
         .prepare_create_credit(state, 2000000100, sdk::Fee::default())
@@ -1451,8 +1455,8 @@ fn managed_note_and_credit_estimate_without_externalizing() {
                     unlimited: false,
                     payload: Vec::new(),
                 },
-                owner_receiving_keys: h.session.wallet.receiving_keys().unwrap().clone(),
-                spender_receiving_keys: wallet(2).receiving_keys().unwrap().clone(),
+                owner_receiving_keys: h.session.wallet.receiving_keys().clone(),
+                spender_receiving_keys: wallet(2).receiving_keys().clone(),
             };
             h.session
                 .prepare_create_credit(state, 2000000100, sdk::Fee::default())
@@ -1784,8 +1788,8 @@ fn reverse_discovery_replays_credit_successor_after_late_parent() {
             unlimited: false,
             payload: Vec::new(),
         },
-        owner_receiving_keys: alice.receiving_keys().unwrap().clone(),
-        spender_receiving_keys: bob.receiving_keys().unwrap().clone(),
+        owner_receiving_keys: alice.receiving_keys().clone(),
+        spender_receiving_keys: bob.receiving_keys().clone(),
     };
     let delivery_for = |state: &CreditDeliveryState, role: CreditRole| {
         let keys = if role == CreditRole::Owner {

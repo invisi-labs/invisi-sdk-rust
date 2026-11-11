@@ -6,10 +6,10 @@ The SDK does not select accounts, read Keychain/Keystore, hold a mnemonic, or ap
 
 ## Release validation
 
-The public crates share version **1.2.0**. See [local release validation](RELEASE.md)
+The public crates share version **1.2.2**. See [local release validation](RELEASE.md)
 for packaging checks and the required publication order.
 
-Version 1.2.0 exposes six common modules plus the separate native FFI adapter.
+Version 1.2.2 exposes six common modules plus the separate native FFI adapter.
 Replace `invisi-sdk-core` dependencies/imports with `invisi-sdk-primitives`.
 Use `invisi_sdk::sdk` for stateless operations and `invisi_sdk_session::session`
 for managed wallets; enable `sqlite` on `invisi-sdk-session` when needed.
@@ -37,7 +37,7 @@ Native hosts that only need wallet cryptography depend on primitives or FFI dire
 
 ## Public Wallet and application capabilities
 
-`Wallet` stores public owner and receiving material. Applications provide delivery decryption and ordinary EIP-712 signing; the SDK never needs an account private key or wallet transport.
+`Wallet` stores only a public `owner_address` and required `receiving_keys`. `address()` encodes a complete `0i` receiving address on each call. `from_address()` accepts only complete `0i` addresses; `from_keys()` validates a nonzero owner and both receiving keys. Constructors perform no RPC or registry lookup. Use independent EVM owner addresses for owner-only operations: `prepare_wallet_request`, `accept_wallet_response`, Credit revocation, and original-owner sweeps. Standalone `ReceivingAddress` still supports short `0x` encoding. Applications provide delivery decryption and ordinary EIP-712 signing; the SDK never needs an account private key or wallet transport.
 
 ```rust,ignore
 let request = prepared.export_wallet_authorization()?;

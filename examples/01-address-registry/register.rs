@@ -37,9 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let wallet = Wallet::from_address(&env::var("WALLET_ADDRESS")?)?;
-    let keys = wallet
-        .receiving_keys()
-        .ok_or("a complete receiving address is required")?;
+    let keys = wallet.receiving_keys();
     let identity = sdk::field_word(sdk::address_word(wallet.owner_address()));
     let call = InvisiAddressRegistry::nonceOfCall {
         walletIdentity: identity,

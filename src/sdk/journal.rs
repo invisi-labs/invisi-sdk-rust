@@ -142,6 +142,7 @@ impl ManagedPrepared {
     pub fn snapshot_funds(value: &PreparedTransaction) -> Self {
         Self::Funds(PreparedTransaction {
             wallet: value.wallet.clone(),
+            owner_address: value.owner_address,
             context: value.context,
             token: value.token,
             anchor: value.anchor.clone(),
@@ -164,7 +165,13 @@ impl ManagedPrepared {
             Self::Credit(v) => v.phase(),
         }
     }
-    pub fn wallet(&self) -> &Wallet {
+    pub fn owner_address(&self) -> Address {
+        match self {
+            Self::Funds(v) => v.owner_address(),
+            Self::Credit(v) => v.owner_address(),
+        }
+    }
+    pub fn wallet(&self) -> Option<&Wallet> {
         match self {
             Self::Funds(v) => v.wallet(),
             Self::Credit(v) => v.wallet(),
@@ -367,6 +374,26 @@ impl PreparedSnapshot {
         wallet: &Wallet,
         backend: Option<&dyn Prover>,
     ) -> Result<ManagedPrepared> {
+        self.restore_with_material(wallet.owner_address(), Some(wallet), backend)
+    }
+    pub fn restore_for_owner(
+        &self,
+        owner_address: Address,
+        backend: Option<&dyn Prover>,
+    ) -> Result<ManagedPrepared> {
+        self.restore_with_material(owner_address, None, backend)
+    }
+    fn restore_with_material(
+        &self,
+        owner_address: Address,
+        wallet: Option<&Wallet>,
+        backend: Option<&dyn Prover>,
+    ) -> Result<ManagedPrepared> {
+        if owner_address == Address::ZERO
+            || wallet.is_some_and(|w| w.owner_address() != owner_address)
+        {
+            return Err("operation owner mismatch".into());
+        }
         self.context.validate().map_err(|e| e.to_string())?;
         let call = P::InvisiProtocolCalls::abi_decode(&self.unsigned_call, true)
             .map_err(|e| e.to_string())?;
@@ -385,7 +412,7 @@ impl PreparedSnapshot {
             .map(NoteInput::from)
             .collect::<Vec<_>>();
         for input in &inputs {
-            input.validate(wallet.owner_address(), self.context, self.token)?;
+            input.validate(owner_address, self.context, self.token)?;
         }
         validate_outputs(&outputs, self.context, self.token)?;
         if !["evm", "noir-recursive"].contains(&self.target.as_str()) {
@@ -428,7 +455,8 @@ impl PreparedSnapshot {
                     }
                 }
                 ManagedPrepared::Funds(PreparedTransaction {
-                    wallet: wallet.clone(),
+                    wallet: wallet.cloned(),
+                    owner_address,
                     context: self.context,
                     token: self.token,
                     anchor: self.anchor.clone(),
@@ -471,7 +499,7 @@ impl PreparedSnapshot {
                     .and_then(|n| n.checked_add(c.r.params.feeAmount))
                     .ok_or("saved funds amount overflow")?;
                 let needs_authorization = !inputs.is_empty()
-                    && !(c.r.params.withdrawalAddress == wallet.owner_address()
+                    && !(c.r.params.withdrawalAddress == owner_address
                         && c.r.params.withdrawalAmount == available
                         && outputs.is_empty()
                         && c.r.funding.amount == U256::ZERO
@@ -523,7 +551,8 @@ impl PreparedSnapshot {
                     }
                 }
                 ManagedPrepared::Funds(PreparedTransaction {
-                    wallet: wallet.clone(),
+                    wallet: wallet.cloned(),
+                    owner_address,
                     context: self.context,
                     token: self.token,
                     anchor: self.anchor.clone(),
@@ -579,7 +608,7 @@ impl PreparedSnapshot {
                             || !outputs.is_empty()
                             || c._2.len() != 2
                             || c.p.token != self.token
-                            || c.p.owner != wallet.owner_address()
+                            || c.p.owner != owner_address
                         {
                             return Err("saved Credit creation shape mismatch".into());
                         }
@@ -589,7 +618,7 @@ impl PreparedSnapshot {
                         let state = &self.states[0].note;
                         if state.context != self.context
                             || state.token_address != address_word(self.token)
-                            || state.owner_wallet_identity != address_word(wallet.owner_address())
+                            || state.owner_wallet_identity != address_word(owner_address)
                             || state.revocation_shard != c.p.revocationShard
                             || state.revocation_slot != c.p.revocationSlot
                             || field_word(model(state.commitment())?) != c.p.creditCommitment
@@ -611,7 +640,7 @@ impl PreparedSnapshot {
                             || !outputs.is_empty()
                             || c._2.len() != 2
                             || c.p.token != self.token
-                            || c.p.owner != wallet.owner_address()
+                            || c.p.owner != owner_address
                         {
                             return Err("saved Credit update shape mismatch".into());
                         }
@@ -629,7 +658,7 @@ impl PreparedSnapshot {
                         ))?;
                         if state.context != self.context
                             || state.token_address != address_word(self.token)
-                            || state.owner_wallet_identity != address_word(wallet.owner_address())
+                            || state.owner_wallet_identity != address_word(owner_address)
                             || c.p.source.treeId != U256::from(input.tree_id)
                             || c.p.source.merkleRoot != field_word(input.root)
                             || c.p.nullifier != field_word(model(state.nullifier())?)
@@ -682,8 +711,7 @@ impl PreparedSnapshot {
                             ))?;
                             if state.context != self.context
                                 || state.token_address != address_word(self.token)
-                                || state.spender_wallet_identity
-                                    != address_word(wallet.owner_address())
+                                || state.spender_wallet_identity != address_word(owner_address)
                                 || expected.state != self.states[i].note
                                 || field_word(expected.state_commitment) != c.p.creditCommitments[i]
                                 || field_word(expected.nullifier) != c.p.nullifiers[i]
@@ -764,9 +792,7 @@ impl PreparedSnapshot {
                             let note = output
                                 .note()
                                 .ok_or("saved Credit draw output opening required")?;
-                            if recipient.receiving_keys().is_none()
-                                || address_word(recipient.owner) != note.owner_address
-                            {
+                            if address_word(recipient.owner_address) != note.owner_address {
                                 return Err("saved Credit draw recipient mismatch".into());
                             }
                             Some(CreditRepriceTemplate::Draw(
@@ -791,7 +817,8 @@ impl PreparedSnapshot {
                     None
                 };
                 ManagedPrepared::Credit(PreparedCredit {
-                    wallet: wallet.clone(),
+                    wallet: wallet.cloned(),
+                    owner_address,
                     context: self.context,
                     token: self.token,
                     anchor: self.anchor.clone(),
@@ -885,7 +912,7 @@ impl PreparedSnapshot {
                 )?,
                 _ => return Err("unexpected saved proof".into()),
             };
-            self.restore(&Wallet::from_owner(owner)?, None)?;
+            self.restore_for_owner(owner, None)?;
             let statement = prover::statement(
                 &proof.circuit_name,
                 &self.target,
@@ -993,6 +1020,7 @@ impl ManagedPrepared {
         match self {
             Self::Funds(v) => Self::Funds(PreparedTransaction {
                 wallet: v.wallet.clone(),
+                owner_address: v.owner_address,
                 context: v.context,
                 token: v.token,
                 anchor: v.anchor.clone(),
@@ -1015,6 +1043,7 @@ impl ManagedPrepared {
             }),
             Self::Credit(v) => Self::Credit(PreparedCredit {
                 wallet: v.wallet.clone(),
+                owner_address: v.owner_address,
                 context: v.context,
                 token: v.token,
                 anchor: v.anchor.clone(),

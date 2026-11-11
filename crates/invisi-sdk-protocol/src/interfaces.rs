@@ -346,7 +346,7 @@ pub struct CreditTransactionUpdates {
     pub transitions: Vec<CreditTransition>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanonicalLog {
     pub address: Address,
     pub topics: Vec<B256>,
@@ -354,7 +354,7 @@ pub struct CanonicalLog {
     pub log_index: u32,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanonicalReceipt {
     pub transaction_hash: B256,
     pub block: CanonicalBlock,

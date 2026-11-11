@@ -403,7 +403,8 @@ pub fn execute_batch(key: &[u8], requests: &[Value]) -> Result<Vec<Value>, Strin
         Ok(response) => response,
         Err(code) => {
             let code = match code.as_str() {
-                "PRIVACY_DECRYPT_FAILED" | "PRIVACY_RECIPIENT_MISMATCH" => "WALLET_NOT_RECIPIENT",
+                "PRIVACY_DECRYPT_FAILED" => "WALLET_AUTHENTICATION_FAILED",
+                "PRIVACY_RECIPIENT_MISMATCH" => "WALLET_NOT_RECIPIENT",
                 other if other.as_bytes().first().is_some_and(u8::is_ascii_uppercase) && other.len() <= 128 && other.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_') => other,
                 _ => "WALLET_NATIVE_FAILURE",
             };

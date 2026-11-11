@@ -76,7 +76,7 @@ fn wallet_correlates_reordered_batches_and_rejects_missing_duplicate_unknown_and
 }
 
 #[test]
-fn native_batch_returns_explicit_nonrecipient_and_preserves_other_members() {
+fn native_batch_returns_ambiguous_authentication_and_preserves_other_members() {
     let fixture: Value =
         serde_json::from_str(include_str!("fixtures/wallet-wire-vectors.json")).unwrap();
     let mut request = fixture["cases"]
@@ -92,7 +92,10 @@ fn native_batch_returns_explicit_nonrecipient_and_preserves_other_members() {
     request["params"]["envelope"] = json!(envelope);
     let responses = wallet::execute_batch(&key(), &[public("public"), request.clone()]).unwrap();
     assert!(responses[0]["result"].is_object());
-    assert_eq!(responses[1]["error"]["code"], "WALLET_NOT_RECIPIENT");
+    assert_eq!(
+        responses[1]["error"]["code"],
+        "WALLET_AUTHENTICATION_FAILED"
+    );
     assert_eq!(responses[1]["id"], request["id"]);
     assert!(responses[1].get("result").is_none());
     let mut oversized = public("large");

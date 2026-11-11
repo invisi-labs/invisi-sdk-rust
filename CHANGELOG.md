@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Share bounded canonical public history across accounts and persist independent private scan coverage.
+- Prioritize recent assets, recover historical gaps and replay causal Credit state with durable checkpoints.
+- Expose scan completeness and known spendable funds separately; support offline recovery from validated public proofs.
+- Preserve ambiguous delivery candidates, carry complete native detection/decryption contexts, and page authenticated encrypted wallet archives.
+
 ## 1.2.0
 
 - Establish six common modules: primitives, protocol, prover, RPC, stateless SDK, and Session; retain FFI as a separate adapter.

@@ -1,0 +1,374 @@
+{
+  "deployment": "100",
+  "cases": [
+    {
+      "input": {
+        "name": "gapped-history",
+        "ranges": [
+          [
+            "100",
+            "300"
+          ],
+          [
+            "900",
+            "1000"
+          ]
+        ],
+        "fully": "300",
+        "boundary": "900",
+        "head": "1000",
+        "indexed": "1000"
+      },
+      "expected": {
+        "publicThrough": null,
+        "accountThrough": {
+          "number": "300",
+          "hash": "0x000000000000000000000000000000000000000000000000000000000000012c",
+          "parentHash": "0x000000000000000000000000000000000000000000000000000000000000012b",
+          "timestamp": "300"
+        },
+        "unresolvedCount": 0,
+        "assetCompleteness": "unknown",
+        "invalidated": false,
+        "recoveryStartHeight": "100",
+        "recoveryBoundary": "900",
+        "chainHeight": "1000",
+        "indexedHeight": "1000",
+        "maxScannedHeight": "1000",
+        "fullyScannedHeight": "300",
+        "scanComplete": false,
+        "isSynced": false,
+        "unscannedRanges": [
+          {
+            "fromBlock": "301",
+            "toBlock": "899"
+          }
+        ],
+        "suggestedScanRanges": [
+          {
+            "fromBlock": "301",
+            "toBlock": "899",
+            "direction": "backward"
+          }
+        ],
+        "nextAction": "recover-history",
+        "creditRecoveryPending": false,
+        "progress": {
+          "recent": {
+            "fromBlock": "900",
+            "toBlock": "1000",
+            "totalBlocks": "101",
+            "scannedBlocks": "101",
+            "complete": true,
+            "ratio": 1,
+            "unit": "blocks"
+          },
+          "recovery": {
+            "fromBlock": "100",
+            "toBlock": "899",
+            "totalBlocks": "800",
+            "scannedBlocks": "201",
+            "complete": false,
+            "ratio": 0.2512,
+            "unit": "blocks"
+          },
+          "overall": {
+            "fromBlock": "100",
+            "toBlock": "1000",
+            "totalBlocks": "901",
+            "scannedBlocks": "302",
+            "complete": false,
+            "ratio": 0.3351,
+            "unit": "blocks"
+          }
+        }
+      }
+    },
+    {
+      "input": {
+        "name": "indexer-lag",
+        "ranges": [
+          [
+            "100",
+            "1000"
+          ]
+        ],
+        "fully": "1000",
+        "boundary": "900",
+        "head": "1100",
+        "indexed": "1000"
+      },
+      "expected": {
+        "publicThrough": null,
+        "accountThrough": {
+          "number": "1000",
+          "hash": "0x00000000000000000000000000000000000000000000000000000000000003e8",
+          "parentHash": "0x00000000000000000000000000000000000000000000000000000000000003e7",
+          "timestamp": "1000"
+        },
+        "unresolvedCount": 0,
+        "assetCompleteness": "unknown",
+        "invalidated": false,
+        "recoveryStartHeight": "100",
+        "recoveryBoundary": "900",
+        "chainHeight": "1100",
+        "indexedHeight": "1000",
+        "maxScannedHeight": "1000",
+        "fullyScannedHeight": "1000",
+        "scanComplete": false,
+        "isSynced": false,
+        "unscannedRanges": [
+          {
+            "fromBlock": "1001",
+            "toBlock": "1100"
+          }
+        ],
+        "suggestedScanRanges": [],
+        "nextAction": "wait-for-indexer",
+        "creditRecoveryPending": false,
+        "progress": {
+          "recent": {
+            "fromBlock": "900",
+            "toBlock": "1100",
+            "totalBlocks": "201",
+            "scannedBlocks": "101",
+            "complete": false,
+            "ratio": 0.5024,
+            "unit": "blocks"
+          },
+          "recovery": {
+            "fromBlock": "100",
+            "toBlock": "899",
+            "totalBlocks": "800",
+            "scannedBlocks": "800",
+            "complete": true,
+            "ratio": 1,
+            "unit": "blocks"
+          },
+          "overall": {
+            "fromBlock": "100",
+            "toBlock": "1100",
+            "totalBlocks": "1001",
+            "scannedBlocks": "901",
+            "complete": false,
+            "ratio": 0.9,
+            "unit": "blocks"
+          }
+        }
+      }
+    },
+    {
+      "input": {
+        "name": "unresolved-with-complete-coverage",
+        "ranges": [
+          [
+            "100",
+            "100"
+          ]
+        ],
+        "fully": "100",
+        "boundary": "101",
+        "head": "100",
+        "indexed": "100",
+        "unresolved": 1
+      },
+      "expected": {
+        "publicThrough": null,
+        "accountThrough": {
+          "number": "100",
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000064",
+          "parentHash": "0x0000000000000000000000000000000000000000000000000000000000000063",
+          "timestamp": "100"
+        },
+        "unresolvedCount": 1,
+        "assetCompleteness": "unknown",
+        "invalidated": false,
+        "recoveryStartHeight": "100",
+        "recoveryBoundary": "101",
+        "chainHeight": "100",
+        "indexedHeight": "100",
+        "maxScannedHeight": "100",
+        "fullyScannedHeight": "100",
+        "scanComplete": true,
+        "isSynced": true,
+        "unscannedRanges": [],
+        "suggestedScanRanges": [],
+        "nextAction": "retry-unresolved",
+        "creditRecoveryPending": false,
+        "progress": {
+          "recent": {
+            "fromBlock": "101",
+            "toBlock": "100",
+            "totalBlocks": "0",
+            "scannedBlocks": "0",
+            "complete": true,
+            "ratio": null,
+            "unit": "blocks"
+          },
+          "recovery": {
+            "fromBlock": "100",
+            "toBlock": "100",
+            "totalBlocks": "1",
+            "scannedBlocks": "1",
+            "complete": true,
+            "ratio": 1,
+            "unit": "blocks"
+          },
+          "overall": {
+            "fromBlock": "100",
+            "toBlock": "100",
+            "totalBlocks": "1",
+            "scannedBlocks": "1",
+            "complete": true,
+            "ratio": 1,
+            "unit": "blocks"
+          }
+        }
+      }
+    },
+    {
+      "input": {
+        "name": "credit-recovery",
+        "ranges": [
+          [
+            "100",
+            "1000"
+          ]
+        ],
+        "fully": "1000",
+        "boundary": "900",
+        "head": "1000",
+        "indexed": "1000",
+        "replay": "900"
+      },
+      "expected": {
+        "publicThrough": null,
+        "accountThrough": {
+          "number": "1000",
+          "hash": "0x00000000000000000000000000000000000000000000000000000000000003e8",
+          "parentHash": "0x00000000000000000000000000000000000000000000000000000000000003e7",
+          "timestamp": "1000"
+        },
+        "unresolvedCount": 0,
+        "assetCompleteness": "unknown",
+        "invalidated": false,
+        "recoveryStartHeight": "100",
+        "recoveryBoundary": "900",
+        "chainHeight": "1000",
+        "indexedHeight": "1000",
+        "maxScannedHeight": "1000",
+        "fullyScannedHeight": "1000",
+        "scanComplete": true,
+        "isSynced": false,
+        "unscannedRanges": [],
+        "suggestedScanRanges": [],
+        "nextAction": "recover-credit",
+        "creditRecoveryPending": true,
+        "progress": {
+          "recent": {
+            "fromBlock": "900",
+            "toBlock": "1000",
+            "totalBlocks": "101",
+            "scannedBlocks": "101",
+            "complete": true,
+            "ratio": 1,
+            "unit": "blocks"
+          },
+          "recovery": {
+            "fromBlock": "100",
+            "toBlock": "899",
+            "totalBlocks": "800",
+            "scannedBlocks": "800",
+            "complete": true,
+            "ratio": 1,
+            "unit": "blocks"
+          },
+          "overall": {
+            "fromBlock": "100",
+            "toBlock": "1000",
+            "totalBlocks": "901",
+            "scannedBlocks": "901",
+            "complete": true,
+            "ratio": 1,
+            "unit": "blocks"
+          }
+        }
+      }
+    },
+    {
+      "input": {
+        "name": "invalidated-coverage",
+        "ranges": [
+          [
+            "100",
+            "1000"
+          ]
+        ],
+        "fully": "1000",
+        "boundary": "900",
+        "head": "1000",
+        "indexed": "1000",
+        "invalidated": true
+      },
+      "expected": {
+        "publicThrough": null,
+        "accountThrough": null,
+        "unresolvedCount": 0,
+        "assetCompleteness": "unknown",
+        "invalidated": true,
+        "recoveryStartHeight": "100",
+        "recoveryBoundary": "900",
+        "chainHeight": "1000",
+        "indexedHeight": "1000",
+        "maxScannedHeight": null,
+        "fullyScannedHeight": null,
+        "scanComplete": false,
+        "isSynced": false,
+        "unscannedRanges": [
+          {
+            "fromBlock": "100",
+            "toBlock": "1000"
+          }
+        ],
+        "suggestedScanRanges": [
+          {
+            "fromBlock": "100",
+            "toBlock": "1000",
+            "direction": "backward"
+          }
+        ],
+        "nextAction": "rebuild",
+        "creditRecoveryPending": false,
+        "progress": {
+          "recent": {
+            "fromBlock": "900",
+            "toBlock": "1000",
+            "totalBlocks": "101",
+            "scannedBlocks": "0",
+            "complete": false,
+            "ratio": 0,
+            "unit": "blocks"
+          },
+          "recovery": {
+            "fromBlock": "100",
+            "toBlock": "899",
+            "totalBlocks": "800",
+            "scannedBlocks": "0",
+            "complete": false,
+            "ratio": 0,
+            "unit": "blocks"
+          },
+          "overall": {
+            "fromBlock": "100",
+            "toBlock": "1000",
+            "totalBlocks": "901",
+            "scannedBlocks": "0",
+            "complete": false,
+            "ratio": 0,
+            "unit": "blocks"
+          }
+        }
+      }
+    }
+  ]
+}

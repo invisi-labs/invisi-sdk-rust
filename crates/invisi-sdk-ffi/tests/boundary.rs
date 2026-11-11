@@ -99,3 +99,26 @@ fn ffi_accepts_empty_arrays_and_rejects_scalar_or_duplicate_batches() {
         }
     }
 }
+
+#[test]
+fn ffi_distinguishes_ambiguous_authentication_from_explicit_nonrecipient() {
+    let fixtures: Value =
+        serde_json::from_str(include_str!("fixtures/wallet-wire-vectors.json")).unwrap();
+    let key = hex::decode(
+        fixtures["privateKey"]
+            .as_str()
+            .unwrap()
+            .trim_start_matches("0x"),
+    )
+    .unwrap();
+    let mut request = fixtures["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["request"]["method"] == "wallet.decryptNote")
+        .unwrap()["request"]
+        .clone();
+    request["params"]["context"]["protocolAddress"] = serde_json::json!("4661");
+    let response = execute(&key, &serde_json::json!([request]));
+    assert_eq!(response[0]["error"]["code"], "WALLET_AUTHENTICATION_FAILED");
+}

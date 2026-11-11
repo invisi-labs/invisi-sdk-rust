@@ -9,3 +9,5 @@ pub mod session;
 pub mod provenance_store;
 pub use invisi_sdk_protocol::{provenance, provenance_rotation};
 pub mod provenance_recovery;
+
+pub mod public_history;

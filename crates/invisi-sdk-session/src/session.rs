@@ -11,6 +11,10 @@ use std::{collections::BTreeMap, sync::Arc};
 pub type Result<T> = std::result::Result<T, String>;
 mod store;
 pub use store::*;
+mod history;
+pub use history::*;
+mod status;
+pub use status::*;
 mod sync;
 pub use sync::*;
 mod journal;
@@ -62,6 +66,11 @@ pub struct StoredCredit {
     pub reserved_by: Option<String>,
 }
 #[derive(Clone, Serialize, Deserialize)]
+pub struct UnresolvedDelivery {
+    pub receipt: crate::rpc::CanonicalReceipt,
+    pub key: String,
+}
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WalletState {
     pub format_version: u32,
@@ -73,6 +82,24 @@ pub struct WalletState {
     pub observed_through: Option<CanonicalBlock>,
     pub discovery_through: Option<CanonicalBlock>,
     pub invalidated: bool,
+    #[serde(default)]
+    pub discovery_ranges: Vec<crate::public_history::CoverageRange>,
+    #[serde(default)]
+    pub unresolved_deliveries: BTreeMap<String, UnresolvedDelivery>,
+    #[serde(default)]
+    pub unresolved_delivery_count: Option<usize>,
+    #[serde(default)]
+    pub public_history_generation: Option<u64>,
+    #[serde(default)]
+    pub recovery_boundary: Option<u64>,
+    #[serde(default)]
+    pub credit_replay_from: Option<u64>,
+    #[serde(default)]
+    pub credit_replay_target: Option<u64>,
+    #[serde(default)]
+    pub credit_replay_revision: u64,
+    #[serde(default)]
+    pub credit_replay_through: Option<u64>,
 }
 impl Default for WalletState {
     fn default() -> Self {
@@ -86,6 +113,15 @@ impl Default for WalletState {
             observed_through: None,
             discovery_through: None,
             invalidated: false,
+            unresolved_deliveries: BTreeMap::new(),
+            unresolved_delivery_count: None,
+            discovery_ranges: vec![],
+            public_history_generation: None,
+            recovery_boundary: None,
+            credit_replay_from: None,
+            credit_replay_target: None,
+            credit_replay_revision: 0,
+            credit_replay_through: None,
         }
     }
 }
@@ -110,6 +146,7 @@ pub struct WalletSession {
     pub(crate) scope: WalletScope,
     pub(crate) store: Arc<dyn WalletStore>,
     pub(crate) source: Arc<dyn SessionSource>,
+    pub(crate) public_history: Option<Arc<crate::public_history::PublicHistory>>,
 }
 impl std::fmt::Debug for WalletSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -140,16 +177,72 @@ impl WalletSession {
             context,
             owner_address: wallet.owner_address(),
         };
-        let session = Self {
+        let mut session = Self {
             invisi,
             wallet,
             scope,
             store,
             source,
+            public_history: None,
         };
         session.invisi.chain.snapshot()?;
+        if let Some(runtime_code_hash) = session.source.runtime_code_hash() {
+            let public_scope = crate::public_history::PublicHistoryScope {
+                chain_id: context.chain_id,
+                protocol_address: sdk::word_address(context.protocol_address)?,
+                runtime_code_hash,
+                deployment_block: session.source.deployment_start(),
+            };
+            let store = crate::public_history::ephemeral_store(
+                Arc::as_ptr(&session.invisi.chain) as *const () as usize,
+                &public_scope,
+            )?;
+            session.public_history = Some(Arc::new(crate::public_history::PublicHistory::new(
+                store,
+                public_scope,
+                session.source.clone(),
+            )?));
+        }
         session.snapshot()?;
         Ok(session)
+    }
+    pub fn with_public_history(
+        mut self,
+        history: Arc<crate::public_history::PublicHistory>,
+    ) -> Result<Self> {
+        if history.scope.chain_id != self.scope.context.chain_id
+            || history.scope.protocol_address
+                != sdk::word_address(self.scope.context.protocol_address)?
+            || history.scope.deployment_block != self.source.deployment_start()
+            || self
+                .source
+                .runtime_code_hash()
+                .is_some_and(|h| h != history.scope.runtime_code_hash)
+        {
+            return Err("session public history deployment mismatch".into());
+        }
+        self.public_history = Some(history);
+        Ok(self)
+    }
+    pub(crate) fn fence_public_history(&self) -> Result<()> {
+        if let Some(history) = &self.public_history {
+            let public = history.snapshot()?;
+            let state = self.store.read_summary(&self.scope.key())?;
+            let generation =
+                state
+                    .public_history_generation
+                    .unwrap_or(if state.observed_through.is_some() {
+                        1
+                    } else {
+                        public.generation
+                    });
+            if generation != public.generation && !state.invalidated {
+                self.invalidate_reorg_from(
+                    public.reorg_from.unwrap_or(self.source.deployment_start()),
+                )?;
+            }
+        }
+        Ok(())
     }
     pub fn wallet(&self) -> &Wallet {
         &self.wallet
@@ -158,6 +251,7 @@ impl WalletSession {
         &self.scope
     }
     pub fn snapshot(&self) -> Result<WalletState> {
+        self.fence_public_history()?;
         let state = self.store.snapshot(&self.scope.key())?;
         if state.format_version != 2
             || state
@@ -245,6 +339,7 @@ impl WalletSession {
             .compare_and_swap(&self.scope.key(), revision, next)
     }
     pub fn balance(&self, token: Address) -> Result<Balance> {
+        self.fence_public_history()?;
         let state = self.snapshot()?;
         let mut known = U256::ZERO;
         let mut reserved = U256::ZERO;
@@ -275,7 +370,7 @@ impl WalletSession {
         })
     }
     pub fn history(&self, token: Option<Address>) -> Result<WalletHistory> {
-        let state = self.snapshot()?;
+        let state = self.store.full_snapshot(&self.scope.key())?;
         let mut incoming: Vec<IncomingHistory> = state
             .notes
             .values()
@@ -360,7 +455,15 @@ impl WalletSession {
                     .is_some_and(|block| self.invisi.chain.canonical(block).is_ok())
     }
     pub fn invalidate_reorg(&self) -> Result<()> {
-        let mut state = self.snapshot()?;
+        self.invalidate_reorg_from(self.source.deployment_start())
+    }
+    fn invalidate_reorg_from(&self, from: u64) -> Result<()> {
+        self.store.recover_reorg(&self.scope.key(), from)?;
+        let mut state = self.store.snapshot(&self.scope.key())?;
+        state
+            .unresolved_deliveries
+            .retain(|_, v| v.receipt.block.number < from);
+        state.unresolved_delivery_count = Some(state.unresolved_deliveries.len());
         state.invalidated = true;
         state.observed_through = None;
         state.discovery_through = None;

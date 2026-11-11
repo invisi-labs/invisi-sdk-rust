@@ -15,6 +15,26 @@ use rand::{rngs::OsRng, RngCore};
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
+/// Authentication ambiguity is retryable; operational failures remain errors.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DecryptionOutcome {
+    Plaintext(Vec<u8>),
+    NonRecipient,
+    AuthenticationFailed,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DeliveryRole {
+    Funds,
+    Owner,
+    Spender,
+}
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct DetectionCandidate {
+    pub clue: Vec<u8>,
+    pub context: DeliveryContext,
+    pub owner: U256,
+    pub role: DeliveryRole,
+}
 /// App-owned decryption: only Ok(None) means a nonrecipient; all operational failures reject.
 /// The App authenticates ciphertext and owns key storage, unlocking and consent.
 pub trait DeliveryDecryptor: Send + Sync {
@@ -31,6 +51,33 @@ pub trait DeliveryDecryptor: Send + Sync {
         role: CreditRole,
         owner: U256,
     ) -> Result<Option<Vec<u8>>, String>;
+    /// Native implementations own detection keys; false is an explicit nonrecipient.
+    fn detect(&self, candidates: &[DetectionCandidate]) -> Result<Vec<bool>, String> {
+        Ok(vec![true; candidates.len()])
+    }
+    fn decrypt_note_outcome(
+        &self,
+        envelope: &[u8],
+        context: &DeliveryContext,
+        owner: U256,
+    ) -> Result<DecryptionOutcome, String> {
+        Ok(match self.decrypt_note(envelope, context, owner)? {
+            Some(p) => DecryptionOutcome::Plaintext(p),
+            None => DecryptionOutcome::NonRecipient,
+        })
+    }
+    fn decrypt_credit_outcome(
+        &self,
+        envelope: &[u8],
+        context: &DeliveryContext,
+        role: CreditRole,
+        owner: U256,
+    ) -> Result<DecryptionOutcome, String> {
+        Ok(match self.decrypt_credit(envelope, context, role, owner)? {
+            Some(p) => DecryptionOutcome::Plaintext(p),
+            None => DecryptionOutcome::NonRecipient,
+        })
+    }
 }
 
 pub const MAX_CIPHERTEXT_BYTES: usize = 4096;

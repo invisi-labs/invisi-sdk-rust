@@ -21,6 +21,26 @@ pub trait WalletStore: Send + Sync {
         next: WalletState,
     ) -> Result<()>;
     fn persistent(&self) -> bool;
+    fn supports_history_paging(&self) -> bool {
+        false
+    }
+    fn read_summary(&self, scope: &str) -> Result<WalletState> {
+        self.snapshot(scope)
+    }
+    fn full_snapshot(&self, scope: &str) -> Result<WalletState> {
+        self.snapshot(scope)
+    }
+    fn history_page(
+        &self,
+        _scope: &str,
+        _after: Option<&str>,
+        _limit: usize,
+    ) -> Result<WalletRecordPage> {
+        Err("wallet store does not support record paging".into())
+    }
+    fn recover_reorg(&self, _scope: &str, _from_block: u64) -> Result<()> {
+        Ok(())
+    }
 }
 #[derive(Default)]
 pub struct MemoryWalletStore {
@@ -67,7 +87,8 @@ pub struct EncryptedRecord {
     pub revision: u64,
     pub data: Vec<u8>,
 }
-/// Host SQLite/KV adapters operate only on ciphertext. Missing records have revision zero.
+/// Host adapters store opaque bytes. Private wallet values are authenticated ciphertext;
+/// public history uses a separate namespace/table. Missing records have revision zero.
 pub trait AtomicRecords: Send + Sync {
     fn read(&self, scope: &str) -> Result<Option<EncryptedRecord>>;
     fn compare_and_swap(
@@ -77,6 +98,40 @@ pub trait AtomicRecords: Send + Sync {
         next: &EncryptedRecord,
     ) -> Result<bool>;
     fn persistent(&self) -> bool;
+    fn supports_batches(&self) -> bool {
+        false
+    }
+    fn compare_and_swap_batch(
+        &self,
+        _scope: &str,
+        _expected: u64,
+        _next: &EncryptedRecord,
+        _writes: &[(String, Option<EncryptedRecord>)],
+    ) -> Result<bool> {
+        Err("record store requires atomic batch support".into())
+    }
+    fn count(&self, prefix: &str) -> Result<u64> {
+        let mut count = 0u64;
+        let mut after = None;
+        loop {
+            let rows = self.list(prefix, after.as_deref(), 1000)?;
+            count = count
+                .checked_add(rows.len() as u64)
+                .ok_or("record count overflow")?;
+            if rows.len() < 1000 {
+                return Ok(count);
+            }
+            after = rows.last().map(|r| r.0.clone());
+        }
+    }
+    fn list(
+        &self,
+        _prefix: &str,
+        _after: Option<&str>,
+        _limit: usize,
+    ) -> Result<Vec<(String, EncryptedRecord)>> {
+        Err("record store requires bounded paging".into())
+    }
 }
 #[derive(Default)]
 pub struct MemoryAtomicRecords {
@@ -104,6 +159,53 @@ impl AtomicRecords for MemoryAtomicRecords {
         }
         records.insert(scope.into(), next.clone());
         Ok(true)
+    }
+    fn supports_batches(&self) -> bool {
+        true
+    }
+    fn compare_and_swap_batch(
+        &self,
+        scope: &str,
+        expected: u64,
+        next: &EncryptedRecord,
+        writes: &[(String, Option<EncryptedRecord>)],
+    ) -> Result<bool> {
+        validate_batch(scope, expected, next, writes)?;
+        let mut records = self
+            .records
+            .lock()
+            .map_err(|_| "record store lock poisoned")?;
+        if records.get(scope).map_or(0, |r| r.revision) != expected {
+            return Ok(false);
+        }
+        for (key, value) in writes {
+            if let Some(value) = value {
+                records.insert(key.clone(), value.clone());
+            } else {
+                records.remove(key);
+            }
+        }
+        records.insert(scope.into(), next.clone());
+        Ok(true)
+    }
+    fn list(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(String, EncryptedRecord)>> {
+        validate_page(prefix, after, limit)?;
+        let records = self
+            .records
+            .lock()
+            .map_err(|_| "record store lock poisoned")?;
+        Ok(records
+            .range(prefix.to_owned()..)
+            .take_while(|(k, _)| k.starts_with(prefix))
+            .filter(|(k, _)| after.is_none_or(|a| k.as_str() > a))
+            .take(limit)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect())
     }
     fn persistent(&self) -> bool {
         false
@@ -207,3 +309,38 @@ impl WalletStore for EncryptedWalletStore {
         self.records.persistent()
     }
 }
+
+pub(crate) fn validate_page(prefix: &str, after: Option<&str>, limit: usize) -> Result<()> {
+    if prefix.is_empty()
+        || !(1..=1000).contains(&limit)
+        || after.is_some_and(|a| !a.starts_with(prefix))
+    {
+        return Err("invalid record page range".into());
+    }
+    Ok(())
+}
+pub(crate) fn validate_batch(
+    scope: &str,
+    expected: u64,
+    next: &EncryptedRecord,
+    writes: &[(String, Option<EncryptedRecord>)],
+) -> Result<()> {
+    if scope.is_empty()
+        || next.revision != expected.checked_add(1).ok_or("record revision overflow")?
+    {
+        return Err("invalid batch revision".into());
+    }
+    let mut keys = std::collections::BTreeSet::new();
+    for (key, value) in writes {
+        if key == scope
+            || key.is_empty()
+            || !keys.insert(key)
+            || value.as_ref().is_some_and(|v| v.revision == 0)
+        {
+            return Err("invalid batch record key or revision".into());
+        }
+    }
+    Ok(())
+}
+mod record_wallet;
+pub use record_wallet::*;

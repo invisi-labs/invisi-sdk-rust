@@ -49,6 +49,13 @@ fn wallet(n: u8) -> Wallet {
 }
 #[derive(Default)]
 struct Chain {
+    offline: AtomicBool,
+    preparation_enabled: AtomicBool,
+    nonce: std::sync::atomic::AtomicU64,
+    allocation_slot: std::sync::atomic::AtomicU64,
+    revoked: AtomicBool,
+    insufficient_funds: AtomicBool,
+    nonce_hook: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     changed_context: AtomicBool,
     gas_forbidden: AtomicBool,
     height: std::sync::atomic::AtomicU64,
@@ -57,12 +64,22 @@ struct Chain {
     spent: Mutex<BTreeSet<B256>>,
     roots: Mutex<BTreeSet<B256>>,
 }
+impl Chain {
+    fn online(&self) -> Result<()> {
+        if self.offline.load(Ordering::SeqCst) {
+            Err("offline: live chain access forbidden".into())
+        } else {
+            Ok(())
+        }
+    }
+}
 impl ChainState for Chain {
     fn context(&self) -> ProtocolContext {
         assert!(
             !self.gas_forbidden.load(Ordering::SeqCst),
             "estimator read chain context"
         );
+        self.online().expect("live context access forbidden");
         let mut value = context();
         if self.changed_context.load(Ordering::SeqCst) {
             value.chain_id += 1
@@ -74,9 +91,11 @@ impl ChainState for Chain {
             !self.gas_forbidden.load(Ordering::SeqCst),
             "estimator read chain"
         );
+        self.online()?;
         Ok(block(self.height.load(Ordering::SeqCst).max(10)))
     }
     fn canonical(&self, b: &CanonicalBlock) -> Result<()> {
+        self.online()?;
         let expected = block(b.number);
         let source_anchor = self.source_anchors.load(Ordering::SeqCst)
             && b.parent_hash == B256::ZERO
@@ -89,9 +108,11 @@ impl ChainState for Chain {
         Ok(())
     }
     fn known_root(&self, _: u64, root: B256, _: &CanonicalBlock) -> Result<bool> {
+        self.online()?;
         Ok(self.roots.lock().unwrap().contains(&root))
     }
     fn nullifier_spent(&self, n: B256, _: &CanonicalBlock) -> Result<bool> {
+        self.online()?;
         Ok(self.spent.lock().unwrap().contains(&n))
     }
     fn credit_revoked(
@@ -102,7 +123,8 @@ impl ChainState for Chain {
         _: u16,
         _: &CanonicalBlock,
     ) -> Result<bool> {
-        Ok(false)
+        self.online()?;
+        Ok(self.revoked.load(Ordering::SeqCst))
     }
     fn token_balance_allowance(
         &self,
@@ -110,10 +132,26 @@ impl ChainState for Chain {
         _: Address,
         _: &CanonicalBlock,
     ) -> Result<(U256, U256)> {
-        Ok((U256::MAX, U256::MAX))
+        self.online()?;
+        Ok(if self.insufficient_funds.load(Ordering::SeqCst) {
+            (U256::ZERO, U256::ZERO)
+        } else {
+            (U256::MAX, U256::MAX)
+        })
+    }
+    fn funding_nonce(&self, _: Address, _: &CanonicalBlock) -> Result<U256> {
+        self.online()?;
+        if !self.preparation_enabled.load(Ordering::SeqCst) {
+            return Err("funding nonce reader required".into());
+        }
+        if let Some(hook) = self.nonce_hook.lock().unwrap().take() {
+            hook();
+        }
+        Ok(U256::from(self.nonce.load(Ordering::SeqCst)))
     }
     fn credit_allocation(&self, _: Address, _: Address, _: &CanonicalBlock) -> Result<(u64, u16)> {
-        Ok((1, 0))
+        self.online()?;
+        Ok((1, self.allocation_slot.load(Ordering::SeqCst) as u16))
     }
 }
 struct Source {
@@ -121,6 +159,7 @@ struct Source {
     runtime_hash: Mutex<Option<B256>>,
     extra_receipts: Mutex<Vec<CanonicalReceipt>>,
     indexed_height: std::sync::atomic::AtomicU64,
+    membership_reads: std::sync::atomic::AtomicUsize,
     receipt_reads: std::sync::atomic::AtomicUsize,
     discovery_reads: std::sync::atomic::AtomicUsize,
     chain: Arc<Chain>,
@@ -142,6 +181,7 @@ impl SessionSource for Source {
         self.block(self.indexed_height.load(Ordering::SeqCst))
     }
     fn block(&self, n: u64) -> Result<CanonicalBlock> {
+        self.chain.online()?;
         if self.fork.load(Ordering::SeqCst) {
             let mut b = block(n);
             b.hash = B256::with_last_byte(n as u8 + 70);
@@ -152,6 +192,7 @@ impl SessionSource for Source {
         Ok(b)
     }
     fn discover(&self, from: u64, to: u64) -> Result<Vec<B256>> {
+        self.chain.online()?;
         self.discovery_reads.fetch_add(1, Ordering::SeqCst);
         let r = self.receipt.lock().unwrap();
         let mut hashes = if (from..=to).contains(&r.block.number) {
@@ -170,6 +211,7 @@ impl SessionSource for Source {
         Ok(hashes)
     }
     fn receipt(&self, hash: B256) -> Result<Option<CanonicalReceipt>> {
+        self.chain.online()?;
         self.receipt_reads.fetch_add(1, Ordering::SeqCst);
         let r = self.receipt.lock().unwrap();
         Ok(if r.transaction_hash == hash {
@@ -184,12 +226,15 @@ impl SessionSource for Source {
         })
     }
     fn transaction(&self, _: B256) -> Result<Option<CanonicalTransaction>> {
+        self.chain.online()?;
         Ok(self.transaction.lock().unwrap().clone())
     }
     fn known_root(&self, tree: u64, root: B256, block: &CanonicalBlock) -> Result<bool> {
         self.chain.known_root(tree, root, block)
     }
     fn membership(&self, i: &MembershipInput, b: &CanonicalBlock) -> Result<Membership> {
+        self.chain.online()?;
+        self.membership_reads.fetch_add(1, Ordering::SeqCst);
         let p = self.proofs.lock().unwrap();
         let (tree, index, path, root) = p.get(&i.commitment).ok_or("proof unavailable")?;
         Ok(Membership {
@@ -297,6 +342,7 @@ fn harness() -> Harness {
         runtime_hash: Default::default(),
         extra_receipts: Default::default(),
         indexed_height: std::sync::atomic::AtomicU64::new(10),
+        membership_reads: Default::default(),
         receipt_reads: Default::default(),
         discovery_reads: Default::default(),
         chain: chain.clone(),
@@ -3007,4 +3053,566 @@ fn repeated_snapshot_validation_is_bound_to_the_entire_detached_state() {
         .compare_and_swap(&h.session.scope.key(), revision, changed)
         .unwrap();
     assert!(h.session.snapshot().is_err());
+}
+
+fn offline_session(h: &Harness, records: Arc<MemoryAtomicRecords>) -> WalletSession {
+    WalletSession::connect(
+        Invisi::new(h.chain.clone()),
+        h.session.wallet.clone(),
+        Arc::new(EncryptedWalletStore::new(records, [39; 32]).unwrap()),
+        h.source.clone(),
+        "offline",
+    )
+    .unwrap()
+}
+fn public_signature(digest: B256) -> Vec<u8> {
+    let (sig, id) = k256::ecdsa::SigningKey::from_slice(&key(1))
+        .unwrap()
+        .sign_prehash_recoverable(digest.as_slice())
+        .unwrap();
+    let mut bytes = sig.to_bytes().to_vec();
+    bytes.push(id.to_byte());
+    bytes
+}
+fn authorize_offline(mut operation: Operation) -> Operation {
+    let request = operation.export_wallet_request("offline-sign").unwrap();
+    let response: WalletResponse =
+        serde_json::from_value(crate::wallet::execute(&key(1), &request.as_value()).unwrap())
+            .unwrap();
+    operation = operation.with_wallet_response(&response).unwrap();
+    operation.prove(&Backend, false).unwrap()
+}
+#[test]
+fn encrypted_reopen_constructs_signs_proves_and_exports_note_and_shield_without_live_reads() {
+    let h = harness();
+    h.chain.preparation_enabled.store(true, Ordering::SeqCst);
+    let records = Arc::new(MemoryAtomicRecords::default());
+    let session = offline_session(&h, records.clone());
+    session
+        .refresh(RefreshOptions::from_block(0))
+        .unwrap()
+        .decrypt(&AppDecryptor::default())
+        .unwrap();
+    assert!(session.snapshot().unwrap().preparation_snapshot.is_some());
+    drop(session);
+    h.chain.offline.store(true, Ordering::SeqCst);
+    let session = offline_session(&h, records.clone());
+    let token = sdk::word_address(h.note.token_address).unwrap();
+    let mut plan = transfer(&h);
+    plan.withdrawal = None;
+    plan.outputs =
+        vec![
+            sdk::NoteOutput::for_recipient(context(), token, &wallet(2), h.note.amount, vec![])
+                .unwrap(),
+        ];
+    let operation = authorize_offline(session.prepare_transfer(plan).unwrap());
+    let id = operation.id().to_owned();
+    drop(operation);
+    drop(session);
+    let session = offline_session(&h, records.clone());
+    let mut operation = session.resume(&id, Some(&Backend)).unwrap();
+    assert_eq!(operation.phase(), sdk::Phase::Proved);
+    assert!(operation.submission_validation_pending());
+    assert!(!operation
+        .calldata(session.wallet.owner_address())
+        .unwrap()
+        .data
+        .is_empty());
+    assert!(operation
+        .validate_submission(session.wallet.owner_address())
+        .unwrap_err()
+        .contains("offline"));
+    h.chain.offline.store(false, Ordering::SeqCst);
+    h.chain
+        .spent
+        .lock()
+        .unwrap()
+        .insert(sdk::field_word(h.note.nullifier().unwrap()));
+    assert!(operation
+        .validate_submission(session.wallet.owner_address())
+        .unwrap_err()
+        .contains("spendable"));
+    h.chain.spent.lock().unwrap().clear();
+    operation
+        .validate_submission(session.wallet.owner_address())
+        .unwrap();
+    h.chain.offline.store(true, Ordering::SeqCst);
+    let mut funding = sdk::empty_funding();
+    funding.payer = session.wallet.owner_address();
+    funding.amount = U256::from(5);
+    let shield = sdk::ShieldPreparation {
+        token,
+        outputs: vec![sdk::NoteOutput::for_recipient(
+            context(),
+            token,
+            &wallet(2),
+            U256::from(5),
+            vec![],
+        )
+        .unwrap()],
+        funding,
+        fee: sdk::Fee::default(),
+        deadline: 2_000_000_100,
+    };
+    let operation = session
+        .prepare_shield(shield)
+        .unwrap()
+        .with_funding_terms(2_000_000_100)
+        .unwrap();
+    let request = operation.export_funding_authorization().unwrap();
+    let mut operation = operation
+        .with_funding_signature(public_signature(request.digest))
+        .unwrap()
+        .ready()
+        .unwrap();
+    let id = operation.id().to_owned();
+    assert!(!operation
+        .calldata(session.wallet.owner_address())
+        .unwrap()
+        .data
+        .is_empty());
+    drop(operation);
+    drop(session);
+    let session = offline_session(&h, records);
+    let operation = session.resume(&id, None).unwrap();
+    assert_eq!(operation.phase(), sdk::Phase::Ready);
+    h.chain.offline.store(false, Ordering::SeqCst);
+    h.chain.nonce.store(1, Ordering::SeqCst);
+    assert!(operation
+        .validate_submission(session.wallet.owner_address())
+        .unwrap_err()
+        .contains("nonce"));
+    h.chain.nonce.store(0, Ordering::SeqCst);
+    h.chain.insufficient_funds.store(true, Ordering::SeqCst);
+    assert!(operation
+        .validate_submission(session.wallet.owner_address())
+        .unwrap_err()
+        .contains("insufficient"));
+}
+
+#[test]
+fn preparation_snapshot_misses_forks_generations_and_capture_revision_races_fail_closed() {
+    let h = harness();
+    h.chain.preparation_enabled.store(true, Ordering::SeqCst);
+    let records = Arc::new(MemoryAtomicRecords::default());
+    let session = offline_session(&h, records.clone());
+    session
+        .refresh(RefreshOptions::from_block(0))
+        .unwrap()
+        .decrypt(&AppDecryptor::default())
+        .unwrap();
+    let mut state = session.snapshot().unwrap();
+    state
+        .preparation_snapshot
+        .as_mut()
+        .unwrap()
+        .facts
+        .roots
+        .clear();
+    session.commit(state).unwrap();
+    // Incomplete snapshots fall back online, while a disconnected reader cannot manufacture facts.
+    let op = session.prepare_transfer(transfer(&h)).unwrap();
+    op.cancel().unwrap();
+    h.chain.offline.store(true, Ordering::SeqCst);
+    assert!(session
+        .prepare_transfer(transfer(&h))
+        .unwrap_err()
+        .contains("offline"));
+    h.chain.offline.store(false, Ordering::SeqCst);
+    session
+        .refresh(RefreshOptions::from_block(0))
+        .unwrap()
+        .decrypt(&AppDecryptor::default())
+        .unwrap();
+    let mut state = session.snapshot().unwrap();
+    state.public_history_generation = Some(900);
+    session.commit(state).unwrap();
+    h.chain.offline.store(true, Ordering::SeqCst);
+    assert!(session
+        .prepare_transfer(transfer(&h))
+        .unwrap_err()
+        .contains("offline"));
+    h.chain.offline.store(false, Ordering::SeqCst);
+    let mut state = session.snapshot().unwrap();
+    state.preparation_snapshot = None;
+    session.commit(state).unwrap();
+    let store = session.store.clone();
+    let scope = session.scope.key();
+    *h.chain.nonce_hook.lock().unwrap() = Some(Box::new(move || {
+        let state = store.snapshot(&scope).unwrap();
+        store
+            .compare_and_swap(&scope, state.revision, state)
+            .unwrap();
+    }));
+    let pending = session.refresh(RefreshOptions::from_block(0)).unwrap();
+    assert!(pending
+        .decrypt(&AppDecryptor::default())
+        .unwrap_err()
+        .contains("revision"));
+    assert!(session.snapshot().unwrap().preparation_snapshot.is_none());
+    h.chain.reorg.store(true, Ordering::SeqCst);
+    assert!(session.refresh(RefreshOptions::from_block(0)).is_err());
+}
+
+#[test]
+fn encrypted_reopen_prepares_all_credit_operations_offline_and_live_gate_rejects_stale_facts() {
+    for kind in ["create", "update", "draw", "revoke"] {
+        let h = harness();
+        h.chain.preparation_enabled.store(true, Ordering::SeqCst);
+        h.chain.allocation_slot.store(1, Ordering::SeqCst);
+        let records = Arc::new(MemoryAtomicRecords::default());
+        let session = offline_session(&h, records.clone());
+        let token = sdk::word_address(h.note.token_address).unwrap();
+        let identity = sdk::address_word(session.wallet.owner_address());
+        let delivery = CreditDeliveryState {
+            note: crate::credit::CreditState {
+                context: context(),
+                token_address: h.note.token_address,
+                owner_wallet_identity: identity,
+                spender_wallet_identity: identity,
+                revocation_shard: 1,
+                revocation_slot: 0,
+                nonce: U256::from(74),
+                expiry: 2_100_000_000,
+                credit_shared_key: U256::from(75),
+                policy: Default::default(),
+                usage: Default::default(),
+                available_credit: U256::from(400),
+                unlimited: false,
+                payload: vec![],
+            },
+            owner_receiving_keys: session.wallet.receiving_keys().clone(),
+            spender_receiving_keys: session.wallet.receiving_keys().clone(),
+        };
+        let commitment = sdk::field_word(delivery.note.commitment().unwrap());
+        let path = [U256::ZERO; 16];
+        let root = sdk::merkle_root(delivery.note.commitment().unwrap(), 0, &path).unwrap();
+        h.chain.roots.lock().unwrap().insert(sdk::field_word(root));
+        let mut state = session.snapshot().unwrap();
+        for role in [CreditRole::Owner, CreditRole::Spender] {
+            state.credits.insert(
+                credit_key(commitment, role),
+                StoredCredit {
+                    delivery: delivery.clone(),
+                    commitment,
+                    nullifier: sdk::field_word(delivery.note.nullifier().unwrap()),
+                    tree_id: 2,
+                    leaf_index: 0,
+                    path,
+                    root,
+                    block: block(10),
+                    transaction_hash: B256::repeat_byte(9),
+                    role,
+                    consumed: false,
+                    revoked: false,
+                    reserved_by: None,
+                },
+            );
+        }
+        session.commit(state).unwrap();
+        session
+            .refresh(RefreshOptions::from_block(0))
+            .unwrap()
+            .decrypt(&AppDecryptor::default())
+            .unwrap();
+        drop(session);
+        h.chain.offline.store(true, Ordering::SeqCst);
+        let session = offline_session(&h, records.clone());
+        let operation = match kind {
+            "create" => {
+                let mut created = delivery.clone();
+                created.note.revocation_slot = 1;
+                created.note.nonce += U256::from(1);
+                session
+                    .prepare_create_credit(created, 2_000_000_100, sdk::Fee::default())
+                    .unwrap()
+            }
+            "update" => session
+                .prepare_update_credit(
+                    &credit_key(commitment, CreditRole::Owner),
+                    crate::credit::CreditUpdateChanges {
+                        increase_available_credit: U256::from(1),
+                        ..Default::default()
+                    },
+                    2_000_000_100,
+                    sdk::Fee::default(),
+                )
+                .unwrap(),
+            "draw" => session
+                .prepare_draw_credit(
+                    &[(credit_key(commitment, CreditRole::Spender), U256::from(5))],
+                    &wallet(2),
+                    2_000_000_100,
+                    sdk::Fee::default(),
+                    vec![],
+                )
+                .unwrap(),
+            _ => session
+                .prepare_revoke_credit(token, 1, 0, 2_000_000_100, sdk::Fee::default())
+                .unwrap(),
+        };
+        let operation = if kind == "revoke" {
+            let request = operation.export_revocation_signing_request().unwrap();
+            operation
+                .with_revocation_signature(public_signature(request.digest))
+                .unwrap()
+        } else {
+            authorize_offline(operation)
+        };
+        let id = operation.id().to_owned();
+        drop(operation);
+        drop(session);
+        let session = offline_session(&h, records.clone());
+        let mut operation = session.resume(&id, Some(&Backend)).unwrap();
+        assert!(
+            !operation
+                .calldata(session.wallet.owner_address())
+                .unwrap()
+                .data
+                .is_empty(),
+            "{kind}"
+        );
+        assert!(operation
+            .validate_submission(session.wallet.owner_address())
+            .unwrap_err()
+            .contains("offline"));
+        h.chain.offline.store(false, Ordering::SeqCst);
+        operation
+            .validate_submission(session.wallet.owner_address())
+            .unwrap();
+        h.chain.reorg.store(true, Ordering::SeqCst);
+        assert!(operation
+            .validate_submission(session.wallet.owner_address())
+            .unwrap_err()
+            .contains("reorg"));
+        h.chain.reorg.store(false, Ordering::SeqCst);
+        if kind == "create" {
+            h.chain.allocation_slot.store(2, Ordering::SeqCst);
+            assert!(operation
+                .validate_submission(session.wallet.owner_address())
+                .unwrap_err()
+                .contains("allocation"));
+            h.chain.allocation_slot.store(1, Ordering::SeqCst);
+        } else {
+            h.chain.revoked.store(true, Ordering::SeqCst);
+            let error = operation
+                .validate_submission(session.wallet.owner_address())
+                .unwrap_err();
+            assert!(
+                error.contains("revocation") || error.contains("revoked"),
+                "{kind}: {error}"
+            );
+            h.chain.revoked.store(false, Ordering::SeqCst);
+        }
+        if kind == "revoke" {
+            h.chain.allocation_slot.store(0, Ordering::SeqCst);
+            assert!(operation
+                .validate_submission(session.wallet.owner_address())
+                .unwrap_err()
+                .contains("unallocated"));
+            h.chain.allocation_slot.store(1, Ordering::SeqCst);
+        }
+        if kind == "draw" || kind == "update" {
+            h.chain
+                .spent
+                .lock()
+                .unwrap()
+                .insert(sdk::field_word(delivery.note.nullifier().unwrap()));
+            assert!(operation
+                .validate_submission(session.wallet.owner_address())
+                .is_err());
+            h.chain.spent.lock().unwrap().clear();
+            h.chain.roots.lock().unwrap().remove(&sdk::field_word(root));
+            assert!(operation
+                .validate_submission(session.wallet.owner_address())
+                .is_err());
+            h.chain.roots.lock().unwrap().insert(sdk::field_word(root));
+        }
+        h.chain.height.store(100_000, Ordering::SeqCst);
+        assert!(operation
+            .validate_submission(session.wallet.owner_address())
+            .is_err());
+    }
+}
+
+#[test]
+fn snapshot_capture_reuses_normal_sync_paths_and_same_block_nonce() {
+    let h = harness();
+    h.chain.preparation_enabled.store(true, Ordering::SeqCst);
+    h.session
+        .refresh(RefreshOptions::from_block(0))
+        .unwrap()
+        .decrypt(&AppDecryptor::default())
+        .unwrap();
+    assert_eq!(h.source.membership_reads.load(Ordering::SeqCst), 1);
+    h.chain.height.store(11, Ordering::SeqCst);
+    h.source.indexed_height.store(11, Ordering::SeqCst);
+    h.session
+        .refresh(RefreshOptions::from_block(11))
+        .unwrap()
+        .decrypt(&AppDecryptor::default())
+        .unwrap();
+    *h.chain.nonce_hook.lock().unwrap() =
+        Some(Box::new(|| panic!("same-block nonce was fetched again")));
+    h.session
+        .refresh(RefreshOptions::from_block(11))
+        .unwrap()
+        .decrypt(&AppDecryptor::default())
+        .unwrap();
+    assert_eq!(h.source.membership_reads.load(Ordering::SeqCst), 1);
+}
+#[test]
+fn cached_broadcaster_repricing_preserves_offline_preparation_but_new_submission_checks_live_inputs(
+) {
+    let h = harness();
+    h.chain.preparation_enabled.store(true, Ordering::SeqCst);
+    let records = Arc::new(MemoryAtomicRecords::default());
+    let session = offline_session(&h, records.clone());
+    session
+        .refresh(RefreshOptions::from_block(0))
+        .unwrap()
+        .decrypt(&AppDecryptor::default())
+        .unwrap();
+    let mut plan = transfer(&h);
+    plan.withdrawal = None;
+    plan.automatic_change = true;
+    plan.outputs = vec![sdk::NoteOutput::for_recipient(
+        context(),
+        plan.token,
+        &wallet(2),
+        U256::from(30),
+        vec![],
+    )
+    .unwrap()];
+    h.chain.offline.store(true, Ordering::SeqCst);
+    let mut operation = session.prepare_transfer(plan).unwrap();
+    let relay = Arc::new(SessionCreditRelay {
+        lookup_mode: 0.into(),
+        attempts: 0.into(),
+    });
+    operation
+        .with_broadcaster(
+            relay.clone(),
+            &sdk::BroadcasterOptions {
+                max_fee_amount: Some(U256::from(10)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let operation = authorize_offline(operation);
+    let id = operation.id().to_owned();
+    drop(operation);
+    drop(session);
+    let session = offline_session(&h, records);
+    let mut operation = session.resume(&id, Some(&Backend)).unwrap();
+    assert!(operation.submission_validation_pending());
+    h.chain.offline.store(false, Ordering::SeqCst);
+    h.chain
+        .spent
+        .lock()
+        .unwrap()
+        .insert(sdk::field_word(h.note.nullifier().unwrap()));
+    assert!(operation.submit_broadcaster(relay.as_ref()).is_err());
+    assert_eq!(relay.attempts.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn record_store_reopen_uses_incrementally_aligned_paths_and_rejects_corrupt_replacements() {
+    let h = harness();
+    h.chain.preparation_enabled.store(true, Ordering::SeqCst);
+    let records = Arc::new(MemoryAtomicRecords::default());
+    let connect = || {
+        WalletSession::connect(
+            Invisi::new(h.chain.clone()),
+            h.session.wallet.clone(),
+            Arc::new(RecordWalletStore::new(records.clone(), [49; 32]).unwrap()),
+            h.source.clone(),
+            "aligned",
+        )
+        .unwrap()
+    };
+    let session = connect();
+    session
+        .refresh(RefreshOptions::from_block(0))
+        .unwrap()
+        .decrypt(&AppDecryptor::default())
+        .unwrap();
+    assert_eq!(h.source.membership_reads.load(Ordering::SeqCst), 1);
+    let mut note = h.note.clone();
+    note.nonce += U256::from(1);
+    note.amount = U256::from(30);
+    let commitment = sdk::field_word(note.commitment().unwrap());
+    let mut old_path = [U256::ZERO; 16];
+    old_path[0] = note.commitment().unwrap();
+    let mut new_path = [U256::ZERO; 16];
+    new_path[0] = h.note.commitment().unwrap();
+    let root = sdk::merkle_root(note.commitment().unwrap(), 1, &new_path).unwrap();
+    assert_eq!(
+        root,
+        sdk::merkle_root(h.note.commitment().unwrap(), 0, &old_path).unwrap()
+    );
+    let mut state = session.snapshot().unwrap();
+    state.notes.insert(
+        commitment,
+        StoredNote {
+            input: NoteInput {
+                note: note.clone(),
+                tree_id: 1,
+                leaf_index: 1,
+                path: new_path,
+                root,
+            },
+            commitment,
+            nullifier: sdk::field_word(note.nullifier().unwrap()),
+            block: block(11),
+            transaction_hash: B256::repeat_byte(11),
+            spent: false,
+            reserved_by: None,
+        },
+    );
+    session.commit(state).unwrap();
+    h.chain.roots.lock().unwrap().clear();
+    h.chain.roots.lock().unwrap().insert(sdk::field_word(root));
+    h.chain.height.store(11, Ordering::SeqCst);
+    h.source.indexed_height.store(11, Ordering::SeqCst);
+    let mut corrupt = old_path;
+    corrupt[0] += U256::from(1);
+    h.source
+        .proofs
+        .lock()
+        .unwrap()
+        .insert(h.commitment, (1, 0, corrupt, root));
+    let pending = session.refresh(RefreshOptions::from_block(11)).unwrap();
+    let revision = session.snapshot().unwrap().revision;
+    assert!(pending
+        .decrypt(&AppDecryptor::default())
+        .unwrap_err()
+        .contains("membership"));
+    assert_eq!(session.snapshot().unwrap().revision, revision);
+    h.source
+        .proofs
+        .lock()
+        .unwrap()
+        .insert(h.commitment, (1, 0, old_path, root));
+    pending.decrypt(&AppDecryptor::default()).unwrap();
+    assert_eq!(h.source.membership_reads.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        session.snapshot().unwrap().notes[&h.commitment].input.root,
+        root
+    );
+    drop(session);
+    h.chain.offline.store(true, Ordering::SeqCst);
+    let session = connect();
+    let mut plan = transfer(&h);
+    plan.withdrawal.as_mut().unwrap().1 += note.amount;
+    let mut operation = session
+        .prepare_transfer(plan)
+        .unwrap()
+        .prove(&Backend, false)
+        .unwrap();
+    assert!(!operation
+        .calldata(session.wallet.owner_address())
+        .unwrap()
+        .data
+        .is_empty());
 }

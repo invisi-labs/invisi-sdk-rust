@@ -422,7 +422,7 @@ impl PreparedTransaction {
             &data,
             candidate.context.chain_id,
             word_address(candidate.context.protocol_address)?,
-            block.timestamp,
+            chain.construction_timestamp(&block),
             &sidecars,
         )?;
         invisi_sdk_rpc::broadcaster::verify_quote_for_provenance(
@@ -433,7 +433,7 @@ impl PreparedTransaction {
                 signer: config.quote_signer,
             },
             &data,
-            block.timestamp,
+            chain.construction_timestamp(&block),
             provenance,
         )
         .map_err(|e| e.to_string())?;

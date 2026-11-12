@@ -34,6 +34,8 @@ pub struct OperationRecord {
     pub inputs: Vec<String>,
     pub deadline: u64,
     pub snapshot: PreparedSnapshot,
+    #[serde(default)]
+    pub preparation_snapshot: Option<RetainedPreparation>,
     pub transaction_hash: Option<B256>,
     pub call: Option<StoredCall>,
     pub externalized: bool,

@@ -118,6 +118,8 @@ pub struct PreparedSnapshot {
     context: ProtocolContext,
     token: Address,
     anchor: CanonicalBlock,
+    #[serde(default)]
+    constructed_at: Option<u64>,
     unsigned_call: Vec<u8>,
     inputs: Vec<NoteInputRecord>,
     credit_inputs: Vec<CreditInputSnapshot>,
@@ -183,6 +185,7 @@ impl ManagedPrepared {
             context,
             token,
             anchor,
+            constructed_at: None,
             unsigned_call: Vec::new(),
             inputs: Vec::new(),
             credit_inputs: Vec::new(),
@@ -250,6 +253,7 @@ impl ManagedPrepared {
             }
             Self::Credit(v) => {
                 let mut s = empty(v.context, v.token, v.anchor.clone());
+                s.constructed_at = Some(v.constructed_at);
                 s.broadcaster = v.broadcaster.clone();
                 if let Some(CreditRepriceTemplate::Draw(_, recipient, _, _)) = &v.reprice {
                     s.credit_recipient = Some(recipient.address()?);
@@ -396,6 +400,12 @@ impl PreparedSnapshot {
             return Err("operation owner mismatch".into());
         }
         self.context.validate().map_err(|e| e.to_string())?;
+        if self
+            .constructed_at
+            .is_some_and(|t| t < self.anchor.timestamp)
+        {
+            return Err("saved construction timestamp precedes canonical anchor".into());
+        }
         let call = P::InvisiProtocolCalls::abi_decode(&self.unsigned_call, true)
             .map_err(|e| e.to_string())?;
         if call.abi_encode() != self.unsigned_call {
@@ -710,7 +720,7 @@ impl PreparedSnapshot {
                             let expected = model(crate::credit::derive_credit_state(
                                 state,
                                 input.debit,
-                                self.anchor.timestamp,
+                                self.constructed_at.unwrap_or(self.anchor.timestamp),
                             ))?;
                             if state.context != self.context
                                 || state.token_address != address_word(self.token)
@@ -820,6 +830,7 @@ impl PreparedSnapshot {
                     None
                 };
                 ManagedPrepared::Credit(PreparedCredit {
+                    constructed_at: self.constructed_at.unwrap_or(self.anchor.timestamp),
                     preparation_reads: None,
                     wallet: wallet.cloned(),
                     owner_address,
@@ -1047,6 +1058,7 @@ impl ManagedPrepared {
                 reprice: v.reprice.clone(),
             }),
             Self::Credit(v) => Self::Credit(PreparedCredit {
+                constructed_at: v.constructed_at,
                 preparation_reads: v.preparation_reads.clone(),
                 wallet: v.wallet.clone(),
                 owner_address: v.owner_address,

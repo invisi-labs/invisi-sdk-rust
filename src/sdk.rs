@@ -646,6 +646,18 @@ fn validate_spending_key(owner: Address, public: &[u8]) -> Result<()> {
 }
 
 pub trait ChainState: Send + Sync {
+    /// Returns configured deployment pins without performing chain IO.
+    fn preparation_deployment(&self) -> Option<ProtocolDeployment> {
+        None
+    }
+    /// Historical preparation defers dynamic payer checks until explicit live validation.
+    fn historical_preparation(&self) -> bool {
+        false
+    }
+    fn construction_timestamp(&self, block: &CanonicalBlock) -> u64 {
+        block.timestamp
+    }
+
     fn finality(&self) -> crate::rpc::ChainFinality {
         crate::rpc::ChainFinality::absent(crate::rpc::FinalityStatus::Unsupported)
     }
@@ -741,6 +753,10 @@ impl<C: CanonicalHead> RpcChainState<C> {
     }
 }
 impl<C: CanonicalHead> ChainState for RpcChainState<C> {
+    fn preparation_deployment(&self) -> Option<ProtocolDeployment> {
+        Some(self.deployment.clone())
+    }
+
     fn finality(&self) -> crate::rpc::ChainFinality {
         crate::rpc::read_chain_finality(&self.chain)
     }
@@ -1243,7 +1259,7 @@ impl Invisi {
         p.fee.validate()?;
         validate_funding(&p.funding)?;
         validate_outputs(&p.outputs, context, p.token)?;
-        if p.deadline < anchor.timestamp
+        if p.deadline < chain.construction_timestamp(&anchor)
             || p.outputs.is_empty()
             || p.outputs.len() > 10
             || sum(p.outputs.iter().map(|o| o.amount))?.checked_add(p.fee.amount)
@@ -1304,7 +1320,7 @@ impl Invisi {
         p.fee.validate()?;
         validate_funding(&p.funding)?;
         validate_outputs(&p.outputs, context, p.token)?;
-        if p.deadline < anchor.timestamp {
+        if p.deadline < chain.construction_timestamp(&anchor) {
             return Err("deadline expired".into());
         }
         let nullifiers = map_preparation(p.inputs.len(), |i| {
@@ -1746,6 +1762,12 @@ impl PreparedTransaction {
     }
     pub fn proof(&self) -> Option<&ProofBundle> {
         self.proof.as_ref()
+    }
+    pub fn validate_submission(&self, chain: &dyn ChainState, caller: Address) -> Result<()> {
+        if chain.historical_preparation() {
+            return Err("live chain required for submission validation".into());
+        }
+        self.operation_call(chain, caller, false).map(|_| ())
     }
     pub fn calldata(&self, chain: &dyn ChainState, caller: Address) -> Result<TransactionCall> {
         self.operation_call(chain, caller, false)
@@ -2450,7 +2472,7 @@ impl PreparedTransaction {
         block: &CanonicalBlock,
     ) -> Result<()> {
         let f = self.funding();
-        if f.amount != U256::ZERO {
+        if f.amount != U256::ZERO && !chain.historical_preparation() {
             let (balance, allowance) = chain.token_balance_allowance(f.payer, self.token, block)?;
             if balance < f.amount || allowance < f.amount && f.permit.deadline == U256::ZERO {
                 return Err("ERC20 funding balance or Protocol allowance insufficient".into());
@@ -3603,3 +3625,4 @@ mod local_gas_tests {
 }
 
 mod preparation;
+pub use preparation::PreparationSnapshot;

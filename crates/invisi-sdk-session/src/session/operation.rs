@@ -59,6 +59,39 @@ impl std::fmt::Debug for Operation {
     }
 }
 impl Operation {
+    fn preparation_chain(&self) -> Result<Arc<dyn sdk::ChainState>> {
+        let state = self.current()?;
+        match &state.operations[&self.id].preparation_snapshot {
+            Some(snapshot) => {
+                snapshot.facts.validate()?;
+                if snapshot.facts.context != self.session.scope.context
+                    || snapshot.facts.deployment
+                        != self.session.invisi.chain.preparation_deployment()
+                    || snapshot.runtime_code_hash != self.session.source.runtime_code_hash()
+                    || snapshot.deployment_start != self.session.source.deployment_start()
+                    || snapshot.facts.block != *state.operations[&self.id].snapshot.anchor()
+                {
+                    return Err("operation preparation snapshot mismatch".into());
+                }
+                Ok(Arc::new(snapshot.facts.clone()))
+            }
+            None => Ok(self.session.invisi.chain.clone()),
+        }
+    }
+    /// Exported calldata remains pending until this live gate succeeds at send time.
+    pub fn validate_submission(&self, caller: Address) -> Result<()> {
+        self.current()?;
+        match &self.prepared {
+            ManagedPrepared::Funds(v) => v.validate_submission(&*self.session.invisi.chain, caller),
+            ManagedPrepared::Credit(v) => {
+                v.validate_submission(&*self.session.invisi.chain, caller)
+            }
+        }
+    }
+    pub fn submission_validation_pending(&self) -> bool {
+        true
+    }
+
     /// Observe the recorded transaction without releasing reservations or changing operation state.
     pub fn confirmation(&self) -> Result<crate::rpc::TransactionConfirmation> {
         let state = self.session.snapshot()?;
@@ -145,12 +178,12 @@ impl Operation {
         }
         let prepared = match &self.prepared {
             ManagedPrepared::Funds(v) => ManagedPrepared::Funds(v.with_broadcaster(
-                self.session.invisi.chain.clone(),
+                self.preparation_chain()?,
                 relay,
                 options,
             )?),
             ManagedPrepared::Credit(v) => ManagedPrepared::Credit(v.with_broadcaster(
-                self.session.invisi.chain.clone(),
+                self.preparation_chain()?,
                 relay,
                 options,
             )?),
@@ -490,7 +523,7 @@ impl Operation {
         let prepared = self
             .prepared
             .clone_for_stage()
-            .with_revocation_signature(&*self.session.invisi.chain, signature)?;
+            .with_revocation_signature(&*self.preparation_chain()?, signature)?;
         self.persist(prepared)
     }
     pub fn export_revocation_signing_request(&self) -> Result<sdk::EvmSigningRequest> {
@@ -512,28 +545,28 @@ impl Operation {
         let prepared = self
             .prepared
             .clone_for_stage()
-            .with_funding_terms(&*self.session.invisi.chain, deadline)?;
+            .with_funding_terms(&*self.preparation_chain()?, deadline)?;
         self.persist(prepared)
     }
     pub fn export_funding_authorization(&self) -> Result<sdk::EvmSigningRequest> {
         self.current()?;
         self.prepared
-            .export_funding_authorization(&*self.session.invisi.chain)
+            .export_funding_authorization(&*self.preparation_chain()?)
     }
     pub fn with_funding_signature(self, signature: Vec<u8>) -> Result<Self> {
         self.current()?;
         let prepared = self
             .prepared
             .clone_for_stage()
-            .with_funding_signature(&*self.session.invisi.chain, signature)?;
+            .with_funding_signature(&*self.preparation_chain()?, signature)?;
         self.persist(prepared)
     }
     /// Exporting final calldata is irreversible from the journal's perspective until chain reconciliation.
     pub fn calldata(&mut self, caller: Address) -> Result<crate::protocol::TransactionCall> {
         let mut state = self.current()?;
         let call = match &self.prepared {
-            ManagedPrepared::Funds(v) => v.calldata(&*self.session.invisi.chain, caller)?,
-            ManagedPrepared::Credit(v) => v.calldata(&*self.session.invisi.chain, caller)?,
+            ManagedPrepared::Funds(v) => v.calldata(&*self.preparation_chain()?, caller)?,
+            ManagedPrepared::Credit(v) => v.calldata(&*self.preparation_chain()?, caller)?,
         };
         let record = state
             .operations
@@ -626,6 +659,13 @@ fn phase_status(phase: Phase) -> OperationStatus {
 }
 impl WalletSession {
     pub fn register(&self, prepared: ManagedPrepared) -> Result<Operation> {
+        self.register_with_preparation(prepared, None)
+    }
+    pub(crate) fn register_with_preparation(
+        &self,
+        prepared: ManagedPrepared,
+        mut preparation_snapshot: Option<RetainedPreparation>,
+    ) -> Result<Operation> {
         if prepared.owner_address() != self.wallet.owner_address()
             || prepared
                 .wallet()
@@ -641,6 +681,13 @@ impl WalletSession {
         if state.invalidated {
             return Err("wallet requires canonical resync".into());
         }
+        if let Some(cached) = &preparation_snapshot {
+            if state.observed_through.as_ref() != Some(&cached.facts.block)
+                || state.public_history_generation != cached.generation
+            {
+                return Err("wallet changed during cached preparation; prepare again".into());
+            }
+        }
         let id = uuid::Uuid::new_v4().to_string();
         let inputs = prepared.input_ids()?;
         let mut unique = BTreeSet::new();
@@ -651,6 +698,47 @@ impl WalletSession {
             reserve(&mut state, input, &id)?;
         }
         let (kind, deadline) = prepared.kind_deadline()?;
+        if let Some(cached) = &mut preparation_snapshot {
+            let mut trees = BTreeSet::new();
+            let mut nullifiers = BTreeSet::new();
+            let mut grants = BTreeSet::new();
+            for note in state
+                .notes
+                .values()
+                .filter(|n| inputs.contains(&format!("note:{}", n.commitment)))
+            {
+                trees.insert(note.input.tree_id);
+                nullifiers.insert(note.nullifier);
+            }
+            for credit in state
+                .credits
+                .values()
+                .filter(|c| inputs.contains(&format!("credit:{}", c.commitment)))
+            {
+                trees.insert(credit.tree_id);
+                nullifiers.insert(credit.nullifier);
+                let n = &credit.delivery.note;
+                grants.insert((
+                    sdk::word_address(n.owner_wallet_identity)?,
+                    sdk::word_address(n.token_address)?,
+                    n.revocation_shard,
+                    n.revocation_slot,
+                ));
+            }
+            // Journals retain only their own input facts, rather than copying the whole inventory.
+            cached.facts.roots.retain(|(t, _, _)| trees.contains(t));
+            cached.facts.spent.retain(|(n, _)| nullifiers.contains(n));
+            cached
+                .facts
+                .allocations
+                .retain(|(_, t, _, _)| *t == snapshot.token());
+            cached.facts.revocations.retain(|(o, t, s, l, _)| {
+                grants.contains(&(*o, *t, *s, *l))
+                    || kind == "revoke-credit"
+                        && *o == self.scope.owner_address
+                        && *t == snapshot.token()
+            });
+        }
         state.operations.insert(
             id.clone(),
             OperationRecord {
@@ -661,6 +749,7 @@ impl WalletSession {
                 inputs,
                 deadline,
                 snapshot,
+                preparation_snapshot,
                 transaction_hash: None,
                 call: None,
                 externalized: false,
@@ -723,14 +812,18 @@ impl WalletSession {
                 return Err("insufficient unreserved known Note balance".into());
             }
         }
-        self.register(ManagedPrepared::Funds(
-            self.invisi.prepare_transfer(&self.wallet, options)?,
-        ))
+        self.prepare_cached(|invisi| {
+            Ok(ManagedPrepared::Funds(
+                invisi.prepare_transfer(&self.wallet, options.clone())?,
+            ))
+        })
     }
     pub fn prepare_shield(&self, options: ShieldPreparation) -> Result<Operation> {
-        self.register(ManagedPrepared::Funds(
-            self.invisi.prepare_shield(&self.wallet, options)?,
-        ))
+        self.prepare_cached(|invisi| {
+            Ok(ManagedPrepared::Funds(
+                invisi.prepare_shield(&self.wallet, options.clone())?,
+            ))
+        })
     }
     pub fn prepare_create_credit(
         &self,
@@ -738,12 +831,14 @@ impl WalletSession {
         deadline: u64,
         fee: sdk::Fee,
     ) -> Result<Operation> {
-        self.register(ManagedPrepared::Credit(self.invisi.prepare_create_credit(
-            &self.wallet,
-            state,
-            deadline,
-            fee,
-        )?))
+        self.prepare_cached(|invisi| {
+            Ok(ManagedPrepared::Credit(invisi.prepare_create_credit(
+                &self.wallet,
+                state.clone(),
+                deadline,
+                fee.clone(),
+            )?))
+        })
     }
     pub fn prepare_update_credit(
         &self,
@@ -762,13 +857,15 @@ impl WalletSession {
             return Err("Credit input is unavailable for owner update".into());
         }
         let input = credit_input(credit, U256::ZERO);
-        self.register(ManagedPrepared::Credit(self.invisi.prepare_update_credit(
-            &self.wallet,
-            input,
-            changes,
-            deadline,
-            fee,
-        )?))
+        self.prepare_cached(|invisi| {
+            Ok(ManagedPrepared::Credit(invisi.prepare_update_credit(
+                &self.wallet,
+                input.clone(),
+                changes.clone(),
+                deadline,
+                fee.clone(),
+            )?))
+        })
     }
     pub fn prepare_draw_credit(
         &self,
@@ -791,14 +888,16 @@ impl WalletSession {
             }
             inputs.push(credit_input(credit, *debit));
         }
-        self.register(ManagedPrepared::Credit(self.invisi.prepare_draw_credit(
-            &self.wallet,
-            inputs,
-            recipient,
-            deadline,
-            fee,
-            payload,
-        )?))
+        self.prepare_cached(|invisi| {
+            Ok(ManagedPrepared::Credit(invisi.prepare_draw_credit(
+                &self.wallet,
+                inputs.clone(),
+                recipient,
+                deadline,
+                fee.clone(),
+                payload.clone(),
+            )?))
+        })
     }
     pub fn prepare_revoke_credit(
         &self,
@@ -808,14 +907,16 @@ impl WalletSession {
         deadline: u64,
         fee: sdk::Fee,
     ) -> Result<Operation> {
-        self.register(ManagedPrepared::Credit(self.invisi.prepare_revoke_credit(
-            self.wallet.owner_address(),
-            token,
-            shard,
-            slot,
-            deadline,
-            fee,
-        )?))
+        self.prepare_cached(|invisi| {
+            Ok(ManagedPrepared::Credit(invisi.prepare_revoke_credit(
+                self.wallet.owner_address(),
+                token,
+                shard,
+                slot,
+                deadline,
+                fee.clone(),
+            )?))
+        })
     }
     /// Recovers the public proof packet, including for completed operations, without resuming spending.
     pub fn recover_provenance_proof(&self, id: &str) -> Result<Option<sdk::ProvenanceProof>> {

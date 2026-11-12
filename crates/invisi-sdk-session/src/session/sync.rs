@@ -610,6 +610,7 @@ impl PendingWalletRefresh {
                 }
             }
         }
+        let mut fresh_roots = BTreeSet::new();
         let mut note_count = 0;
         let mut credit_count = 0;
         for (candidate, value) in decoded {
@@ -632,6 +633,7 @@ impl PendingWalletRefresh {
                             None
                         },
                     )?;
+                    fresh_roots.insert((output.leaf.tree_id, sdk::field_word(root)));
                     let nullifier = sdk::field_word(note.nullifier().map_err(|e| e.to_string())?);
                     let reserved_by =
                         reservation_for(&next, &format!("note:{}", output.leaf.commitment));
@@ -679,6 +681,11 @@ impl PendingWalletRefresh {
                             None
                         },
                     )?;
+                    if let Some(credit) =
+                        next.credits.get(&credit_key(output.leaf.commitment, role))
+                    {
+                        fresh_roots.insert((credit.tree_id, sdk::field_word(credit.root)));
+                    }
                     credit_count += 1;
                 }
                 _ => return Err("decoded wallet result mismatch".into()),
@@ -936,6 +943,20 @@ impl PendingWalletRefresh {
             }
         }
         next.public_history_generation = self.public_generation.or(next.public_history_generation);
+        let no_fresh_roots = BTreeSet::new();
+        if self.offline {
+            next.preparation_snapshot = None;
+        } else {
+            session.retain_preparation(
+                &mut next,
+                &observation,
+                if observation == self.anchor {
+                    &fresh_roots
+                } else {
+                    &no_fresh_roots
+                },
+            )?;
+        }
         if !self.offline {
             session.invisi.chain.canonical(&observation)?;
             session.invisi.chain.canonical(&self.anchor)?;

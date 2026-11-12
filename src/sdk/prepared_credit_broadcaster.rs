@@ -167,7 +167,7 @@ impl PreparedCredit {
                 &data,
                 self.context.chain_id,
                 word_address(self.context.protocol_address)?,
-                block.timestamp,
+                chain.construction_timestamp(&block),
                 &[],
             )?;
             let trust = Trust {
@@ -179,7 +179,7 @@ impl PreparedCredit {
                 quote.signed(),
                 &trust,
                 &data,
-                block.timestamp,
+                chain.construction_timestamp(&block),
                 relay.provenance_mode(),
             )
             .map_err(|e| e.to_string())?;

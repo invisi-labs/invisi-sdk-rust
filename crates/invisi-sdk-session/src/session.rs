@@ -19,6 +19,8 @@ mod sync;
 pub use sync::*;
 mod journal;
 pub use journal::*;
+mod preparation;
+pub use preparation::RetainedPreparation;
 mod operation;
 pub use operation::*;
 #[cfg(feature = "sqlite")]
@@ -73,6 +75,8 @@ pub struct UnresolvedDelivery {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WalletState {
+    #[serde(default)]
+    pub preparation_snapshot: Option<RetainedPreparation>,
     pub format_version: u32,
     pub scope: Option<WalletScope>,
     pub revision: u64,
@@ -104,6 +108,7 @@ pub struct WalletState {
 impl Default for WalletState {
     fn default() -> Self {
         Self {
+            preparation_snapshot: None,
             format_version: 2,
             scope: None,
             revision: 0,
@@ -168,11 +173,8 @@ impl WalletSession {
         if namespace.is_empty() || namespace.len() > 128 || !namespace.is_ascii() {
             return Err("invalid wallet namespace".into());
         }
-        let context = invisi.chain.context();
+        let context = source.context();
         context.validate().map_err(|e| e.to_string())?;
-        if source.context() != context {
-            return Err("session source deployment mismatch".into());
-        }
         let scope = WalletScope {
             namespace,
             context,
@@ -187,7 +189,13 @@ impl WalletSession {
             source,
             public_history: None,
         };
-        session.invisi.chain.snapshot()?;
+        let state = session.store.snapshot(&session.scope.key())?;
+        if session.cached_preparation(&state)?.is_none() {
+            if session.invisi.chain.context() != context {
+                return Err("session chain deployment mismatch".into());
+            }
+            session.invisi.chain.snapshot()?;
+        }
         if let Some(runtime_code_hash) = session.source.runtime_code_hash() {
             let public_scope = crate::public_history::PublicHistoryScope {
                 chain_id: context.chain_id,
@@ -264,6 +272,7 @@ impl WalletSession {
         {
             return Err("wallet state schema or scope mismatch".into());
         }
+        self.cached_preparation(&state)?;
         use sha2::{Digest, Sha256};
         let raw = zeroize::Zeroizing::new(
             serde_json::to_vec(&state).map_err(|_| "wallet validation encoding failed")?,
@@ -483,6 +492,7 @@ impl WalletSession {
             .unresolved_deliveries
             .retain(|_, v| v.receipt.block.number < from);
         state.unresolved_delivery_count = Some(state.unresolved_deliveries.len());
+        state.preparation_snapshot = None;
         state.invalidated = true;
         state.observed_through = None;
         state.discovery_through = None;

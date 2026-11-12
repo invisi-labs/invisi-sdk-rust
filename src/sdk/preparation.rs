@@ -132,6 +132,17 @@ impl PreparationChain {
     }
 }
 impl ChainState for PreparationChain {
+    fn preparation_deployment(&self) -> Option<ProtocolDeployment> {
+        self.upstream.preparation_deployment()
+    }
+
+    fn historical_preparation(&self) -> bool {
+        self.upstream.historical_preparation()
+    }
+    fn construction_timestamp(&self, block: &CanonicalBlock) -> u64 {
+        self.upstream.construction_timestamp(block)
+    }
+
     fn context(&self) -> ProtocolContext {
         self.upstream.context()
     }
@@ -205,6 +216,154 @@ impl ChainState for PreparationChain {
         b: &CanonicalBlock,
     ) -> Result<bool> {
         self.upstream.public_signature_valid(o, d, s, b)
+    }
+}
+
+/// Canonically verified historical facts. These never authorize submission.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PreparationSnapshot {
+    pub version: u32,
+    pub deployment: Option<ProtocolDeployment>,
+    pub context: ProtocolContext,
+    pub block: CanonicalBlock,
+    pub roots: Vec<(u64, B256, bool)>,
+    pub spent: Vec<(B256, bool)>,
+    pub revocations: Vec<(Address, Address, u64, u16, bool)>,
+    pub allocations: Vec<(Address, Address, u64, u16)>,
+    pub funding_nonces: Vec<(Address, U256)>,
+}
+impl PreparationSnapshot {
+    pub fn new(context: ProtocolContext, block: CanonicalBlock) -> Self {
+        Self {
+            version: 1,
+            deployment: None,
+            context,
+            block,
+            roots: vec![],
+            spent: vec![],
+            revocations: vec![],
+            allocations: vec![],
+            funding_nonces: vec![],
+        }
+    }
+    pub fn validate(&self) -> Result<()> {
+        if self.version != 1 || self.block.hash == B256::ZERO {
+            return Err("invalid preparation snapshot".into());
+        }
+        self.context.validate().map_err(|e| e.to_string())?;
+        if let Some(deployment) = &self.deployment {
+            deployment.validate().map_err(|e| e.to_string())?;
+            if deployment.chain_id().map_err(|e| e.to_string())? != self.context.chain_id
+                || address_word(deployment.protocol.address) != self.context.protocol_address
+            {
+                return Err("preparation deployment context mismatch".into());
+            }
+        }
+        fn unique<T: Ord>(mut values: impl Iterator<Item = T>) -> bool {
+            let mut seen = BTreeSet::new();
+            values.all(|v| seen.insert(v))
+        }
+        if !unique(self.roots.iter().map(|(t, r, _)| (*t, *r)))
+            || !unique(self.spent.iter().map(|(n, _)| *n))
+            || !unique(
+                self.revocations
+                    .iter()
+                    .map(|(o, t, s, l, _)| (*o, *t, *s, *l)),
+            )
+            || !unique(self.allocations.iter().map(|(o, t, _, _)| (*o, *t)))
+            || !unique(self.funding_nonces.iter().map(|(o, _)| *o))
+        {
+            return Err("duplicate preparation facts".into());
+        }
+        Ok(())
+    }
+}
+impl ChainState for PreparationSnapshot {
+    fn preparation_deployment(&self) -> Option<ProtocolDeployment> {
+        self.deployment.clone()
+    }
+
+    fn historical_preparation(&self) -> bool {
+        true
+    }
+    fn construction_timestamp(&self, block: &CanonicalBlock) -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(block.timestamp, |d| d.as_secs().max(block.timestamp))
+    }
+    fn context(&self) -> ProtocolContext {
+        self.context
+    }
+    fn snapshot(&self) -> Result<CanonicalBlock> {
+        self.validate()?;
+        Ok(self.block.clone())
+    }
+    fn canonical(&self, block: &CanonicalBlock) -> Result<()> {
+        if block != &self.block {
+            return Err("preparation snapshot block mismatch".into());
+        }
+        Ok(())
+    }
+    fn known_root(&self, tree: u64, root: B256, block: &CanonicalBlock) -> Result<bool> {
+        self.canonical(block)?;
+        self.roots
+            .iter()
+            .find(|(t, r, _)| *t == tree && *r == root)
+            .map(|(_, _, v)| *v)
+            .ok_or_else(|| "missing synchronized preparation data".into())
+    }
+    fn nullifier_spent(&self, nullifier: B256, block: &CanonicalBlock) -> Result<bool> {
+        self.canonical(block)?;
+        self.spent
+            .iter()
+            .find(|(n, _)| *n == nullifier)
+            .map(|(_, v)| *v)
+            .ok_or_else(|| "missing synchronized preparation data".into())
+    }
+    fn credit_revoked(
+        &self,
+        owner: Address,
+        token: Address,
+        shard: u64,
+        slot: u16,
+        block: &CanonicalBlock,
+    ) -> Result<bool> {
+        self.canonical(block)?;
+        self.revocations
+            .iter()
+            .find(|(o, t, s, l, _)| (*o, *t, *s, *l) == (owner, token, shard, slot))
+            .map(|(_, _, _, _, v)| *v)
+            .ok_or_else(|| "missing synchronized preparation data".into())
+    }
+    fn credit_allocation(
+        &self,
+        owner: Address,
+        token: Address,
+        block: &CanonicalBlock,
+    ) -> Result<(u64, u16)> {
+        self.canonical(block)?;
+        self.allocations
+            .iter()
+            .find(|(o, t, _, _)| (*o, *t) == (owner, token))
+            .map(|(_, _, s, l)| (*s, *l))
+            .ok_or_else(|| "missing synchronized preparation data".into())
+    }
+    fn funding_nonce(&self, owner: Address, block: &CanonicalBlock) -> Result<U256> {
+        self.canonical(block)?;
+        self.funding_nonces
+            .iter()
+            .find(|(o, _)| *o == owner)
+            .map(|(_, v)| *v)
+            .ok_or_else(|| "missing synchronized preparation data".into())
+    }
+    fn token_balance_allowance(
+        &self,
+        _: Address,
+        _: Address,
+        _: &CanonicalBlock,
+    ) -> Result<(U256, U256)> {
+        Err("live submission validation required for payer balance and allowance".into())
     }
 }
 
@@ -312,5 +471,74 @@ mod tests {
         })
         .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    #[test]
+    fn persisted_facts_are_exact_and_missing_reads_fail_closed() {
+        let (chain, _, _, _) = crate::sdk::test_support::note_fixture();
+        let block = chain.snapshot().unwrap();
+        let mut snapshot = PreparationSnapshot::new(chain.context(), block.clone());
+        snapshot.roots.push((1, B256::repeat_byte(9), true));
+        let encoded = serde_json::to_vec(&snapshot).unwrap();
+        let restored: PreparationSnapshot = serde_json::from_slice(&encoded).unwrap();
+        assert!(restored
+            .known_root(1, B256::repeat_byte(9), &block)
+            .unwrap());
+        let mut malformed = restored.clone();
+        malformed.version = 2;
+        assert!(malformed.snapshot().is_err());
+        malformed = restored.clone();
+        malformed.roots.push(malformed.roots[0]);
+        assert!(malformed.snapshot().is_err());
+        assert!(restored
+            .known_root(2, B256::repeat_byte(9), &block)
+            .is_err());
+        assert!(restored.nullifier_spent(B256::ZERO, &block).is_err());
+        let mut fork = block.clone();
+        fork.hash = B256::repeat_byte(99);
+        assert!(restored.canonical(&fork).is_err());
+        assert!(restored.known_root(1, B256::repeat_byte(9), &fork).is_err());
+        assert!(restored
+            .token_balance_allowance(Address::ZERO, Address::ZERO, &block)
+            .is_err());
+    }
+}
+
+#[cfg(test)]
+mod construction_tests {
+    use super::*;
+    #[test]
+    fn local_construction_time_does_not_rewrite_the_canonical_anchor() {
+        let (chain, wallet, mut plan, _) = crate::sdk::test_support::note_fixture();
+        let block = chain.snapshot().unwrap();
+        let mut facts = PreparationSnapshot::new(chain.context(), block.clone());
+        for input in &plan.inputs {
+            facts
+                .roots
+                .push((input.tree_id, field_word(input.root), true));
+            facts
+                .spent
+                .push((field_word(input.note.nullifier().unwrap()), false));
+        }
+        let now = facts.construction_timestamp(&block);
+        assert!(now > block.timestamp);
+        plan.deadline = now + 100;
+        let invisi = Invisi::new(Arc::new(facts));
+        assert_eq!(
+            invisi
+                .prepare_transfer(&wallet, plan.clone())
+                .unwrap()
+                .anchor(),
+            &block
+        );
+        plan.deadline = block.timestamp;
+        assert!(invisi
+            .prepare_transfer(&wallet, plan)
+            .unwrap_err()
+            .contains("expired"));
     }
 }

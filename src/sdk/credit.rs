@@ -75,6 +75,7 @@ pub struct PreparedCredit {
     pub(crate) context: ProtocolContext,
     pub(crate) token: Address,
     pub(crate) anchor: CanonicalBlock,
+    pub(crate) constructed_at: u64,
     pub(crate) plan: CreditPlan,
     pub(crate) deliveries: Vec<abi::Delivery>,
     pub(crate) phase: Phase,
@@ -133,7 +134,7 @@ fn fee_balance(
     fee: U256,
     block: &CanonicalBlock,
 ) -> Result<()> {
-    if fee != U256::ZERO {
+    if fee != U256::ZERO && !chain.historical_preparation() {
         let (balance, allowance) = chain.token_balance_allowance(owner, token, block)?;
         if balance < fee || allowance < fee {
             return Err("ERC20 balance or Protocol allowance insufficient".into());
@@ -161,6 +162,7 @@ impl Invisi {
         let reads = Arc::new(PreparationChain::new(self.chain.clone()));
         let chain = &*reads;
         let anchor = chain.snapshot()?;
+        let constructed_at = chain.construction_timestamp(&anchor);
         let context = chain.context();
         fee.validate()?;
         model(state.validate())?;
@@ -169,8 +171,8 @@ impl Invisi {
         if s.context != context
             || s.owner_wallet_identity != address_word(wallet.owner_address)
             || s.expiry < deadline
-            || s.expiry <= anchor.timestamp
-            || deadline < anchor.timestamp
+            || s.expiry <= constructed_at
+            || deadline < constructed_at
             || s.usage != crate::credit::CreditUsage::default()
             || s.revocation_shard == 0
         {
@@ -201,6 +203,7 @@ impl Invisi {
             context,
             token,
             anchor,
+            constructed_at,
             plan: CreditPlan::Create {
                 params,
                 created: state,
@@ -226,13 +229,14 @@ impl Invisi {
         let reads = Arc::new(PreparationChain::new(self.chain.clone()));
         let chain = &*reads;
         let anchor = chain.snapshot()?;
+        let constructed_at = chain.construction_timestamp(&anchor);
         let context = chain.context();
         fee.validate()?;
         let s = &input.delivery.note;
         let token = word_address(s.token_address)?;
         input.validate(chain, &anchor, context, token)?;
         if s.owner_wallet_identity != address_word(wallet.owner_address)
-            || deadline < anchor.timestamp
+            || deadline < constructed_at
         {
             return Err("Credit update owner or deadline mismatch".into());
         }
@@ -267,6 +271,7 @@ impl Invisi {
             context,
             token,
             anchor,
+            constructed_at,
             plan: CreditPlan::Update {
                 params,
                 input,
@@ -300,10 +305,11 @@ impl Invisi {
         let reads = Arc::new(PreparationChain::new(self.chain.clone()));
         let chain = &*reads;
         let anchor = chain.snapshot()?;
+        let constructed_at = chain.construction_timestamp(&anchor);
         let context = chain.context();
         fee.validate()?;
         let c = credit_capacity(inputs.len())?;
-        if deadline < anchor.timestamp {
+        if deadline < constructed_at {
             return Err("Credit draw deadline expired".into());
         }
         let token = word_address(inputs[0].delivery.note.token_address)?;
@@ -327,7 +333,7 @@ impl Invisi {
             let transition = model(crate::credit::derive_credit_state(
                 &input.delivery.note,
                 input.debit,
-                anchor.timestamp,
+                constructed_at,
             ))?;
             let next = CreditDeliveryState {
                 note: transition.state.clone(),
@@ -443,6 +449,7 @@ impl Invisi {
             context,
             token,
             anchor,
+            constructed_at,
             plan: CreditPlan::Draw {
                 params,
                 inputs,
@@ -474,10 +481,11 @@ impl Invisi {
         let reads = Arc::new(PreparationChain::new(self.chain.clone()));
         let chain = &*reads;
         let anchor = chain.snapshot()?;
+        let constructed_at = chain.construction_timestamp(&anchor);
         let context = chain.context();
         fee.validate()?;
         let current = chain.credit_allocation(owner_address, token, &anchor)?;
-        if deadline < anchor.timestamp
+        if deadline < constructed_at
             || shard == 0
             || (shard, slot) >= current
             || chain.credit_revoked(owner_address, token, shard, slot, &anchor)?
@@ -493,6 +501,7 @@ impl Invisi {
             context,
             token,
             anchor,
+            constructed_at,
             plan: CreditPlan::Revoke {
                 owner: owner_address,
                 token,
@@ -641,7 +650,7 @@ impl PreparedCredit {
                     row.resize(capacity, U256::ZERO);
                     words.extend(row);
                 }
-                let (day, month) = crate::credit::credit_periods(self.anchor.timestamp);
+                let (day, month) = crate::credit::credit_periods(self.constructed_at);
                 words.extend([
                     U256::from_be_slice(p.noteCommitment.as_slice()),
                     p.totalAmount,
@@ -836,6 +845,12 @@ impl PreparedCredit {
         self.proof.as_ref()
     }
 
+    pub fn validate_submission(&self, chain: &dyn ChainState, caller: Address) -> Result<()> {
+        if chain.historical_preparation() {
+            return Err("live chain required for submission validation".into());
+        }
+        self.calldata(chain, caller).map(|_| ())
+    }
     pub fn calldata(&self, chain: &dyn ChainState, caller: Address) -> Result<TransactionCall> {
         let block = chain.snapshot()?;
         if chain.context() != self.context {
@@ -898,8 +913,9 @@ impl PreparedCredit {
             }
             CreditPlan::Draw { params: p, .. } => {
                 if p.deadline < U256::from(block.timestamp)
-                    || crate::credit::credit_periods(block.timestamp)
-                        != crate::credit::credit_periods(self.anchor.timestamp)
+                    || !chain.historical_preparation()
+                        && crate::credit::credit_periods(block.timestamp)
+                            != crate::credit::credit_periods(self.constructed_at)
                 {
                     return Err(
                         "Credit draw crossed deadline or UTC usage period; prepare again".into(),
@@ -926,10 +942,11 @@ impl PreparedCredit {
             } => {
                 if *deadline < block.timestamp
                     || signature.is_empty() && *owner != caller
+                    || (*shard, *slot) >= chain.credit_allocation(*owner, *token, &block)?
                     || chain.credit_revoked(*owner, *token, *shard, *slot, &block)?
                 {
                     return Err(
-                        "Credit revocation expired, already revoked or unauthorized caller".into(),
+                        "Credit revocation expired, unallocated, already revoked or unauthorized caller".into(),
                     );
                 }
                 if !signature.is_empty()
@@ -1493,6 +1510,134 @@ mod lifecycle_tests {
             let proved = p.prove(&SyntheticCreditBackend).unwrap();
             assert_eq!(estimate, proved.estimate_gas().unwrap());
         }
+    }
+    #[test]
+    fn cached_draw_uses_construction_period_and_restores_it_without_changing_anchor() {
+        let chain = chain();
+        chain.block.lock().unwrap().timestamp = 1;
+        let state = initial(chain.as_ref());
+        let input = CreditInput {
+            root: merkle_root(state.note.commitment().unwrap(), 0, &[U256::ZERO; 16]).unwrap(),
+            delivery: state,
+            tree_id: 1,
+            leaf_index: 0,
+            path: [U256::ZERO; 16],
+            debit: U256::from(5),
+        };
+        let block = chain.snapshot().unwrap();
+        let mut facts = PreparationSnapshot::new(chain.context(), block.clone());
+        facts.roots.push((1, field_word(input.root), true));
+        facts
+            .spent
+            .push((field_word(input.delivery.note.nullifier().unwrap()), false));
+        facts.revocations.push((
+            wallet(1).owner_address,
+            word_address(input.delivery.note.token_address).unwrap(),
+            1,
+            0,
+            false,
+        ));
+        let now = facts.construction_timestamp(&block);
+        let mut prepared = Invisi::new(Arc::new(facts))
+            .prepare_draw_credit(
+                &wallet(2),
+                vec![input],
+                &wallet(91),
+                now + 172800,
+                Fee::default(),
+                vec![],
+            )
+            .unwrap();
+        assert_eq!(prepared.anchor(), &block);
+        assert_eq!(
+            crate::credit::credit_periods(prepared.constructed_at),
+            crate::credit::credit_periods(now)
+        );
+        let request = prepared.export_wallet_request("period").unwrap();
+        let response: WalletResponse = serde_json::from_value(
+            crate::wallet::execute(&secret(2), &request.as_value()).unwrap(),
+        )
+        .unwrap();
+        prepared = prepared
+            .with_wallet_response(&request, &response)
+            .unwrap()
+            .prove(&SyntheticCreditBackend)
+            .unwrap();
+        let snapshot = journal::ManagedPrepared::Credit(prepared)
+            .snapshot()
+            .unwrap();
+        let restored = snapshot
+            .restore(&wallet(2), Some(&SyntheticCreditBackend))
+            .unwrap();
+        let journal::ManagedPrepared::Credit(restored) = restored else {
+            panic!("Credit operation required");
+        };
+        assert_eq!(restored.anchor(), &block);
+        assert_eq!(
+            crate::credit::credit_periods(restored.constructed_at),
+            crate::credit::credit_periods(now)
+        );
+        chain.block.lock().unwrap().timestamp = now + 86400;
+        // The fixture chain pins only the current block, so preserve the original anchor check separately.
+        struct PeriodChain<'a> {
+            live: &'a dyn ChainState,
+            anchor: CanonicalBlock,
+        }
+        impl ChainState for PeriodChain<'_> {
+            fn context(&self) -> ProtocolContext {
+                self.live.context()
+            }
+            fn snapshot(&self) -> Result<CanonicalBlock> {
+                self.live.snapshot()
+            }
+            fn canonical(&self, b: &CanonicalBlock) -> Result<()> {
+                if b == &self.anchor {
+                    Ok(())
+                } else {
+                    self.live.canonical(b)
+                }
+            }
+            fn known_root(&self, t: u64, r: B256, b: &CanonicalBlock) -> Result<bool> {
+                self.live.known_root(t, r, b)
+            }
+            fn nullifier_spent(&self, n: B256, b: &CanonicalBlock) -> Result<bool> {
+                self.live.nullifier_spent(n, b)
+            }
+            fn credit_revoked(
+                &self,
+                o: Address,
+                t: Address,
+                s: u64,
+                l: u16,
+                b: &CanonicalBlock,
+            ) -> Result<bool> {
+                self.live.credit_revoked(o, t, s, l, b)
+            }
+            fn token_balance_allowance(
+                &self,
+                o: Address,
+                t: Address,
+                b: &CanonicalBlock,
+            ) -> Result<(U256, U256)> {
+                self.live.token_balance_allowance(o, t, b)
+            }
+            fn credit_allocation(
+                &self,
+                o: Address,
+                t: Address,
+                b: &CanonicalBlock,
+            ) -> Result<(u64, u16)> {
+                self.live.credit_allocation(o, t, b)
+            }
+        }
+        let live = PeriodChain {
+            live: chain.as_ref(),
+            anchor: block,
+        };
+        assert!(restored
+            .validate_submission(&live, Address::ZERO)
+            .unwrap_err()
+            .contains("UTC usage period"));
     }
     struct SyntheticCreditBackend;
     impl Prover for SyntheticCreditBackend {

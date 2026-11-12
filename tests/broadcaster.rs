@@ -82,6 +82,7 @@ fn client_verifies_registered_quote_and_submit_status_correlation() {
     struct Transport {
         signed: Value,
         service: Value,
+        submission: Option<Value>,
     }
     impl RpcTransport for Transport {
         fn send(&self, r: &Value) -> Result<Value> {
@@ -99,7 +100,9 @@ fn client_verifies_registered_quote_and_submit_status_correlation() {
                 }
                 "broadcaster_submitTransaction" => {
                     assert!(r["params"][0].get("idempotencyKey").is_none());
-                    json!({"id":"server-owned","state":"pending"})
+                    self.submission
+                        .clone()
+                        .unwrap_or_else(|| json!({"id":"server-owned","state":"pending"}))
                 }
                 "broadcaster_getTransactionStatus" => {
                     json!({"id":"substituted","state":"confirmed"})
@@ -126,6 +129,7 @@ fn client_verifies_registered_quote_and_submit_status_correlation() {
     let client = BroadcasterClient::new(
         configuration.clone(),
         Transport {
+            submission: None,
             signed: json!({"quote":row["quote"],"signature":row["signature"]}),
             service: service.clone(),
         },
@@ -151,6 +155,7 @@ fn client_verifies_registered_quote_and_submit_status_correlation() {
         let changed = BroadcasterClient::new(
             configuration.clone(),
             Transport {
+                submission: None,
                 signed: json!({"quote":row["quote"],"signature":row["signature"]}),
                 service: bad,
             },
@@ -171,6 +176,13 @@ fn client_verifies_registered_quote_and_submit_status_correlation() {
     assert_eq!(client.estimate_quote(&data).unwrap().fee_amount, "1");
     assert_eq!(client.submit(&data, &verified).unwrap().id, "server-owned");
     assert!(client.status("operation-1").is_err());
+    for state in ["queued", "proving", "confirmed"] {
+        let malformed=BroadcasterClient::new(configuration.clone(),Transport{signed:json!({"quote":row["quote"],"signature":row["signature"]}),service:service.clone(),submission:Some(json!({"id":"server-owned","state":state,"confirmation":{"level":"finalized","status":"available","block":{"number":"10","hash":B256::repeat_byte(1),"timestamp":123}}}))}).unwrap();
+        assert!(
+            malformed.submit(&data, &verified).is_err(),
+            "accepted impossible submit confirmation context"
+        );
+    }
 }
 
 #[test]

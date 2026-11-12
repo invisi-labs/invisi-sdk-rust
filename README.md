@@ -127,3 +127,13 @@ if let Some(units) = estimate.gas_units() {
 ```
 
 `ProtocolRpcClient::discover_broadcasters(token)` pages enabled registrations at one canonical registry anchor and independently probes each operator's token support. Unsupported, unreachable or incorrectly identified services are skipped. Apps with their own network policy may use `discover_broadcasters_with_transport`; the Protocol RPC wire query itself has no token filter.
+
+### Native chain finality
+
+`rpc::read_chain_finality(&chain)` independently samples native `finalized`, `safe`, and `latest` block tags, checks every returned block against canonical numeric reads (number, hash, parent hash, timestamp), and retries an incoherent sample once. Every head has an explicit `available`, `unsupported`, `unavailable`, or `inconsistent` status. There is no depth or elapsed-time fallback. Custom `CanonicalChain` adapters keep working and default to unsupported native capabilities; implement `block_by_tag` and `confirmation_receipt` to opt in. `EthereumChain` implements both against its configured independent Chain RPC. Protocol service finality claims are optional for compatibility and authenticated against that primary; a service ahead of the primary becomes unavailable without blocking latest discovery.
+
+`rpc::read_transaction_confirmation(&chain, hash)` verifies the receipt and canonical inclusion again after native head reads. Its `pending` / `included` / `safe` / `finalized` result is independent of execution success and broadcaster status claims. `PreparedTransaction::confirmation(chain, hash)` and managed `Operation::confirmation()` expose the same observation; they never release reservations, advance journal generations, or mutate preparation state. Spendability checks continue using latest state. An operation without a stored transaction hash reports pending. Broadcaster confirmation fields are strictly parsed but never authorize local finality. Rust has separate `PreparedCredit` and `PreparedAggregate` types; use the generic `rpc::read_transaction_confirmation` helper for their stateless transactions, or managed `Operation::confirmation()` when journaled.
+
+This Rust release does not expose a high-level IPN/Disclosure verification policy API; consumers requiring finalized evidence must explicitly require an available native finalized head covering their canonically authenticated evidence block. The native helpers do not turn parsing a note/disclosure into verification.
+
+Run `CHAIN_RPC_URL=https://your-independent-node cargo run -p invisi-sdk-examples --bin transaction-confirmation -- 0x<transaction-hash>` for an observational query. The example neither submits nor retries a transaction.

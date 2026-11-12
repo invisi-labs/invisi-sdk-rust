@@ -645,6 +645,17 @@ fn validate_spending_key(owner: Address, public: &[u8]) -> Result<()> {
 }
 
 pub trait ChainState: Send + Sync {
+    fn finality(&self) -> crate::rpc::ChainFinality {
+        crate::rpc::ChainFinality::absent(crate::rpc::FinalityStatus::Unsupported)
+    }
+    fn transaction_confirmation(&self, _hash: B256) -> Result<crate::rpc::TransactionConfirmation> {
+        Ok(crate::rpc::TransactionConfirmation {
+            level: crate::rpc::ConfirmationLevel::Pending,
+            status: crate::rpc::FinalityStatus::Unsupported,
+            block: None,
+        })
+    }
+
     fn context(&self) -> ProtocolContext;
     fn snapshot(&self) -> Result<CanonicalBlock>;
     fn canonical(&self, block: &CanonicalBlock) -> Result<()>;
@@ -729,6 +740,14 @@ impl<C: CanonicalHead> RpcChainState<C> {
     }
 }
 impl<C: CanonicalHead> ChainState for RpcChainState<C> {
+    fn finality(&self) -> crate::rpc::ChainFinality {
+        crate::rpc::read_chain_finality(&self.chain)
+    }
+    fn transaction_confirmation(&self, hash: B256) -> Result<crate::rpc::TransactionConfirmation> {
+        self.snapshot()?;
+        crate::rpc::read_transaction_confirmation(&self.chain, hash).map_err(|e| e.to_string())
+    }
+
     fn context(&self) -> ProtocolContext {
         ProtocolContext {
             chain_id: self.deployment.chain_id().expect("validated deployment"),
@@ -754,13 +773,7 @@ impl<C: CanonicalHead> ChainState for RpcChainState<C> {
         Ok(block)
     }
     fn canonical(&self, block: &CanonicalBlock) -> Result<()> {
-        if self
-            .chain
-            .block(block.number)
-            .map_err(|e| e.to_string())?
-            .hash
-            != block.hash
-        {
+        if self.chain.block(block.number).map_err(|e| e.to_string())? != *block {
             return Err("chain reorganization".into());
         }
         Ok(())
@@ -1477,6 +1490,22 @@ fn auth_words(
     Ok(words)
 }
 impl PreparedTransaction {
+    /// Observe canonical inclusion/finality without changing preparation or submission state.
+    pub fn confirmation(
+        &self,
+        chain: &dyn ChainState,
+        hash: B256,
+    ) -> Result<crate::rpc::TransactionConfirmation> {
+        if hash == B256::ZERO {
+            return Err("nonzero transaction hash required".into());
+        }
+        if chain.context() != self.context {
+            return Err("chain deployment mismatch".into());
+        }
+        chain.snapshot()?;
+        chain.transaction_confirmation(hash)
+    }
+
     pub fn phase(&self) -> Phase {
         self.phase
     }

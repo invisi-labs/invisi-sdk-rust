@@ -409,12 +409,80 @@ pub enum StatusState {
     Uncertain,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfirmationBlock {
+    pub number: String,
+    pub hash: B256,
+    pub timestamp: u64,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "serde_json::Value")]
+pub struct Confirmation {
+    pub level: rpc::ConfirmationLevel,
+    pub status: rpc::FinalityStatus,
+    pub block: Option<ConfirmationBlock>,
+}
+impl TryFrom<serde_json::Value> for Confirmation {
+    type Error = String;
+    fn try_from(v: serde_json::Value) -> std::result::Result<Self, String> {
+        if v.as_object()
+            .is_none_or(|o| o.len() != 3 || !o.contains_key("block"))
+        {
+            return Err("invalid broadcaster confirmation".into());
+        }
+        let level =
+            serde_json::from_value(v["level"].clone()).map_err(|_| "invalid confirmation level")?;
+        let status = serde_json::from_value(v["status"].clone())
+            .map_err(|_| "invalid confirmation status")?;
+        let block = if v["block"].is_null() {
+            None
+        } else {
+            let block: ConfirmationBlock = serde_json::from_value(v["block"].clone())
+                .map_err(|_| "invalid confirmation block")?;
+            rpc::uint(&serde_json::Value::String(block.number.clone()), 64)
+                .map_err(|_| "invalid confirmation block number")?;
+            if block.timestamp > rpc::MAX_SAFE_INTEGER {
+                return Err("unsafe confirmation timestamp".into());
+            }
+            Some(block)
+        };
+        if level == rpc::ConfirmationLevel::Pending && block.is_some()
+            || level != rpc::ConfirmationLevel::Pending
+                && block.is_none()
+                && (status == rpc::FinalityStatus::Available
+                    || level == rpc::ConfirmationLevel::Safe
+                    || level == rpc::ConfirmationLevel::Finalized)
+        {
+            return Err("invalid confirmation anchor".into());
+        }
+        Ok(Self {
+            level,
+            status,
+            block,
+        })
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Status {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_confirmation"
+    )]
+    pub confirmation: Option<Confirmation>,
     pub id: String,
     pub state: StatusState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transaction_hash: Option<B256>,
+}
+fn optional_confirmation<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<Confirmation>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    serde_json::from_value(value)
+        .map(Some)
+        .map_err(serde::de::Error::custom)
 }
 pub struct BroadcasterClient<T: RpcTransport> {
     configuration: Configuration,
@@ -645,7 +713,8 @@ impl<T: RpcTransport> BroadcasterClient<T> {
         )
         .map_err(|_| Error::Invalid("invalid broadcaster status"))?;
         validate_id(&status.id)?;
-        Ok(status)
+        let returned_id = status.id.clone();
+        check_status(status, &returned_id)
     }
     pub fn lookup_status(&self, id: &str) -> Result<Option<Status>> {
         match self.status(id) {
@@ -671,6 +740,19 @@ fn validate_id(id: &str) -> Result<()> {
     Ok(())
 }
 fn check_status(status: Status, id: &str) -> Result<Status> {
+    if let Some(confirmation) = &status.confirmation {
+        if matches!(
+            status.state,
+            StatusState::Queued
+                | StatusState::Proving
+                | StatusState::Rejected
+                | StatusState::Expired
+        ) || confirmation.level != rpc::ConfirmationLevel::Pending
+            && status.transaction_hash.is_none()
+        {
+            return Err(Error::Invalid("invalid broadcaster confirmation context"));
+        }
+    }
     if status.id != id {
         return Err(Error::Invalid("broadcaster status identity mismatch"));
     }

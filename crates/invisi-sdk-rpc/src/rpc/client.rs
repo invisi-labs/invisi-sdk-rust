@@ -6,6 +6,12 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 
 pub trait CanonicalChain: Send + Sync {
+    fn block_by_tag(&self, _tag: FinalityTag) -> Result<Option<CanonicalBlock>> {
+        Err(Error::FinalityUnsupported)
+    }
+    fn confirmation_receipt(&self, _hash: B256) -> Result<Option<CanonicalReceipt>> {
+        Err(Error::FinalityUnsupported)
+    }
     fn chain_id(&self) -> Result<u64>;
     fn block(&self, number: u64) -> Result<CanonicalBlock>;
     fn code_at(&self, address: Address, block: Option<u64>) -> Result<Vec<u8>>;
@@ -35,6 +41,35 @@ fn quantity(v: &Value) -> Result<u64> {
     u64::from_str_radix(s, 16).map_err(|_| Error::Invalid("Ethereum quantity overflow"))
 }
 impl<T: RpcTransport> CanonicalChain for EthereumChain<T> {
+    fn confirmation_receipt(&self, hash: B256) -> Result<Option<CanonicalReceipt>> {
+        ChainReceipts::receipt(self, hash)
+    }
+    fn block_by_tag(&self, tag: FinalityTag) -> Result<Option<CanonicalBlock>> {
+        let value = match self
+            .rpc
+            .call("eth_getBlockByNumber", json!([tag.as_str(), false]))
+        {
+            Ok(v) => v,
+            Err(Error::Remote {
+                code: -32601 | -32602,
+                ..
+            }) => return Err(Error::FinalityUnsupported),
+            Err(e) => return Err(e),
+        };
+        if value.is_null() {
+            return Ok(None);
+        }
+        let parse = || -> Result<CanonicalBlock> {
+            Ok(CanonicalBlock {
+                number: quantity(&value["number"])?,
+                timestamp: quantity(&value["timestamp"])?,
+                hash: hash(&value["hash"])?,
+                parent_hash: hash(&value["parentHash"])?,
+            })
+        };
+        parse().map(Some).map_err(|_| Error::FinalityInconsistent)
+    }
+
     fn chain_id(&self) -> Result<u64> {
         quantity(&self.rpc.call("eth_chainId", json!([]))?)
     }
@@ -163,7 +198,15 @@ impl<T: RpcTransport, C: CanonicalChain> ProtocolRpcClient<T, C> {
                 return Err(Error::Invalid("index predates deployment"));
             }
         }
-        Ok(ProtocolStatus { indexed_head: head })
+        let finality = v
+            .get("finality")
+            .map(ChainFinality::parse)
+            .transpose()?
+            .map(|claim| authenticate_claim(&self.chain, claim));
+        Ok(ProtocolStatus {
+            indexed_head: head,
+            finality,
+        })
     }
     fn read_at(&self, block: &CanonicalBlock) -> Result<()> {
         self.read_status_metadata()?;

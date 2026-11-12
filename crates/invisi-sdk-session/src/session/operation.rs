@@ -59,6 +59,32 @@ impl std::fmt::Debug for Operation {
     }
 }
 impl Operation {
+    /// Observe the recorded transaction without releasing reservations or changing operation state.
+    pub fn confirmation(&self) -> Result<crate::rpc::TransactionConfirmation> {
+        let state = self.session.snapshot()?;
+        if self.session.invisi.chain.context() != self.session.scope.context {
+            return Err("chain deployment mismatch".into());
+        }
+        let record = state
+            .operations
+            .get(&self.id)
+            .ok_or("operation not found")?;
+        match record.transaction_hash {
+            Some(hash) => {
+                if hash == B256::ZERO {
+                    return Err("nonzero transaction hash required".into());
+                }
+                self.session.invisi.chain.snapshot()?;
+                self.session.invisi.chain.transaction_confirmation(hash)
+            }
+            None => Ok(crate::rpc::TransactionConfirmation {
+                level: crate::rpc::ConfirmationLevel::Pending,
+                status: crate::rpc::FinalityStatus::Available,
+                block: None,
+            }),
+        }
+    }
+
     pub fn id(&self) -> &str {
         &self.id
     }

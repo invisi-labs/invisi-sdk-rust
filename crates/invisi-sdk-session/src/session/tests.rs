@@ -49,6 +49,7 @@ fn wallet(n: u8) -> Wallet {
 }
 #[derive(Default)]
 struct Chain {
+    changed_context: AtomicBool,
     gas_forbidden: AtomicBool,
     height: std::sync::atomic::AtomicU64,
     reorg: AtomicBool,
@@ -62,7 +63,11 @@ impl ChainState for Chain {
             !self.gas_forbidden.load(Ordering::SeqCst),
             "estimator read chain context"
         );
-        context()
+        let mut value = context();
+        if self.changed_context.load(Ordering::SeqCst) {
+            value.chain_id += 1
+        }
+        value
     }
     fn snapshot(&self) -> Result<CanonicalBlock> {
         assert!(
@@ -1254,6 +1259,7 @@ impl sdk::PreparedBroadcaster for SessionCreditRelay {
     fn lookup_status(&self, id: &str) -> Result<Option<crate::broadcaster::Status>> {
         match self.lookup_mode.load(std::sync::atomic::Ordering::SeqCst) {
             0 => Ok(Some(crate::broadcaster::Status {
+                confirmation: None,
                 id: id.into(),
                 state: crate::broadcaster::StatusState::Pending,
                 transaction_hash: None,
@@ -1351,6 +1357,7 @@ impl sdk::PreparedBroadcaster for SessionCreditRelay {
             return Err("uncertain relay response".into());
         }
         Ok(crate::broadcaster::Status {
+            confirmation: None,
             id: "server-owned".into(),
             state: crate::broadcaster::StatusState::Pending,
             transaction_hash: None,
@@ -2782,6 +2789,7 @@ impl sdk::PreparedBroadcaster for SessionAggregateRelay {
             _ => return Ok(None),
         };
         Ok(Some(crate::broadcaster::Status {
+            confirmation: None,
             id: id.into(),
             state,
             transaction_hash: None,
@@ -2928,4 +2936,39 @@ fn signed_aggregate_defaults_recursive_and_restores_exact_request_without_reprov
         .notes
         .values()
         .all(|n| n.reserved_by.as_deref() != Some(&id)));
+}
+
+#[test]
+fn confirmation_observation_does_not_change_operation_or_reservations() {
+    let h = synced();
+    let operation = h.session.prepare_transfer(transfer(&h)).unwrap();
+    let before = serde_json::to_value(h.session.snapshot().unwrap()).unwrap();
+    let confirmation = operation.confirmation().unwrap();
+    assert_eq!(confirmation.level, crate::rpc::ConfirmationLevel::Pending);
+    assert_eq!(confirmation.status, crate::rpc::FinalityStatus::Available);
+    let mut state = h.session.snapshot().unwrap();
+    state
+        .operations
+        .get_mut(operation.id())
+        .unwrap()
+        .transaction_hash = Some(B256::repeat_byte(1));
+    h.session.commit(state).unwrap();
+    let submitted = serde_json::to_value(h.session.snapshot().unwrap()).unwrap();
+    assert_eq!(
+        operation.confirmation().unwrap().status,
+        crate::rpc::FinalityStatus::Unsupported
+    );
+    assert_eq!(
+        serde_json::to_value(h.session.snapshot().unwrap()).unwrap(),
+        submitted
+    );
+    assert_ne!(before, submitted);
+    h.chain.changed_context.store(true, Ordering::SeqCst);
+    assert!(operation.confirmation().is_err());
+    assert_eq!(
+        serde_json::to_value(h.session.snapshot().unwrap()).unwrap(),
+        submitted
+    );
+    h.chain.changed_context.store(false, Ordering::SeqCst);
+    assert!(h.session.prepare_transfer(transfer(&h)).is_err());
 }

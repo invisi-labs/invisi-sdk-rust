@@ -162,6 +162,7 @@ impl ProtocolDeployment {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProtocolStatus {
+    pub finality: Option<crate::finality::ChainFinality>,
     pub indexed_head: Option<CanonicalBlock>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -1,4 +1,5 @@
 //! Contract ABI, canonical chain/output DTOs and receipt decoding.
+pub mod finality;
 pub mod gas;
 pub mod interfaces;
 pub mod protocol;

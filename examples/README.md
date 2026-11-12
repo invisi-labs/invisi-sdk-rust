@@ -181,3 +181,5 @@ let receiving_address = wallet.address()?;
 assert_eq!(Wallet::from_address(&receiving_address)?, wallet);
 let revocation = invisi.prepare_revoke_credit(owner_address, token, shard, slot, deadline, Fee::default())?;
 ```
+
+`transaction-confirmation` (`07-broadcaster/confirmation.rs`) reads `CHAIN_RPC_URL` and a transaction hash argument to report independently authenticated native inclusion/finality. It performs no submission, resend, or wallet mutation.

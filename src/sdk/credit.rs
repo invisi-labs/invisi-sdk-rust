@@ -1576,6 +1576,7 @@ mod lifecycle_tests {
             self.submits
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(invisi_sdk_rpc::broadcaster::Status {
+                confirmation: None,
                 id: "server-owned".into(),
                 state: invisi_sdk_rpc::broadcaster::StatusState::Pending,
                 transaction_hash: None,

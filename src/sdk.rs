@@ -10,6 +10,7 @@ use crate::{
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use alloy_sol_types::{SolCall, SolValue};
 use k256::ecdsa::{signature::hazmat::PrehashVerifier, Signature, VerifyingKey};
+use preparation::{map_preparation, PreparationChain};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -1124,6 +1125,7 @@ pub(crate) enum Plan {
 }
 #[derive(Clone)]
 pub struct PreparedTransaction {
+    pub(crate) preparation_reads: Option<Arc<PreparationChain>>,
     pub(crate) wallet: Option<Wallet>,
     pub(crate) owner_address: Address,
     pub(crate) context: ProtocolContext,
@@ -1234,8 +1236,10 @@ impl Invisi {
         p: ShieldPreparation,
     ) -> Result<PreparedTransaction> {
         let template = RepriceTemplate::Shield(p.clone());
-        let anchor = self.chain.snapshot()?;
-        let context = self.chain.context();
+        let reads = Arc::new(PreparationChain::new(self.chain.clone()));
+        let chain = &*reads;
+        let anchor = chain.snapshot()?;
+        let context = chain.context();
         p.fee.validate()?;
         validate_funding(&p.funding)?;
         validate_outputs(&p.outputs, context, p.token)?;
@@ -1254,8 +1258,9 @@ impl Invisi {
             feeRecipient: p.fee.recipient,
             feeAmount: p.fee.amount,
         };
-        self.chain.canonical(&anchor)?;
+        chain.canonical(&anchor)?;
         Ok(PreparedTransaction {
+            preparation_reads: Some(reads),
             wallet: Some(wallet.clone()),
             owner_address: wallet.owner_address,
             context,
@@ -1292,26 +1297,30 @@ impl Invisi {
         mut p: TransferPreparation,
     ) -> Result<PreparedTransaction> {
         let template = RepriceTemplate::Transfer(p.clone());
-        let anchor = self.chain.snapshot()?;
-        let context = self.chain.context();
+        let reads = Arc::new(PreparationChain::new(self.chain.clone()));
+        let chain = &*reads;
+        let anchor = chain.snapshot()?;
+        let context = chain.context();
         p.fee.validate()?;
         validate_funding(&p.funding)?;
         validate_outputs(&p.outputs, context, p.token)?;
         if p.deadline < anchor.timestamp {
             return Err("deadline expired".into());
         }
-        let mut seen = BTreeSet::new();
-        for input in &p.inputs {
+        let nullifiers = map_preparation(p.inputs.len(), |i| {
+            let input = &p.inputs[i];
             input.validate(owner_address, context, p.token)?;
             let n = field_word(model(input.note.nullifier())?);
-            if !seen.insert(n)
-                || !self
-                    .chain
-                    .known_root(input.tree_id, field_word(input.root), &anchor)?
-                || self.chain.nullifier_spent(n, &anchor)?
+            if !chain.known_root(input.tree_id, field_word(input.root), &anchor)?
+                || chain.nullifier_spent(n, &anchor)?
             {
                 return Err("duplicate, unknown or spent Note input".into());
             }
+            Ok(n)
+        })?;
+        let mut seen = BTreeSet::new();
+        if nullifiers.iter().any(|n| !seen.insert(*n)) {
+            return Err("duplicate, unknown or spent Note input".into());
         }
         let (withdrawal_address, withdrawal_amount) =
             p.withdrawal.unwrap_or((Address::ZERO, U256::ZERO));
@@ -1350,11 +1359,6 @@ impl Invisi {
         validate_outputs(&p.outputs, context, p.token)?;
         let c = capacity(p.inputs.len(), p.outputs.len())?;
         let sources = sorted_sources(&p.inputs)?;
-        let nullifiers = p
-            .inputs
-            .iter()
-            .map(|i| model(i.note.nullifier()).map(field_word))
-            .collect::<Result<Vec<_>>>()?;
         let params = abi::CrossTreeTransactParams {
             token: p.token,
             sources,
@@ -1372,8 +1376,9 @@ impl Invisi {
                 && p.outputs.is_empty()
                 && p.funding.amount == U256::ZERO
                 && p.fee.amount == U256::ZERO);
-        self.chain.canonical(&anchor)?;
+        chain.canonical(&anchor)?;
         Ok(PreparedTransaction {
+            preparation_reads: Some(reads),
             wallet: wallet.cloned(),
             owner_address,
             context,
@@ -1771,13 +1776,29 @@ impl PreparedTransaction {
             return Err("submission deployment mismatch".into());
         }
         chain.canonical(&self.anchor)?;
-        for input in self.inputs() {
-            if !chain.known_root(input.tree_id, field_word(input.root), &anchor)?
-                || chain.nullifier_spent(field_word(model(input.note.nullifier())?), &anchor)?
-            {
-                return Err("Note input no longer spendable".into());
+        let inputs = self.inputs();
+        let roots = inputs
+            .iter()
+            .map(|i| (i.tree_id, field_word(i.root)))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        map_preparation(roots.len() + inputs.len(), |i| {
+            let valid = if i < roots.len() {
+                let (tree, root) = roots[i];
+                chain.known_root(tree, root, &anchor)?
+            } else {
+                !chain.nullifier_spent(
+                    field_word(model(inputs[i - roots.len()].note.nullifier())?),
+                    &anchor,
+                )?
+            };
+            if valid {
+                Ok(())
+            } else {
+                Err("Note input no longer spendable".into())
             }
-        }
+        })?;
         self.validate_public_funding(chain, &anchor)?;
         let contract =
             protocol::ProtocolContract::new(word_address(self.context.protocol_address)?)?;
@@ -3580,3 +3601,5 @@ mod local_gas_tests {
         assert!(p.proof().is_none());
     }
 }
+
+mod preparation;

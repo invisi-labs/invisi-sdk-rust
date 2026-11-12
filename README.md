@@ -137,3 +137,5 @@ if let Some(units) = estimate.gas_units() {
 This Rust release does not expose a high-level IPN/Disclosure verification policy API; consumers requiring finalized evidence must explicitly require an available native finalized head covering their canonically authenticated evidence block. The native helpers do not turn parsing a note/disclosure into verification.
 
 Run `CHAIN_RPC_URL=https://your-independent-node cargo run -p invisi-sdk-examples --bin transaction-confirmation -- 0x<transaction-hash>` for an observational query. The example neither submits nor retries a transaction.
+
+Preparation and quotation preserve the existing API. Independent Note/Credit checks use at most four workers per group and preserve statement order. Each prepared handle can reuse block-bound public reads during fee convergence for up to 30 seconds (1,024 entries); snapshots, canonical checks, funding nonces and signature verification remain live. Transaction export retains its existing live submission checks, now with bounded parallel input and payer validation. Portable recovery snapshots do not serialize read caches.

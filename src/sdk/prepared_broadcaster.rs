@@ -342,8 +342,16 @@ impl PreparedTransaction {
             .reprice
             .as_ref()
             .ok_or("original business preparation required for explicit repricing")?;
+        let retained_reads = self
+            .preparation_reads
+            .as_ref()
+            .filter(|reads| reads.matches(&chain))
+            .cloned();
         let runtime = Invisi {
-            chain: chain.clone(),
+            chain: self
+                .preparation_reads
+                .as_ref()
+                .map_or_else(|| chain.clone(), |reads| reads.for_quote(chain.clone())),
             provenance: self.provenance.clone(),
         };
         let mut fee = relay.fee(self.token, Some(&self.broadcaster_intent()?.data))?;
@@ -430,6 +438,9 @@ impl PreparedTransaction {
         )
         .map_err(|e| e.to_string())?;
         chain.canonical(&block)?;
+        if let Some(reads) = retained_reads.clone() {
+            candidate.preparation_reads = Some(reads);
+        }
         candidate.broadcaster = Some(PreparedBroadcasterState {
             endpoint: config.endpoint,
             signer: config.quote_signer,
@@ -1993,4 +2004,48 @@ mod tests {
             panic!("no submit")
         }
     }
+    #[test]
+    fn repeated_quotes_retain_the_original_funds_read_set() {
+        let (chain, wallet, p, _) = note_fixture();
+        let output =
+            NoteOutput::identity(chain.context(), p.token, U256::from(123), U256::from(20))
+                .unwrap();
+        let mut prepared = Invisi::new(chain.clone())
+            .prepare_shield(
+                &wallet,
+                ShieldPreparation {
+                    token: p.token,
+                    outputs: vec![output],
+                    funding: abi::FundingParams {
+                        amount: U256::from(20),
+                        payer: wallet.owner_address,
+                        ..empty_funding()
+                    },
+                    fee: Fee::default(),
+                    deadline: 100,
+                },
+            )
+            .unwrap();
+        let original = prepared.preparation_reads.clone().unwrap();
+        for _ in 0..2 {
+            prepared = prepared
+                .with_broadcaster(
+                    chain.clone(),
+                    Arc::new(SignedRelay {
+                        fees: 0.into(),
+                        quotes: 0.into(),
+                    }),
+                    &BroadcasterOptions {
+                        max_fee_amount: Some(U256::from(100)),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            assert!(
+                Arc::ptr_eq(&original, prepared.preparation_reads.as_ref().unwrap()),
+                "quote replaced the operation read set"
+            );
+        }
+    }
+    include!("preparation_profile.rs");
 }

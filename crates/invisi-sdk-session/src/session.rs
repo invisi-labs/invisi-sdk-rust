@@ -141,6 +141,7 @@ pub(crate) fn credit_key(commitment: B256, role: CreditRole) -> String {
 }
 #[derive(Clone)]
 pub struct WalletSession {
+    validated_snapshot: Arc<std::sync::Mutex<Option<[u8; 32]>>>,
     pub(crate) invisi: Invisi,
     pub(crate) wallet: Wallet,
     pub(crate) scope: WalletScope,
@@ -178,6 +179,7 @@ impl WalletSession {
             owner_address: wallet.owner_address(),
         };
         let mut session = Self {
+            validated_snapshot: Arc::new(std::sync::Mutex::new(None)),
             invisi,
             wallet,
             scope,
@@ -262,6 +264,19 @@ impl WalletSession {
         {
             return Err("wallet state schema or scope mismatch".into());
         }
+        use sha2::{Digest, Sha256};
+        let raw = zeroize::Zeroizing::new(
+            serde_json::to_vec(&state).map_err(|_| "wallet validation encoding failed")?,
+        );
+        let digest: [u8; 32] = Sha256::digest(&*raw).into();
+        if *self
+            .validated_snapshot
+            .lock()
+            .map_err(|_| "wallet validation cache poisoned")?
+            == Some(digest)
+        {
+            return Ok(state);
+        }
         for (commitment, stored) in &state.notes {
             stored.input.validate(
                 self.wallet.owner_address(),
@@ -330,6 +345,10 @@ impl WalletSession {
                 return Err("stored operation scope mismatch".into());
             }
         }
+        *self
+            .validated_snapshot
+            .lock()
+            .map_err(|_| "wallet validation cache poisoned")? = Some(digest);
         Ok(state)
     }
     pub(crate) fn commit(&self, mut next: WalletState) -> Result<()> {

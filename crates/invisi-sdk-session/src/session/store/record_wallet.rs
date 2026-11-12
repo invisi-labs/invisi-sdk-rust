@@ -44,6 +44,7 @@ struct Locator {
 }
 /// Private records use opaque keys; only the authenticated manifest routes active assets.
 pub struct RecordWalletStore {
+    decoded: DecodedRecords,
     records: Arc<dyn AtomicRecords>,
     key: Zeroizing<[u8; 32]>,
     recent: usize,
@@ -66,6 +67,7 @@ impl RecordWalletStore {
         Ok(Self {
             records,
             key: Zeroizing::new(key),
+            decoded: DecodedRecords::default(),
             recent,
         })
     }
@@ -107,17 +109,19 @@ impl RecordWalletStore {
         }
         let cipher =
             Aes256Gcm::new_from_slice(&*self.key).map_err(|_| "invalid store encryption key")?;
-        let plain = Zeroizing::new(
-            cipher
-                .decrypt(
-                    Nonce::from_slice(&record.data[1..13]),
-                    Payload {
-                        msg: &record.data[13..],
-                        aad: &EncryptedWalletStore::aad(key, record.revision),
-                    },
-                )
-                .map_err(|_| "wallet record authentication failed")?,
-        );
+        let plain = self.decoded.open(key, record, || {
+            Ok(Zeroizing::new(
+                cipher
+                    .decrypt(
+                        Nonce::from_slice(&record.data[1..13]),
+                        Payload {
+                            msg: &record.data[13..],
+                            aad: &EncryptedWalletStore::aad(key, record.revision),
+                        },
+                    )
+                    .map_err(|_| "wallet record authentication failed")?,
+            ))
+        })?;
         serde_json::from_slice(&plain).map_err(|_| "invalid private record encoding".into())
     }
     fn layout(&self, scope: &str) -> Result<Option<Manifest>> {

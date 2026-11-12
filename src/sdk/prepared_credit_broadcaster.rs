@@ -76,8 +76,16 @@ impl PreparedCredit {
         if let Some(cap) = &self.provenance {
             cap.validate(self.context, relay.provenance_mode())?;
         }
+        let retained_reads = self
+            .preparation_reads
+            .as_ref()
+            .filter(|reads| reads.matches(&chain))
+            .cloned();
         let runtime = Invisi {
-            chain: chain.clone(),
+            chain: self
+                .preparation_reads
+                .as_ref()
+                .map_or_else(|| chain.clone(), |reads| reads.for_quote(chain.clone())),
             provenance: self.provenance.clone(),
         };
         let template = self
@@ -176,6 +184,9 @@ impl PreparedCredit {
             )
             .map_err(|e| e.to_string())?;
             chain.canonical(&block)?;
+            if let Some(reads) = retained_reads.clone() {
+                candidate.preparation_reads = Some(reads);
+            }
             candidate.broadcaster = Some(PreparedBroadcasterState {
                 endpoint: config.endpoint,
                 signer: config.quote_signer,

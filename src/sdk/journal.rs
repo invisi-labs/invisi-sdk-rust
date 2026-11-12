@@ -141,6 +141,7 @@ pub enum ManagedPrepared {
 impl ManagedPrepared {
     pub fn snapshot_funds(value: &PreparedTransaction) -> Self {
         Self::Funds(PreparedTransaction {
+            preparation_reads: value.preparation_reads.clone(),
             wallet: value.wallet.clone(),
             owner_address: value.owner_address,
             context: value.context,
@@ -455,6 +456,7 @@ impl PreparedSnapshot {
                     }
                 }
                 ManagedPrepared::Funds(PreparedTransaction {
+                    preparation_reads: None,
                     wallet: wallet.cloned(),
                     owner_address,
                     context: self.context,
@@ -551,6 +553,7 @@ impl PreparedSnapshot {
                     }
                 }
                 ManagedPrepared::Funds(PreparedTransaction {
+                    preparation_reads: None,
                     wallet: wallet.cloned(),
                     owner_address,
                     context: self.context,
@@ -817,6 +820,7 @@ impl PreparedSnapshot {
                     None
                 };
                 ManagedPrepared::Credit(PreparedCredit {
+                    preparation_reads: None,
                     wallet: wallet.cloned(),
                     owner_address,
                     context: self.context,
@@ -1019,6 +1023,7 @@ impl ManagedPrepared {
     pub fn clone_for_stage(&self) -> Self {
         match self {
             Self::Funds(v) => Self::Funds(PreparedTransaction {
+                preparation_reads: v.preparation_reads.clone(),
                 wallet: v.wallet.clone(),
                 owner_address: v.owner_address,
                 context: v.context,
@@ -1042,6 +1047,7 @@ impl ManagedPrepared {
                 reprice: v.reprice.clone(),
             }),
             Self::Credit(v) => Self::Credit(PreparedCredit {
+                preparation_reads: v.preparation_reads.clone(),
                 wallet: v.wallet.clone(),
                 owner_address: v.owner_address,
                 context: v.context,

@@ -212,6 +212,7 @@ impl AtomicRecords for MemoryAtomicRecords {
     }
 }
 pub struct EncryptedWalletStore {
+    decoded: DecodedRecords,
     records: Arc<dyn AtomicRecords>,
     key: Zeroizing<[u8; 32]>,
 }
@@ -227,6 +228,7 @@ impl EncryptedWalletStore {
         Ok(Self {
             records,
             key: Zeroizing::new(key),
+            decoded: DecodedRecords::default(),
         })
     }
     fn aad(scope: &str, revision: u64) -> Vec<u8> {
@@ -250,17 +252,19 @@ impl WalletStore for EncryptedWalletStore {
         }
         let cipher =
             Aes256Gcm::new_from_slice(&*self.key).map_err(|_| "invalid store encryption key")?;
-        let plain = Zeroizing::new(
-            cipher
-                .decrypt(
-                    Nonce::from_slice(&record.data[1..13]),
-                    Payload {
-                        msg: &record.data[13..],
-                        aad: &Self::aad(scope, record.revision),
-                    },
-                )
-                .map_err(|_| "wallet record authentication failed")?,
-        );
+        let plain = self.decoded.open(scope, &record, || {
+            Ok(Zeroizing::new(
+                cipher
+                    .decrypt(
+                        Nonce::from_slice(&record.data[1..13]),
+                        Payload {
+                            msg: &record.data[13..],
+                            aad: &Self::aad(scope, record.revision),
+                        },
+                    )
+                    .map_err(|_| "wallet record authentication failed")?,
+            ))
+        })?;
         let state: WalletState =
             serde_json::from_slice(&plain).map_err(|_| "invalid wallet state encoding")?;
         if state.revision != record.revision || state.format_version != 2 {
@@ -344,3 +348,6 @@ pub(crate) fn validate_batch(
 }
 mod record_wallet;
 pub use record_wallet::*;
+
+mod decoded;
+use decoded::DecodedRecords;

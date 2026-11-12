@@ -2972,3 +2972,39 @@ fn confirmation_observation_does_not_change_operation_or_reservations() {
     h.chain.changed_context.store(false, Ordering::SeqCst);
     assert!(h.session.prepare_transfer(transfer(&h)).is_err());
 }
+
+#[test]
+fn repeated_snapshot_validation_is_bound_to_the_entire_detached_state() {
+    let h = synced();
+    let mut first = h.session.snapshot().unwrap();
+    let fingerprint = *h.session.validated_snapshot.lock().unwrap();
+    assert!(fingerprint.is_some());
+    first
+        .notes
+        .get_mut(&h.commitment)
+        .unwrap()
+        .input
+        .note
+        .amount = U256::ZERO;
+    assert_eq!(
+        h.session.snapshot().unwrap().notes[&h.commitment]
+            .input
+            .note
+            .amount,
+        h.note.amount
+    );
+    assert_eq!(*h.session.validated_snapshot.lock().unwrap(), fingerprint);
+    let mut changed = h.session.snapshot().unwrap();
+    changed
+        .notes
+        .get_mut(&h.commitment)
+        .unwrap()
+        .input
+        .note
+        .amount = U256::ZERO;
+    let revision = changed.revision;
+    h.store
+        .compare_and_swap(&h.session.scope.key(), revision, changed)
+        .unwrap();
+    assert!(h.session.snapshot().is_err());
+}

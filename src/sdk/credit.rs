@@ -69,6 +69,7 @@ pub(crate) enum CreditPlan {
 }
 #[derive(Clone)]
 pub struct PreparedCredit {
+    pub(crate) preparation_reads: Option<Arc<PreparationChain>>,
     pub(crate) wallet: Option<Wallet>,
     pub(crate) owner_address: Address,
     pub(crate) context: ProtocolContext,
@@ -157,8 +158,10 @@ impl Invisi {
         fee: Fee,
     ) -> Result<PreparedCredit> {
         let template = CreditRepriceTemplate::Create(state.clone(), deadline);
-        let anchor = self.chain.snapshot()?;
-        let context = self.chain.context();
+        let reads = Arc::new(PreparationChain::new(self.chain.clone()));
+        let chain = &*reads;
+        let anchor = chain.snapshot()?;
+        let context = chain.context();
         fee.validate()?;
         model(state.validate())?;
         let s = &state.note;
@@ -173,20 +176,12 @@ impl Invisi {
         {
             return Err("invalid initial Credit owner, usage, expiry or context".into());
         }
-        if self
-            .chain
-            .credit_allocation(wallet.owner_address, token, &anchor)?
+        if chain.credit_allocation(wallet.owner_address, token, &anchor)?
             != (s.revocation_shard, s.revocation_slot)
         {
             return Err("Credit allocation changed".into());
         }
-        fee_balance(
-            &*self.chain,
-            wallet.owner_address,
-            token,
-            fee.amount,
-            &anchor,
-        )?;
+        fee_balance(chain, wallet.owner_address, token, fee.amount, &anchor)?;
         let params = abi::CreateCreditParams {
             token,
             owner: wallet.owner_address,
@@ -198,8 +193,9 @@ impl Invisi {
             feeAmount: fee.amount,
         };
         let deliveries = credit_deliveries(&state)?;
-        self.chain.canonical(&anchor)?;
+        chain.canonical(&anchor)?;
         Ok(PreparedCredit {
+            preparation_reads: Some(reads),
             wallet: Some(wallet.clone()),
             owner_address: wallet.owner_address,
             context,
@@ -227,12 +223,14 @@ impl Invisi {
         fee: Fee,
     ) -> Result<PreparedCredit> {
         let template = CreditRepriceTemplate::Update(input.clone(), changes.clone(), deadline);
-        let anchor = self.chain.snapshot()?;
-        let context = self.chain.context();
+        let reads = Arc::new(PreparationChain::new(self.chain.clone()));
+        let chain = &*reads;
+        let anchor = chain.snapshot()?;
+        let context = chain.context();
         fee.validate()?;
         let s = &input.delivery.note;
         let token = word_address(s.token_address)?;
-        input.validate(&*self.chain, &anchor, context, token)?;
+        input.validate(chain, &anchor, context, token)?;
         if s.owner_wallet_identity != address_word(wallet.owner_address)
             || deadline < anchor.timestamp
         {
@@ -259,16 +257,11 @@ impl Invisi {
             feeRecipient: fee.recipient,
             feeAmount: fee.amount,
         };
-        fee_balance(
-            &*self.chain,
-            wallet.owner_address,
-            token,
-            fee.amount,
-            &anchor,
-        )?;
+        fee_balance(chain, wallet.owner_address, token, fee.amount, &anchor)?;
         let deliveries = credit_deliveries(&next)?;
-        self.chain.canonical(&anchor)?;
+        chain.canonical(&anchor)?;
         Ok(PreparedCredit {
+            preparation_reads: Some(reads),
             wallet: Some(wallet.clone()),
             owner_address: wallet.owner_address,
             context,
@@ -304,8 +297,10 @@ impl Invisi {
             deadline,
             payload.clone(),
         );
-        let anchor = self.chain.snapshot()?;
-        let context = self.chain.context();
+        let reads = Arc::new(PreparationChain::new(self.chain.clone()));
+        let chain = &*reads;
+        let anchor = chain.snapshot()?;
+        let context = chain.context();
         fee.validate()?;
         let c = credit_capacity(inputs.len())?;
         if deadline < anchor.timestamp {
@@ -326,8 +321,23 @@ impl Invisi {
         let mut transitions = Vec::new();
         let mut successors = Vec::new();
         let mut deliveries = Vec::new();
-        for input in &inputs {
-            input.validate(&*self.chain, &anchor, context, token)?;
+        let prepared_inputs = map_preparation(inputs.len(), |i| {
+            let input = &inputs[i];
+            input.validate(chain, &anchor, context, token)?;
+            let transition = model(crate::credit::derive_credit_state(
+                &input.delivery.note,
+                input.debit,
+                anchor.timestamp,
+            ))?;
+            let next = CreditDeliveryState {
+                note: transition.state.clone(),
+                owner_receiving_keys: input.delivery.owner_receiving_keys.clone(),
+                spender_receiving_keys: input.delivery.spender_receiving_keys.clone(),
+            };
+            let ds = credit_deliveries(&next)?;
+            Ok((transition, next, ds))
+        })?;
+        for (input, (transition, next, ds)) in inputs.iter().zip(prepared_inputs) {
             let s = &input.delivery.note;
             if s.spender_wallet_identity != address_word(wallet.owner_address)
                 || s.expiry < deadline
@@ -339,11 +349,6 @@ impl Invisi {
             {
                 return Err("Credit spender, expiry or duplicate grant reference mismatch".into());
             }
-            let transition = model(crate::credit::derive_credit_state(
-                s,
-                input.debit,
-                anchor.timestamp,
-            ))?;
             if !seen.insert(transition.nullifier) {
                 return Err("duplicate Credit input".into());
             }
@@ -358,12 +363,7 @@ impl Invisi {
             {
                 return Err("Credit input tree root conflict".into());
             }
-            let next = CreditDeliveryState {
-                note: transition.state.clone(),
-                owner_receiving_keys: input.delivery.owner_receiving_keys.clone(),
-                spender_receiving_keys: input.delivery.spender_receiving_keys.clone(),
-            };
-            deliveries.extend(credit_deliveries(&next)?);
+            deliveries.extend(ds);
             successors.push(next);
             transitions.push(transition);
         }
@@ -372,9 +372,11 @@ impl Invisi {
         if total <= fee.amount {
             return Err("Credit fee must leave positive ordinary Note".into());
         }
-        for (owner, amount) in &groups {
-            fee_balance(&*self.chain, *owner, token, *amount, &anchor)?;
-        }
+        let payer_checks = groups.iter().collect::<Vec<_>>();
+        map_preparation(payer_checks.len(), |i| {
+            let (owner, amount) = payer_checks[i];
+            fee_balance(chain, *owner, token, *amount, &anchor)
+        })?;
         let payers: Vec<abi::CreditPayer> = groups
             .iter()
             .map(|(owner, amount)| abi::CreditPayer {
@@ -433,8 +435,9 @@ impl Invisi {
         if params.sources.len() > c {
             return Err("Credit source count exceeds capacity".into());
         }
-        self.chain.canonical(&anchor)?;
+        chain.canonical(&anchor)?;
         Ok(PreparedCredit {
+            preparation_reads: Some(reads),
             wallet: Some(wallet.clone()),
             owner_address: wallet.owner_address,
             context,
@@ -468,24 +471,23 @@ impl Invisi {
             return Err("nonzero owner address required".into());
         }
         let template = CreditRepriceTemplate::Revoke(token, shard, slot, deadline);
-        let anchor = self.chain.snapshot()?;
-        let context = self.chain.context();
+        let reads = Arc::new(PreparationChain::new(self.chain.clone()));
+        let chain = &*reads;
+        let anchor = chain.snapshot()?;
+        let context = chain.context();
         fee.validate()?;
-        let current = self
-            .chain
-            .credit_allocation(owner_address, token, &anchor)?;
+        let current = chain.credit_allocation(owner_address, token, &anchor)?;
         if deadline < anchor.timestamp
             || shard == 0
             || (shard, slot) >= current
-            || self
-                .chain
-                .credit_revoked(owner_address, token, shard, slot, &anchor)?
+            || chain.credit_revoked(owner_address, token, shard, slot, &anchor)?
         {
             return Err("Credit revocation reference is unallocated, revoked or expired".into());
         }
-        fee_balance(&*self.chain, owner_address, token, fee.amount, &anchor)?;
-        self.chain.canonical(&anchor)?;
+        fee_balance(chain, owner_address, token, fee.amount, &anchor)?;
+        chain.canonical(&anchor)?;
         Ok(PreparedCredit {
+            preparation_reads: Some(reads),
             wallet: None,
             owner_address: owner_address,
             context,
@@ -840,9 +842,10 @@ impl PreparedCredit {
             return Err("Credit deployment mismatch".into());
         }
         chain.canonical(&self.anchor)?;
-        for input in self.credit_inputs() {
-            input.validate(chain, &block, self.context, self.token)?;
-        }
+        let inputs = self.credit_inputs();
+        map_preparation(inputs.len(), |i| {
+            inputs[i].validate(chain, &block, self.context, self.token)
+        })?;
         let contract =
             protocol::ProtocolContract::new(word_address(self.context.protocol_address)?)?;
         let proof = if matches!(self.plan, CreditPlan::Revoke { .. }) {
@@ -902,9 +905,10 @@ impl PreparedCredit {
                         "Credit draw crossed deadline or UTC usage period; prepare again".into(),
                     );
                 }
-                for payer in &p.payers {
-                    fee_balance(chain, payer.payer, p.token, payer.amount, &block)?;
-                }
+                map_preparation(p.payers.len(), |i| {
+                    let payer = &p.payers[i];
+                    fee_balance(chain, payer.payer, p.token, payer.amount, &block)
+                })?;
                 Ok(contract.call(&InvisiProtocol::creditDrawCall {
                     _0: proof,
                     p: p.clone(),
@@ -1167,6 +1171,38 @@ mod lifecycle_tests {
     use super::*;
     use k256::elliptic_curve::sec1::ToEncodedPoint;
     use std::sync::Mutex;
+    #[test]
+    fn repeated_quotes_retain_the_original_credit_read_set() {
+        let chain = chain();
+        let mut prepared = Invisi::new(chain.clone())
+            .prepare_create_credit(
+                &wallet(1),
+                initial(chain.as_ref()),
+                2000000100,
+                Fee::default(),
+            )
+            .unwrap();
+        let original = prepared.preparation_reads.clone().unwrap();
+        for _ in 0..2 {
+            prepared = prepared
+                .with_broadcaster(
+                    chain.clone(),
+                    Arc::new(CreditRelay {
+                        fees: 0.into(),
+                        submits: 0.into(),
+                    }),
+                    &BroadcasterOptions {
+                        max_fee_amount: Some(U256::from(100)),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            assert!(
+                Arc::ptr_eq(&original, prepared.preparation_reads.as_ref().unwrap()),
+                "quote replaced the operation read set"
+            );
+        }
+    }
     #[test]
     fn credit_highlevel_relay_preserves_original_on_failure() {
         let chain = chain();

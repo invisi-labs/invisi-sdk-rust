@@ -27,7 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // These public references identify the earlier grant; no private Credit opening is needed.
     let shard = env::var("GRANT_SHARD")?.parse()?;
     let slot = env::var("GRANT_SLOT")?.parse()?;
-    let mut prepared = invisi.prepare_revoke_credit(
+    let mut prepared = invisi.prepare_revoke_credit_explicit(
         owner_address,
         token,
         shard,

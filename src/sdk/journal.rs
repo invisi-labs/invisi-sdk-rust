@@ -38,6 +38,8 @@ impl From<NoteInputRecord> for NoteInput {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OutputSnapshot {
+    #[serde(default)]
+    change: bool,
     context: ProtocolContext,
     token: Address,
     identity: U256,
@@ -52,6 +54,7 @@ pub struct OutputSnapshot {
 impl OutputSnapshot {
     fn capture(v: &NoteOutput) -> Self {
         Self {
+            change: v.change,
             context: v.context(),
             token: v.token(),
             identity: v.identity_value(),
@@ -63,7 +66,7 @@ impl OutputSnapshot {
         }
     }
     fn restore(&self) -> Result<NoteOutput> {
-        NoteOutput::restore(
+        let mut output = NoteOutput::restore(
             self.context,
             self.token,
             self.identity,
@@ -74,12 +77,16 @@ impl OutputSnapshot {
                 ciphertext: self.ciphertext.clone().into(),
                 clue: self.clue.clone().into(),
             },
-        )
+        )?;
+        output.change = self.change;
+        Ok(output)
     }
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreditInputSnapshot {
+    #[serde(default)]
+    payload: Option<Vec<u8>>,
     delivery: CreditDeliveryState,
     tree_id: u64,
     leaf_index: u16,
@@ -90,6 +97,7 @@ pub struct CreditInputSnapshot {
 impl From<&CreditInput> for CreditInputSnapshot {
     fn from(v: &CreditInput) -> Self {
         Self {
+            payload: v.payload.clone(),
             delivery: v.delivery.clone(),
             tree_id: v.tree_id,
             leaf_index: v.leaf_index,
@@ -102,6 +110,7 @@ impl From<&CreditInput> for CreditInputSnapshot {
 impl From<CreditInputSnapshot> for CreditInput {
     fn from(v: CreditInputSnapshot) -> Self {
         Self {
+            payload: v.payload,
             delivery: v.delivery,
             tree_id: v.tree_id,
             leaf_index: v.leaf_index,
@@ -156,6 +165,7 @@ impl ManagedPrepared {
             needs_authorization: value.needs_authorization,
             target: value.target.clone(),
             provenance: value.provenance.clone(),
+            provenance_factory: value.provenance_factory.clone(),
             provenance_data: value.provenance_data.clone(),
             provenance_packet: value.provenance_packet.clone(),
             broadcaster: value.broadcaster.clone(),
@@ -487,6 +497,7 @@ impl PreparedSnapshot {
                     needs_authorization: false,
                     target: "evm".into(),
                     provenance: None,
+                    provenance_factory: None,
                     provenance_data: None,
                     provenance_packet: Arc::new(std::sync::Mutex::new(
                         self.provenance_packet.clone(),
@@ -582,6 +593,7 @@ impl PreparedSnapshot {
                     needs_authorization: self.needs_authorization,
                     target: self.target.clone(),
                     provenance: None,
+                    provenance_factory: None,
                     provenance_data: None,
                     provenance_packet: Arc::new(std::sync::Mutex::new(
                         self.provenance_packet.clone(),
@@ -843,6 +855,7 @@ impl PreparedSnapshot {
                     authorization: None,
                     proof: None,
                     provenance: None,
+                    provenance_factory: None,
                     broadcaster: self.broadcaster.clone(),
                     reprice,
                 })
@@ -1047,6 +1060,7 @@ impl ManagedPrepared {
                 needs_authorization: v.needs_authorization,
                 target: v.target.clone(),
                 provenance: v.provenance.clone(),
+                provenance_factory: v.provenance_factory.clone(),
                 provenance_data: v.provenance_data.clone(),
                 provenance_packet: Arc::new(std::sync::Mutex::new(
                     v.provenance_packet
@@ -1071,6 +1085,7 @@ impl ManagedPrepared {
                 authorization: v.authorization.clone(),
                 proof: v.proof.clone(),
                 provenance: v.provenance.clone(),
+                provenance_factory: v.provenance_factory.clone(),
                 broadcaster: v.broadcaster.clone(),
                 reprice: v.reprice.clone(),
             }),

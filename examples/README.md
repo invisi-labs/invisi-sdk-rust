@@ -179,7 +179,14 @@ let response = native_host.execute(&request)?;
 let wallet = Wallet::from_response(&request, &response)?;
 let receiving_address = wallet.address()?;
 assert_eq!(Wallet::from_address(&receiving_address)?, wallet);
-let revocation = invisi.prepare_revoke_credit(owner_address, token, shard, slot, deadline, Fee::default())?;
+let revocation = invisi.prepare_revoke_credit_explicit(owner_address, token, shard, slot, deadline, Fee::default())?;
 ```
 
 `transaction-confirmation` (`07-broadcaster/confirmation.rs`) reads `CHAIN_RPC_URL` and a transaction hash argument to report independently authenticated native inclusion/finality. It performs no submission, resend, or wallet mutation.
+
+The Credit create/draw examples use request-based preparation and complete recipient
+addresses; EVM recipients require a receiving-key resolver. Updates use optional
+payloads (`None` preserves, `Some(Vec::new())` clears). Broadcaster example 01 registers
+the main native prover before quoting, so the official Provenance service and bundled
+local Source resources work without `SOURCE_*` trust/asset configuration. Explicit
+`SOURCE_PROVIDER_ID` still selects private trust overrides. Fee limits remain app configured.

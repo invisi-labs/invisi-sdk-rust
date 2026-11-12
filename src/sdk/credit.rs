@@ -1,6 +1,7 @@
 use super::*;
 #[derive(Clone, Debug)]
 pub struct CreditInput {
+    pub payload: Option<Vec<u8>>,
     pub delivery: CreditDeliveryState,
     pub tree_id: u64,
     pub leaf_index: u16,
@@ -82,6 +83,7 @@ pub struct PreparedCredit {
     pub(crate) authorization: Option<WalletAuthorization>,
     pub(crate) proof: Option<ProofBundle>,
     pub(crate) provenance: Option<Arc<PreparedProvenance>>,
+    pub(crate) provenance_factory: Option<ProvenanceFactory>,
     pub(crate) broadcaster: Option<PreparedBroadcasterState>,
     pub(crate) reprice: Option<CreditRepriceTemplate>,
 }
@@ -151,7 +153,17 @@ fn credit_capacity(n: usize) -> Result<usize> {
         .ok_or_else(|| "unsupported Credit draw capacity".into())
 }
 impl Invisi {
-    pub fn prepare_create_credit(
+    pub fn prepare_create_credit_explicit(
+        &self,
+        wallet: &Wallet,
+        state: CreditDeliveryState,
+        deadline: u64,
+        fee: Fee,
+    ) -> PreparationResult<PreparedCredit> {
+        self.prepare_create_credit_explicit_internal(wallet, state, deadline, fee)
+            .map_err(|cause| InvisiError::preparation("prepare_create_credit", cause))
+    }
+    fn prepare_create_credit_explicit_internal(
         &self,
         wallet: &Wallet,
         state: CreditDeliveryState,
@@ -213,11 +225,23 @@ impl Invisi {
             authorization: None,
             proof: None,
             provenance: self.provenance.clone(),
+            provenance_factory: self.provenance_factory.clone(),
             broadcaster: None,
             reprice: Some(template),
         })
     }
-    pub fn prepare_update_credit(
+    pub fn prepare_update_credit_explicit(
+        &self,
+        wallet: &Wallet,
+        input: CreditInput,
+        changes: crate::credit::CreditUpdateChanges,
+        deadline: u64,
+        fee: Fee,
+    ) -> PreparationResult<PreparedCredit> {
+        self.prepare_update_credit_explicit_internal(wallet, input, changes, deadline, fee)
+            .map_err(|cause| InvisiError::preparation("prepare_update_credit", cause))
+    }
+    fn prepare_update_credit_explicit_internal(
         &self,
         wallet: &Wallet,
         input: CreditInput,
@@ -283,11 +307,26 @@ impl Invisi {
             authorization: None,
             proof: None,
             provenance: self.provenance.clone(),
+            provenance_factory: self.provenance_factory.clone(),
             broadcaster: None,
             reprice: Some(template),
         })
     }
-    pub fn prepare_draw_credit(
+    pub fn prepare_draw_credit_explicit(
+        &self,
+        wallet: &Wallet,
+        inputs: Vec<CreditInput>,
+        recipient: &Wallet,
+        deadline: u64,
+        fee: Fee,
+        payload: Vec<u8>,
+    ) -> PreparationResult<PreparedCredit> {
+        self.prepare_draw_credit_explicit_internal(
+            wallet, inputs, recipient, deadline, fee, payload,
+        )
+        .map_err(|cause| InvisiError::preparation("prepare_draw_credit", cause))
+    }
+    fn prepare_draw_credit_explicit_internal(
         &self,
         wallet: &Wallet,
         mut inputs: Vec<CreditInput>,
@@ -330,11 +369,14 @@ impl Invisi {
         let prepared_inputs = map_preparation(inputs.len(), |i| {
             let input = &inputs[i];
             input.validate(chain, &anchor, context, token)?;
-            let transition = model(crate::credit::derive_credit_state(
+            let mut transition = model(crate::credit::derive_credit_state(
                 &input.delivery.note,
                 input.debit,
                 constructed_at,
             ))?;
+            if let Some(payload) = &input.payload {
+                transition.state.payload = payload.clone();
+            }
             let next = CreditDeliveryState {
                 note: transition.state.clone(),
                 owner_receiving_keys: input.delivery.owner_receiving_keys.clone(),
@@ -461,11 +503,31 @@ impl Invisi {
             authorization: None,
             proof: None,
             provenance: self.provenance.clone(),
+            provenance_factory: self.provenance_factory.clone(),
             broadcaster: None,
             reprice: Some(template),
         })
     }
-    pub fn prepare_revoke_credit(
+    pub fn prepare_revoke_credit_explicit(
+        &self,
+        owner_address: Address,
+        token: Address,
+        shard: u64,
+        slot: u16,
+        deadline: u64,
+        fee: Fee,
+    ) -> PreparationResult<PreparedCredit> {
+        self.prepare_revoke_credit_explicit_internal(
+            owner_address,
+            token,
+            shard,
+            slot,
+            deadline,
+            fee,
+        )
+        .map_err(|cause| InvisiError::preparation("prepare_revoke_credit", cause))
+    }
+    fn prepare_revoke_credit_explicit_internal(
         &self,
         owner_address: Address,
         token: Address,
@@ -516,6 +578,7 @@ impl Invisi {
             authorization: None,
             proof: None,
             provenance: self.provenance.clone(),
+            provenance_factory: self.provenance_factory.clone(),
             broadcaster: None,
             reprice: Some(template),
         })
@@ -1020,7 +1083,7 @@ mod tests {
         state.note.expiry = chain.snapshot().unwrap().timestamp;
         let deadline = state.note.expiry;
         assert!(Invisi::new(chain)
-            .prepare_create_credit(&wallet, state, deadline, Fee::default())
+            .prepare_create_credit_explicit(&wallet, state, deadline, Fee::default())
             .is_err());
     }
 }
@@ -1185,6 +1248,54 @@ pub struct CreditApprovalRequirement {
 
 #[cfg(test)]
 mod lifecycle_tests {
+    #[test]
+    fn request_create_allocates_state_and_preserves_typed_recipient_failures() {
+        use super::*;
+        let chain = chain();
+        let owner = wallet(1);
+        let spender = wallet(2);
+        let initial = initial(chain.as_ref());
+        let request = CreateCreditRequest {
+            token: word_address(initial.note.token_address).unwrap(),
+            spender: spender.address().unwrap(),
+            policy: initial.note.policy.clone(),
+            available_credit: initial.note.available_credit,
+            unlimited: false,
+            expiry: initial.note.expiry,
+            payload: vec![7],
+            deadline: 2000000100,
+            fee: Fee::default(),
+        };
+        let invisi = Invisi::new(chain);
+        let prepared = invisi
+            .prepare_create_credit(&owner, request.clone(), None)
+            .unwrap();
+        let state = prepared.successor_states()[0];
+        assert_eq!(
+            state.note.spender_wallet_identity,
+            address_word(spender.owner_address())
+        );
+        assert_eq!(state.note.payload, vec![7]);
+        assert_ne!(state.note.credit_shared_key, U256::ZERO);
+        let mut invalid = request.clone();
+        invalid.spender = "broken".into();
+        assert_eq!(
+            invisi
+                .prepare_create_credit(&owner, invalid, None)
+                .unwrap_err()
+                .code,
+            InvisiErrorCode::InvalidRecipient
+        );
+        let mut unregistered = request;
+        unregistered.spender = format!("{}", spender.owner_address());
+        assert_eq!(
+            invisi
+                .prepare_create_credit(&owner, unregistered, None)
+                .unwrap_err()
+                .code,
+            InvisiErrorCode::MissingCapability
+        );
+    }
     use super::*;
     use k256::elliptic_curve::sec1::ToEncodedPoint;
     use std::sync::Mutex;
@@ -1192,7 +1303,7 @@ mod lifecycle_tests {
     fn repeated_quotes_retain_the_original_credit_read_set() {
         let chain = chain();
         let mut prepared = Invisi::new(chain.clone())
-            .prepare_create_credit(
+            .prepare_create_credit_explicit(
                 &wallet(1),
                 initial(chain.as_ref()),
                 2000000100,
@@ -1225,7 +1336,7 @@ mod lifecycle_tests {
         let chain = chain();
         let invisi = Invisi::new(chain.clone());
         let prepared = invisi
-            .prepare_create_credit(
+            .prepare_create_credit_explicit(
                 &wallet(1),
                 initial(chain.as_ref()),
                 2000000100,
@@ -1294,6 +1405,7 @@ mod lifecycle_tests {
         let recipient = wallet(91);
         let state = initial(chain.as_ref());
         let member = |state: CreditDeliveryState| CreditInput {
+            payload: None,
             root: merkle_root(state.note.commitment().unwrap(), 0, &[U256::ZERO; 16]).unwrap(),
             delivery: state,
             tree_id: 1,
@@ -1303,10 +1415,10 @@ mod lifecycle_tests {
         };
         let plans = [
             invisi
-                .prepare_create_credit(&owner, state.clone(), 2000000100, Fee::default())
+                .prepare_create_credit_explicit(&owner, state.clone(), 2000000100, Fee::default())
                 .unwrap(),
             invisi
-                .prepare_update_credit(
+                .prepare_update_credit_explicit(
                     &owner,
                     member(state.clone()),
                     crate::credit::CreditUpdateChanges {
@@ -1318,7 +1430,7 @@ mod lifecycle_tests {
                 )
                 .unwrap(),
             invisi
-                .prepare_draw_credit(
+                .prepare_draw_credit_explicit(
                     &spender,
                     vec![member(state)],
                     &recipient,
@@ -1517,6 +1629,7 @@ mod lifecycle_tests {
         chain.block.lock().unwrap().timestamp = 1;
         let state = initial(chain.as_ref());
         let input = CreditInput {
+            payload: None,
             root: merkle_root(state.note.commitment().unwrap(), 0, &[U256::ZERO; 16]).unwrap(),
             delivery: state,
             tree_id: 1,
@@ -1539,7 +1652,7 @@ mod lifecycle_tests {
         ));
         let now = facts.construction_timestamp(&block);
         let mut prepared = Invisi::new(Arc::new(facts))
-            .prepare_draw_credit(
+            .prepare_draw_credit_explicit(
                 &wallet(2),
                 vec![input],
                 &wallet(91),
@@ -1872,6 +1985,7 @@ mod lifecycle_tests {
             (&w["merkle_paths"][0], &w["leaf_indices"][0], &w["roots"][0])
         };
         CreditInput {
+            payload: None,
             delivery: state,
             tree_id: 1,
             leaf_index: decimal(index).unwrap().to::<u16>(),
@@ -1905,11 +2019,11 @@ mod lifecycle_tests {
         let state = initial(&*chain);
         let mut prepared = match label {
             "create_credit" => invisi
-                .prepare_create_credit(&owner, state, deadline, fee)
+                .prepare_create_credit_explicit(&owner, state, deadline, fee)
                 .unwrap(),
             "credit_draw_slots1" => {
                 let mut p = invisi
-                    .prepare_draw_credit(
+                    .prepare_draw_credit_explicit(
                         &spender,
                         vec![input(state, label)],
                         &wallet(91),
@@ -1961,7 +2075,13 @@ mod lifecycle_tests {
                     ..Default::default()
                 };
                 invisi
-                    .prepare_update_credit(&owner, input(state, label), changes, deadline, fee)
+                    .prepare_update_credit_explicit(
+                        &owner,
+                        input(state, label),
+                        changes,
+                        deadline,
+                        fee,
+                    )
                     .unwrap()
             }
             _ => panic!("unsupported test operation"),
@@ -2012,10 +2132,10 @@ mod lifecycle_tests {
         };
         let p = match label {
             "create_credit" => invisi
-                .prepare_create_credit(&wallet(1), state, 2000000100, fee)
+                .prepare_create_credit_explicit(&wallet(1), state, 2000000100, fee)
                 .unwrap(),
             "credit_draw_slots1" => invisi
-                .prepare_draw_credit(
+                .prepare_draw_credit_explicit(
                     &wallet(2),
                     vec![input(state, label)],
                     &wallet(91),
@@ -2033,7 +2153,7 @@ mod lifecycle_tests {
                     ..state
                 };
                 invisi
-                    .prepare_update_credit(
+                    .prepare_update_credit_explicit(
                         &wallet(1),
                         input(state, label),
                         crate::credit::CreditUpdateChanges {
@@ -2090,6 +2210,7 @@ mod lifecycle_tests {
         second.owner_receiving_keys = wallet(3).receiving_keys;
         second.note.nonce = U256::from(76);
         let member = |state: CreditDeliveryState, tree_id, debit| CreditInput {
+            payload: None,
             root: merkle_root(state.note.commitment().unwrap(), 0, &[U256::ZERO; 16]).unwrap(),
             delivery: state,
             tree_id,
@@ -2100,7 +2221,7 @@ mod lifecycle_tests {
         let first = member(first, 1, 7u64);
         let second = member(second, 2, 8u64);
         let prepared = invisi
-            .prepare_draw_credit(
+            .prepare_draw_credit_explicit(
                 &spender,
                 vec![second, first.clone()],
                 &wallet(91),
@@ -2136,7 +2257,7 @@ mod lifecycle_tests {
             assert!(!successor.note.unlimited);
         }
         assert!(invisi
-            .prepare_draw_credit(
+            .prepare_draw_credit_explicit(
                 &spender,
                 vec![first.clone(), first],
                 &wallet(91),
@@ -2250,7 +2371,7 @@ mod revocation_tests {
         let public = signing.verifying_key().to_encoded_point(false);
         let owner = Address::from_slice(&keccak256(&public.as_bytes()[1..])[12..]);
         let original = runtime
-            .prepare_revoke_credit(
+            .prepare_revoke_credit_explicit(
                 owner,
                 Address::repeat_byte(2),
                 1,
@@ -2332,7 +2453,7 @@ mod revocation_tests {
         let owner = wallet.owner_address;
         let deadline = 2000000100;
         let direct = invisi
-            .prepare_revoke_credit(owner, token, 1, 0, deadline, Fee::default())
+            .prepare_revoke_credit_explicit(owner, token, 1, 0, deadline, Fee::default())
             .unwrap();
         let estimate = direct.estimate_gas().unwrap();
         assert!(estimate.available());
@@ -2349,7 +2470,7 @@ mod revocation_tests {
         let public = signing.verifying_key().to_encoded_point(false);
         let actual_owner = Address::from_slice(&keccak256(&public.as_bytes()[1..])[12..]);
         let prepared = invisi
-            .prepare_revoke_credit(actual_owner, token, 1, 0, deadline, Fee::default())
+            .prepare_revoke_credit_explicit(actual_owner, token, 1, 0, deadline, Fee::default())
             .unwrap();
         let (signature, recovery) = signing
             .sign_prehash_recoverable(prepared.revocation_digest().unwrap().as_slice())
@@ -2361,7 +2482,7 @@ mod revocation_tests {
         let calldata = relay.calldata(&*chain, Address::repeat_byte(9)).unwrap();
         assert!(protocol::ProtocolContract::decode_call(&calldata.data).is_ok());
         let wrong = invisi
-            .prepare_revoke_credit(
+            .prepare_revoke_credit_explicit(
                 actual_owner,
                 token,
                 1,

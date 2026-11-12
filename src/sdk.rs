@@ -958,6 +958,7 @@ impl NoteInput {
 }
 #[derive(Clone)]
 pub struct NoteOutput {
+    change: bool,
     context: ProtocolContext,
     token: Address,
     identity: U256,
@@ -1024,6 +1025,7 @@ impl NoteOutput {
         Ok(Self {
             context,
             token,
+            change: false,
             identity,
             amount: note.amount,
             commitment,
@@ -1051,6 +1053,7 @@ impl NoteOutput {
         Ok(Self {
             context,
             token,
+            change: false,
             identity,
             amount,
             commitment,
@@ -1154,6 +1157,7 @@ pub struct PreparedTransaction {
     pub(crate) needs_authorization: bool,
     pub(crate) target: String,
     pub(crate) provenance: Option<Arc<PreparedProvenance>>,
+    pub(crate) provenance_factory: Option<ProvenanceFactory>,
     pub(crate) provenance_data: Option<Vec<u8>>,
     pub(crate) provenance_packet: Arc<std::sync::Mutex<Option<ProvenanceProof>>>,
     pub(crate) broadcaster: Option<PreparedBroadcasterState>,
@@ -1170,6 +1174,7 @@ impl std::fmt::Debug for PreparedTransaction {
 pub struct Invisi {
     pub chain: Arc<dyn ChainState>,
     pub provenance: Option<Arc<PreparedProvenance>>,
+    pub provenance_factory: Option<ProvenanceFactory>,
 }
 fn sum(mut values: impl Iterator<Item = U256>) -> Result<U256> {
     values.try_fold(U256::ZERO, |a, b| {
@@ -1244,9 +1249,18 @@ impl Invisi {
         Self {
             chain,
             provenance: None,
+            provenance_factory: None,
         }
     }
     pub fn prepare_shield(
+        &self,
+        wallet: &Wallet,
+        p: ShieldPreparation,
+    ) -> PreparationResult<PreparedTransaction> {
+        self.prepare_shield_internal(wallet, p)
+            .map_err(|cause| InvisiError::preparation("prepare_shield", cause))
+    }
+    fn prepare_shield_internal(
         &self,
         wallet: &Wallet,
         p: ShieldPreparation,
@@ -1293,6 +1307,7 @@ impl Invisi {
             needs_authorization: false,
             target: "evm".into(),
             provenance: self.provenance.clone(),
+            provenance_factory: self.provenance_factory.clone(),
             provenance_data: None,
             provenance_packet: Default::default(),
             broadcaster: None,
@@ -1300,6 +1315,14 @@ impl Invisi {
         })
     }
     pub fn prepare_transfer(
+        &self,
+        wallet: &Wallet,
+        p: TransferPreparation,
+    ) -> PreparationResult<PreparedTransaction> {
+        self.prepare_transfer_internal(wallet, p)
+            .map_err(|cause| InvisiError::preparation("prepare_transfer", cause))
+    }
+    fn prepare_transfer_internal(
         &self,
         wallet: &Wallet,
         p: TransferPreparation,
@@ -1364,13 +1387,15 @@ impl Invisi {
                 return Err("explicit outputs must balance inputs/funding".into());
             }
             let wallet = wallet.ok_or("complete wallet required for change")?;
-            p.outputs.push(NoteOutput::for_recipient(
+            let mut change = NoteOutput::for_recipient(
                 context,
                 p.token,
                 wallet,
                 available - requested,
                 Vec::new(),
-            )?);
+            )?;
+            change.change = true;
+            p.outputs.push(change);
         }
         validate_outputs(&p.outputs, context, p.token)?;
         let c = capacity(p.inputs.len(), p.outputs.len())?;
@@ -1413,6 +1438,7 @@ impl Invisi {
             needs_authorization,
             target: "evm".into(),
             provenance: self.provenance.clone(),
+            provenance_factory: self.provenance_factory.clone(),
             provenance_data: None,
             provenance_packet: Default::default(),
             broadcaster: None,
@@ -1673,6 +1699,9 @@ impl PreparedTransaction {
         backend: &dyn Prover,
         recursive: impl Into<Option<bool>>,
     ) -> Result<Self> {
+        if self.provenance_factory.is_none() {
+            self.provenance_factory = prepared_broadcaster::provenance_factory_for_prover(backend)?;
+        }
         let supplied = recursive.into();
         let quoted = self
             .broadcaster
@@ -2206,6 +2235,7 @@ impl NoteOutput {
         Ok(Self {
             context,
             token,
+            change: false,
             identity,
             amount,
             commitment,
@@ -2843,7 +2873,7 @@ impl Invisi {
         &self,
         wallet: &Wallet,
         p: WithdrawalPreparation,
-    ) -> Result<PreparedTransaction> {
+    ) -> PreparationResult<PreparedTransaction> {
         self.prepare_transfer(
             wallet,
             TransferPreparation {
@@ -2917,7 +2947,7 @@ pub trait ReceivingKeyResolver {
         owner: Address,
         context: ProtocolContext,
         lookup: crate::payment_request::AddressLookup,
-    ) -> Result<ReceivingKeys>;
+    ) -> PreparationResult<ReceivingKeys>;
 }
 pub struct RpcReceivingKeyResolver<T: crate::rpc::RpcTransport, C: CanonicalHead> {
     pub client: crate::rpc::ProtocolRpcClient<T, C>,
@@ -2930,81 +2960,109 @@ impl<T: crate::rpc::RpcTransport, C: CanonicalHead> ReceivingKeyResolver
         owner: Address,
         context: ProtocolContext,
         lookup: crate::payment_request::AddressLookup,
-    ) -> Result<ReceivingKeys> {
-        if self.client.chain.chain_id().map_err(|e| e.to_string())? != context.chain_id {
-            return Err("receiving lookup chain mismatch".into());
+    ) -> PreparationResult<ReceivingKeys> {
+        if self.client.deployment().registry.is_none() {
+            return Err(InvisiError::new(
+                InvisiErrorCode::MissingCapability,
+                "receiving registry deployment required",
+                json!({"capability":"receiving registry"}),
+            ));
         }
-        let deployment = self.client.deployment();
-        if deployment.chain_id().map_err(|e| e.to_string())? != context.chain_id
-            || address_word(deployment.protocol.address) != context.protocol_address
-        {
-            return Err("receiving lookup deployment mismatch".into());
-        }
-        let registry = deployment
-            .registry
-            .as_ref()
-            .ok_or("receiving registry deployment required")?;
-        let block = self.client.chain.head().map_err(|e| e.to_string())?;
-        if block.number < registry.from_block
-            || keccak256(
-                self.client
-                    .chain
-                    .code_at(registry.address, Some(block.number))
-                    .map_err(|e| e.to_string())?,
-            ) != registry.runtime_code_hash
-        {
-            return Err("receiving registry runtime mismatch".into());
-        }
-        let call = protocol::InvisiAddressRegistry::receivingKeysOfCall {
-            walletIdentity: field_word(address_word(owner)),
-        };
-        let raw = self
-            .client
-            .chain
-            .call(registry.address, &call.abi_encode(), block.number)
-            .map_err(|e| e.to_string())?;
-        let registered =
-            protocol::InvisiAddressRegistry::receivingKeysOfCall::abi_decode_returns(&raw, true)
-                .map_err(|_| "invalid receiving registry response")?;
-        let keys = ReceivingKeys {
-            viewing_public_key: registered
-                .keys
-                .viewingPublicKey
-                .as_ref()
-                .try_into()
-                .map_err(|_| "receiving keys not registered")?,
-            clue_key: registered
-                .keys
-                .clueKey
-                .as_slice()
-                .try_into()
-                .map_err(|_| "invalid clue key")?,
-        };
-        model(keys.validate())?;
-        if lookup == crate::payment_request::AddressLookup::ProtocolRpc {
-            let indexed = self
-                .client
-                .get_receiving_address(owner)
-                .map_err(|e| e.to_string())?
-                .ok_or("receiving keys not indexed")?;
-            if indexed.viewing_public_key.as_slice() != keys.viewing_public_key
-                || indexed.clue_key.as_slice() != keys.clue_key
-                || indexed.nonce != registered.nonce
-            {
-                return Err("indexed receiving keys differ from chain registry".into());
+        let lookup_result = (|| -> Result<Option<ReceivingKeys>> {
+            if self.client.chain.chain_id().map_err(|e| e.to_string())? != context.chain_id {
+                return Err("receiving lookup chain mismatch".into());
             }
-        }
-        if self
-            .client
-            .chain
-            .block(block.number)
-            .map_err(|e| e.to_string())?
-            .hash
-            != block.hash
-        {
-            return Err("receiving registry canonical block changed".into());
-        }
-        Ok(keys)
+            let deployment = self.client.deployment();
+            if deployment.chain_id().map_err(|e| e.to_string())? != context.chain_id
+                || address_word(deployment.protocol.address) != context.protocol_address
+            {
+                return Err("receiving lookup deployment mismatch".into());
+            }
+            let registry = deployment
+                .registry
+                .as_ref()
+                .ok_or("receiving registry deployment required")?;
+            let block = self.client.chain.head().map_err(|e| e.to_string())?;
+            if block.number < registry.from_block
+                || keccak256(
+                    self.client
+                        .chain
+                        .code_at(registry.address, Some(block.number))
+                        .map_err(|e| e.to_string())?,
+                ) != registry.runtime_code_hash
+            {
+                return Err("receiving registry runtime mismatch".into());
+            }
+            let call = protocol::InvisiAddressRegistry::receivingKeysOfCall {
+                walletIdentity: field_word(address_word(owner)),
+            };
+            let raw = self
+                .client
+                .chain
+                .call(registry.address, &call.abi_encode(), block.number)
+                .map_err(|e| e.to_string())?;
+            let registered =
+                protocol::InvisiAddressRegistry::receivingKeysOfCall::abi_decode_returns(
+                    &raw, true,
+                )
+                .map_err(|_| "invalid receiving registry response")?;
+            if registered.keys.viewingPublicKey.is_empty() {
+                return Ok(None);
+            }
+            let keys = ReceivingKeys {
+                viewing_public_key: registered
+                    .keys
+                    .viewingPublicKey
+                    .as_ref()
+                    .try_into()
+                    .map_err(|_| "receiving keys not registered")?,
+                clue_key: registered
+                    .keys
+                    .clueKey
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| "invalid clue key")?,
+            };
+            model(keys.validate())?;
+            if lookup == crate::payment_request::AddressLookup::ProtocolRpc {
+                let indexed = self
+                    .client
+                    .get_receiving_address(owner)
+                    .map_err(|e| e.to_string())?
+                    .ok_or("receiving keys not indexed")?;
+                if indexed.viewing_public_key.as_slice() != keys.viewing_public_key
+                    || indexed.clue_key.as_slice() != keys.clue_key
+                    || indexed.nonce != registered.nonce
+                {
+                    return Err("indexed receiving keys differ from chain registry".into());
+                }
+            }
+            if self
+                .client
+                .chain
+                .block(block.number)
+                .map_err(|e| e.to_string())?
+                .hash
+                != block.hash
+            {
+                return Err("receiving registry canonical block changed".into());
+            }
+            Ok(Some(keys))
+        })()
+        .map_err(|cause| {
+            InvisiError::new(
+                InvisiErrorCode::RecipientLookupFailed,
+                cause,
+                json!({"address":owner}),
+            )
+        })?;
+        lookup_result.ok_or_else(|| {
+            InvisiError::new(
+                InvisiErrorCode::EvmAddressNotRegistered,
+                "receiving keys not registered",
+                json!({"address":owner}),
+            )
+        })
     }
 }
 pub trait PaymentRequestOutputExt {
@@ -3626,3 +3684,13 @@ mod local_gas_tests {
 
 mod preparation;
 pub use preparation::PreparationSnapshot;
+
+mod payment_note;
+pub use payment_note::*;
+
+mod error;
+pub use error::*;
+mod credit_requests;
+pub use credit_requests::*;
+mod disclosure_verifier;
+pub use disclosure_verifier::*;

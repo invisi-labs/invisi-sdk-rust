@@ -37,21 +37,22 @@ impl WalletSession {
     }
     pub(crate) fn prepare_cached(
         &self,
-        work: impl Fn(&Invisi) -> Result<ManagedPrepared>,
-    ) -> Result<Operation> {
+        work: impl Fn(&Invisi) -> sdk::PreparationResult<ManagedPrepared>,
+    ) -> sdk::PreparationResult<Operation> {
         let state = self.snapshot()?;
         if let Some(snapshot) = self.cached_preparation(&state)? {
             let mut invisi = self.invisi.clone();
-            invisi.chain = Arc::new(snapshot.facts.clone());
+            let facts = Arc::new(snapshot.facts.for_preparation());
+            invisi.chain = facts.clone();
             match work(&invisi) {
                 Ok(prepared) => {
-                    return self.register_with_preparation(prepared, Some(snapshot.clone()))
+                    return Ok(self.register_with_preparation(prepared, Some(snapshot.clone()))?)
                 }
-                Err(e) if e.contains("missing synchronized preparation data") => {}
+                Err(_) if facts.missing_read_observed() => {}
                 Err(e) => return Err(e),
             }
         }
-        self.register_with_preparation(work(&self.invisi)?, None)
+        Ok(self.register_with_preparation(work(&self.invisi)?, None)?)
     }
     pub(crate) fn retain_preparation(
         &self,

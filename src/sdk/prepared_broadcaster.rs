@@ -15,6 +15,8 @@ use invisi_sdk_rpc::{
     provenance_client::ProvenanceClient,
 };
 
+pub type ProvenanceFactory =
+    Arc<dyn Fn(ProtocolContext) -> Result<Arc<PreparedProvenance>> + Send + Sync>;
 #[derive(Clone)]
 pub struct PreparedProvenance {
     pub client: Arc<ProvenanceClient>,
@@ -138,21 +140,40 @@ pub struct SourceReplayBudgets {
 impl Default for SourceReplayBudgets {
     fn default() -> Self {
         Self {
-            max_root_pages: 16,
+            max_root_pages: 10,
             max_certificates: 3200,
-            max_total_leaves: 1_000_000,
+            max_total_leaves: 100_000,
         }
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BroadcasterFeeSource {
+    PublicFunding,
+    PrivateInputs,
+}
 #[derive(Clone, Debug)]
+pub struct FundingPermitRequest {
+    pub payer: Address,
+    pub amount: U256,
+    pub token_address: Address,
+    pub protocol_address: Address,
+}
+pub type FundingPermitCallback = Arc<
+    dyn Fn(FundingPermitRequest) -> Result<crate::protocol::IMetaTx::TokenPermit> + Send + Sync,
+>;
+#[derive(Clone)]
 pub struct BroadcasterOptions {
-    pub max_fee_rounds: usize,
+    pub fee_source: Option<BroadcasterFeeSource>,
+    pub funding_permit: Option<FundingPermitCallback>,
+    pub max_attempts: usize,
     pub max_fee_amount: Option<U256>,
 }
 impl Default for BroadcasterOptions {
     fn default() -> Self {
         Self {
-            max_fee_rounds: 8,
+            fee_source: None,
+            funding_permit: None,
+            max_attempts: 4,
             max_fee_amount: None,
         }
     }
@@ -270,7 +291,45 @@ impl<T: RpcTransport + Send + Sync> PreparedBroadcaster for BroadcasterClient<T>
             .map_err(|e| e.to_string())
     }
 }
+pub(crate) fn provenance_factory_for_prover(
+    prover: &dyn Prover,
+) -> Result<Option<ProvenanceFactory>> {
+    let Some(capability) = prover.get_provenance_capability()? else {
+        return Ok(None);
+    };
+    let clients = Arc::new(invisi_sdk_rpc::provenance_official::OfficialProvenanceClients::new());
+    Ok(Some(Arc::new(move |context| {
+        let client = clients.get(&source::Scope {
+            chain_id: context.chain_id,
+            protocol_address: context.protocol_address,
+        })?;
+        Ok(Arc::new(PreparedProvenance {
+            client,
+            manifest: capability.manifest.clone(),
+            prover: capability.prover.clone(),
+            budgets: SourceReplayBudgets::default(),
+        }))
+    })))
+}
+impl PreparedProvenance {
+    pub fn from_prover(context: ProtocolContext, prover: &dyn Prover) -> Result<Arc<Self>> {
+        provenance_factory_for_prover(prover)?
+            .ok_or("local provenance prover capability required")?(context)
+    }
+}
 impl Invisi {
+    /// Register local capabilities without contacting the network during preparation.
+    pub fn with_prover(mut self, prover: Arc<dyn Prover>) -> PreparationResult<Self> {
+        self.provenance_factory =
+            provenance_factory_for_prover(prover.as_ref()).map_err(|cause| {
+                InvisiError::new(
+                    InvisiErrorCode::MissingCapability,
+                    cause,
+                    json!({"capability":"local provenance prover"}),
+                )
+            })?;
+        Ok(self)
+    }
     pub fn with_provenance(mut self, capability: Arc<PreparedProvenance>) -> Result<Self> {
         capability.validate(self.chain.context(), None)?;
         self.provenance = Some(capability);
@@ -319,13 +378,26 @@ impl PreparedTransaction {
         relay: Arc<dyn PreparedBroadcaster>,
         options: &BroadcasterOptions,
     ) -> Result<Self> {
-        if options.max_fee_amount.is_none_or(|cap| cap == U256::ZERO) {
+        if self.provenance.is_none()
+            && relay.provenance_mode().is_some()
+            && !self.inputs().is_empty()
+        {
+            if let Some(factory) = &self.provenance_factory {
+                let mut prepared = self.clone();
+                prepared.provenance = Some(factory(self.context)?);
+                return prepared.with_broadcaster(chain, relay, options);
+            }
+        }
+        if options
+            .max_fee_amount
+            .is_none_or(|cap| cap == U256::ZERO || cap >= U256::from(1) << 128)
+        {
             return Err("positive maximum broadcaster fee required".into());
         }
         if self.phase != Phase::Prepared
             || self.target != "evm"
             || chain.context() != self.context
-            || options.max_fee_rounds == 0
+            || !(1..=16).contains(&options.max_attempts)
         {
             return Err("broadcaster requires unsigned EVM preparation and matching chain".into());
         }
@@ -353,10 +425,11 @@ impl PreparedTransaction {
                 .as_ref()
                 .map_or_else(|| chain.clone(), |reads| reads.for_quote(chain.clone())),
             provenance: self.provenance.clone(),
+            provenance_factory: self.provenance_factory.clone(),
         };
         let mut fee = relay.fee(self.token, Some(&self.broadcaster_intent()?.data))?;
         let mut final_candidate = None;
-        for _round in 0..options.max_fee_rounds {
+        for _round in 0..options.max_attempts {
             let amount = decimal(&json!(fee.fee_amount))?;
             if options.max_fee_amount.is_some_and(|cap| amount > cap) {
                 return Err("broadcaster fee exceeds maximum".into());
@@ -372,6 +445,44 @@ impl PreparedTransaction {
                 RepriceTemplate::Transfer(p) => {
                     let mut p = p.clone();
                     p.fee = f;
+                    let has_funding = p.funding.amount != U256::ZERO;
+                    let business = sum(p.outputs.iter().map(|o| o.amount))?
+                        .checked_add(p.withdrawal.map_or(U256::ZERO, |w| w.1))
+                        .ok_or("amount overflow")?;
+                    let available = sum(p.inputs.iter().map(|i| i.note.amount))?
+                        .checked_add(p.funding.amount)
+                        .ok_or("amount overflow")?;
+                    let source = options.fee_source.unwrap_or(
+                        if has_funding
+                            && (p.inputs.is_empty() || available.saturating_sub(business) < amount)
+                        {
+                            BroadcasterFeeSource::PublicFunding
+                        } else {
+                            BroadcasterFeeSource::PrivateInputs
+                        },
+                    );
+                    match source {
+                        BroadcasterFeeSource::PublicFunding => {
+                            if !has_funding {
+                                return Err("public funding fee requires explicit payer".into());
+                            }
+                            if p.funding.permit.deadline != U256::ZERO
+                                && options.funding_permit.is_none()
+                            {
+                                return Err("increased funding requires final gross funding permit callback".into());
+                            }
+                            p.funding.amount = p
+                                .funding
+                                .amount
+                                .checked_add(amount)
+                                .ok_or("funding overflow")?;
+                        }
+                        BroadcasterFeeSource::PrivateInputs => {
+                            if p.inputs.is_empty() {
+                                return Err("private-inputs fee requires private funds".into());
+                            }
+                        }
+                    }
                     runtime.prepare_transfer_for_owner(
                         self.owner_address,
                         self.wallet.as_ref(),
@@ -380,6 +491,14 @@ impl PreparedTransaction {
                 }
                 RepriceTemplate::Shield(p) => {
                     let mut p = p.clone();
+                    if options.fee_source == Some(BroadcasterFeeSource::PrivateInputs) {
+                        return Err("shield fee requires public funding".into());
+                    }
+                    if p.funding.permit.deadline != U256::ZERO && options.funding_permit.is_none() {
+                        return Err(
+                            "increased funding requires final gross funding permit callback".into(),
+                        );
+                    }
                     p.fee = f;
                     p.funding.amount = sum(p.outputs.iter().map(|o| o.amount))?
                         .checked_add(amount)
@@ -415,6 +534,18 @@ impl PreparedTransaction {
             fee = next;
         }
         let mut candidate = final_candidate.ok_or("broadcaster fee convergence budget exceeded")?;
+        if let Some(sign) = &options.funding_permit {
+            if candidate.funding().amount == U256::ZERO {
+                return Err("funding permit requires public funding".into());
+            }
+            let permit = sign(FundingPermitRequest {
+                payer: candidate.funding().payer,
+                amount: candidate.funding().amount,
+                token_address: candidate.token,
+                protocol_address: word_address(candidate.context.protocol_address)?,
+            })?;
+            candidate.funding_mut().permit = permit;
+        }
         let data = candidate.broadcaster_intent()?.data;
         let sidecars = Vec::new();
         let block = chain.snapshot()?;
@@ -441,6 +572,7 @@ impl PreparedTransaction {
         if let Some(reads) = retained_reads.clone() {
             candidate.preparation_reads = Some(reads);
         }
+        candidate.reprice = self.reprice.clone();
         candidate.broadcaster = Some(PreparedBroadcasterState {
             endpoint: config.endpoint,
             signer: config.quote_signer,
@@ -721,6 +853,13 @@ impl PreparedTransaction {
         Ok(packet)
     }
     pub fn prove_provenance(&self, chain: &dyn ChainState) -> Result<source::ProvenanceProof> {
+        if self.provenance.is_none() {
+            if let Some(factory) = &self.provenance_factory {
+                let mut prepared = self.clone();
+                prepared.provenance = Some(factory(self.context)?);
+                return prepared.prove_provenance(chain);
+            }
+        }
         if let Some(packet) = self.export_provenance_proof()? {
             self.validate_cached_provenance(&packet)?;
             return Ok(packet);
@@ -786,6 +925,13 @@ impl PreparedTransaction {
     }
     /// Replaces cached evidence only after fresh proving and local validation succeed.
     pub fn reprove_provenance(&self, chain: &dyn ChainState) -> Result<source::ProvenanceProof> {
+        if self.provenance.is_none() {
+            if let Some(factory) = &self.provenance_factory {
+                let mut prepared = self.clone();
+                prepared.provenance = Some(factory(self.context)?);
+                return prepared.reprove_provenance(chain);
+            }
+        }
         let cap = self
             .provenance
             .as_ref()
@@ -1608,8 +1754,9 @@ mod tests {
                 chain,
                 relay.clone(),
                 &BroadcasterOptions {
-                    max_fee_rounds: 1,
-                    max_fee_amount: Some(U256::from(100))
+                    max_attempts: 1,
+                    max_fee_amount: Some(U256::from(100)),
+                    ..Default::default()
                 }
             )
             .unwrap_err()
@@ -2047,5 +2194,57 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn exact_public_transfer_adds_fee_and_requests_only_final_gross_permit() {
+        let (chain, wallet, mut p, _) = note_fixture();
+        let business = sum(p.inputs.iter().map(|i| i.note.amount)).unwrap() + U256::from(20);
+        p.withdrawal = None;
+        p.outputs = vec![
+            NoteOutput::identity(chain.context(), p.token, U256::from(123), business).unwrap(),
+        ];
+        p.funding = abi::FundingParams {
+            amount: U256::from(20),
+            payer: wallet.owner_address(),
+            ..empty_funding()
+        };
+        p.fee = Fee::default();
+        p.automatic_change = false;
+        let prepared = Invisi::new(chain.clone())
+            .prepare_transfer(&wallet, p)
+            .unwrap();
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = calls.clone();
+        let quoted = prepared
+            .with_broadcaster(
+                chain,
+                Arc::new(SignedRelay {
+                    fees: 0.into(),
+                    quotes: 0.into(),
+                }),
+                &BroadcasterOptions {
+                    max_fee_amount: Some(U256::from(100)),
+                    funding_permit: Some(Arc::new(move |request| {
+                        seen.lock().unwrap().push(request.amount);
+                        Ok(empty_funding().permit)
+                    })),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(quoted.funding().amount > U256::from(20));
+        assert_eq!(*calls.lock().unwrap(), vec![quoted.funding().amount]);
+        assert_eq!(quoted.outputs()[0].amount(), business);
+    }
     include!("preparation_profile.rs");
+}
+
+#[cfg(test)]
+mod alignment_defaults_tests {
+    use super::*;
+    #[test]
+    fn bounded_defaults_match_portable_clients() {
+        assert_eq!(BroadcasterOptions::default().max_attempts, 4);
+        assert_eq!(SourceReplayBudgets::default().max_root_pages, 10);
+        assert_eq!(SourceReplayBudgets::default().max_total_leaves, 100_000);
+    }
 }

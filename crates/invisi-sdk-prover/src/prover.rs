@@ -165,6 +165,9 @@ pub fn request(
     })
 }
 pub trait Prover: Send + Sync {
+    fn get_provenance_capability(&self) -> Result<Option<ProvenanceCapability>> {
+        Ok(None)
+    }
     fn prove(&self, request: &ProvingRequest) -> Result<ProofBundle>;
     fn verify(&self, bundle: &ProofBundle, statement: &ProofStatement) -> Result<bool>;
 }
@@ -450,6 +453,9 @@ impl NativeProver {
     }
 }
 impl Prover for NativeProver {
+    fn get_provenance_capability(&self) -> Result<Option<ProvenanceCapability>> {
+        self.provenance_capability().map(Some)
+    }
     fn prove(&self, request: &ProvingRequest) -> Result<ProofBundle> {
         let (artifact, key) = self.assets.load(&request.statement)?;
         validate_assets(&request.statement, &artifact, &key)?;
@@ -838,4 +844,4 @@ mod timeout_tests {
 }
 
 mod source_native;
-pub use source_native::NativeSourceProver;
+pub use source_native::{NativeSourceProver, ProvenanceCapability};

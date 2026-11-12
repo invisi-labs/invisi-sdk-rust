@@ -11,7 +11,7 @@ pub enum OperationStatus {
     Submitted,
     Confirmed,
     Reverted,
-    Cancelled,
+    Failed,
     Expired,
     Uncertain,
     Reorged,
@@ -20,7 +20,7 @@ impl OperationStatus {
     pub fn terminal(self) -> bool {
         matches!(
             self,
-            Self::Confirmed | Self::Reverted | Self::Cancelled | Self::Expired
+            Self::Confirmed | Self::Reverted | Self::Failed | Self::Expired
         )
     }
 }

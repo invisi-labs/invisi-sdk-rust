@@ -507,8 +507,8 @@ fn reservations_are_atomic_and_resume_invalidates_prior_handles() {
     let id = first.id().to_owned();
     assert!(h.session.prepare_transfer(transfer(&h)).is_err());
     let resumed = h.session.resume(&id, None).unwrap();
-    assert!(first.cancel().is_err());
-    resumed.cancel().unwrap();
+    assert!(first.abandon().is_err());
+    resumed.abandon().unwrap();
     assert!(h.session.snapshot().unwrap().notes[&h.commitment]
         .reserved_by
         .is_none());
@@ -619,11 +619,11 @@ fn durable_journal_omits_wallet_authorization_and_requires_reverification_on_res
     assert_eq!(operation.phase(), sdk::Phase::Proved);
     let resumed = h.session.resume(&id, Some(&Backend)).unwrap();
     assert_eq!(resumed.phase(), sdk::Phase::Proved);
-    assert!(operation.cancel().is_err());
+    assert!(operation.abandon().is_err());
     let reset = h.session.resume(&id, None).unwrap();
     assert_eq!(reset.phase(), sdk::Phase::Prepared);
-    assert!(resumed.cancel().is_err());
-    reset.cancel().unwrap();
+    assert!(resumed.abandon().is_err());
+    reset.abandon().unwrap();
 }
 fn tracked_sweep(h: &Harness) -> Operation {
     let operation = h
@@ -654,7 +654,7 @@ fn exported_operations_cannot_cancel_and_reconciliation_checks_exact_transaction
     let h = synced();
     let operation = tracked_sweep(&h);
     let id = operation.id().to_owned();
-    assert!(operation.cancel().is_err());
+    assert!(operation.abandon().is_err());
     assert!(h.session.snapshot().unwrap().notes[&h.commitment]
         .reserved_by
         .is_some());
@@ -992,7 +992,7 @@ fn credit_inventory_is_separate_and_canonical_draw_recovers_owned_successor_with
     let id = credit_key(credit_commitment, CreditRole::Owner);
     let operation = h
         .session
-        .prepare_update_credit(
+        .prepare_update_credit_explicit(
             &id,
             crate::credit::CreditUpdateChanges::default(),
             2_000_000_100,
@@ -1001,7 +1001,7 @@ fn credit_inventory_is_separate_and_canonical_draw_recovers_owned_successor_with
         .unwrap();
     assert!(h
         .session
-        .prepare_update_credit(
+        .prepare_update_credit_explicit(
             &id,
             crate::credit::CreditUpdateChanges::default(),
             2_000_000_100,
@@ -1009,8 +1009,8 @@ fn credit_inventory_is_separate_and_canonical_draw_recovers_owned_successor_with
         )
         .is_err());
     let resumed = h.session.resume(operation.id(), None).unwrap();
-    assert!(operation.cancel().is_err());
-    resumed.cancel().unwrap();
+    assert!(operation.abandon().is_err());
+    resumed.abandon().unwrap();
 }
 
 #[test]
@@ -1222,7 +1222,7 @@ fn credit_relay_context_survives_encrypted_restart_and_fences_uncertain_submissi
         spender_receiving_keys: bob.receiving_keys().clone(),
     };
     let operation = session
-        .prepare_create_credit(state, 2000000100, sdk::Fee::default())
+        .prepare_create_credit_explicit(state, 2000000100, sdk::Fee::default())
         .unwrap();
     let id = operation.id().to_string();
     drop(operation);
@@ -1267,7 +1267,7 @@ fn credit_relay_context_survives_encrypted_restart_and_fences_uncertain_submissi
         .contains("uncertain"));
     assert_eq!(relay.attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert!(restarted.snapshot().unwrap().operations[&id].externalized);
-    assert!(restarted.cancel_operation(&id, None).is_err());
+    assert!(restarted.abandon_operation(&id, None).is_err());
     assert_eq!(
         restarted.snapshot().unwrap().operations[&id]
             .broadcaster_id
@@ -1512,7 +1512,7 @@ fn managed_note_and_credit_estimate_without_externalizing() {
                 spender_receiving_keys: wallet(2).receiving_keys().clone(),
             };
             h.session
-                .prepare_create_credit(state, 2000000100, sdk::Fee::default())
+                .prepare_create_credit_explicit(state, 2000000100, sdk::Fee::default())
                 .unwrap()
         } else {
             h.session.prepare_transfer(transfer(&h)).unwrap()
@@ -2087,14 +2087,14 @@ fn history_generation_change_invalidates_before_status_or_funds_can_reuse_invent
 #[test]
 fn paginated_history_includes_active_records_and_rejects_revision_changes() {
     let h = synced();
-    let page = h.session.history_page(None, 1).unwrap();
+    let page = h.session.record_page(None, 1).unwrap();
     assert_eq!(page.entries.len(), 1);
     assert!(matches!(page.entries[0].record, WalletRecord::Note(_)));
     let mut state = h.session.snapshot().unwrap();
     state.recovery_boundary = Some(10);
     h.session.commit(state).unwrap();
     if let Some(cursor) = page.next_cursor {
-        assert!(h.session.history_page(Some(&cursor), 1).is_err())
+        assert!(h.session.record_page(Some(&cursor), 1).is_err())
     }
 }
 #[test]
@@ -3212,11 +3212,12 @@ fn preparation_snapshot_misses_forks_generations_and_capture_revision_races_fail
     session.commit(state).unwrap();
     // Incomplete snapshots fall back online, while a disconnected reader cannot manufacture facts.
     let op = session.prepare_transfer(transfer(&h)).unwrap();
-    op.cancel().unwrap();
+    op.abandon().unwrap();
     h.chain.offline.store(true, Ordering::SeqCst);
     assert!(session
         .prepare_transfer(transfer(&h))
         .unwrap_err()
+        .message
         .contains("offline"));
     h.chain.offline.store(false, Ordering::SeqCst);
     session
@@ -3231,6 +3232,7 @@ fn preparation_snapshot_misses_forks_generations_and_capture_revision_races_fail
     assert!(session
         .prepare_transfer(transfer(&h))
         .unwrap_err()
+        .message
         .contains("offline"));
     h.chain.offline.store(false, Ordering::SeqCst);
     let mut state = session.snapshot().unwrap();
@@ -3324,11 +3326,11 @@ fn encrypted_reopen_prepares_all_credit_operations_offline_and_live_gate_rejects
                 created.note.revocation_slot = 1;
                 created.note.nonce += U256::from(1);
                 session
-                    .prepare_create_credit(created, 2_000_000_100, sdk::Fee::default())
+                    .prepare_create_credit_explicit(created, 2_000_000_100, sdk::Fee::default())
                     .unwrap()
             }
             "update" => session
-                .prepare_update_credit(
+                .prepare_update_credit_explicit(
                     &credit_key(commitment, CreditRole::Owner),
                     crate::credit::CreditUpdateChanges {
                         increase_available_credit: U256::from(1),
@@ -3339,7 +3341,7 @@ fn encrypted_reopen_prepares_all_credit_operations_offline_and_live_gate_rejects
                 )
                 .unwrap(),
             "draw" => session
-                .prepare_draw_credit(
+                .prepare_draw_credit_explicit(
                     &[(credit_key(commitment, CreditRole::Spender), U256::from(5))],
                     &wallet(2),
                     2_000_000_100,
@@ -3348,7 +3350,7 @@ fn encrypted_reopen_prepares_all_credit_operations_offline_and_live_gate_rejects
                 )
                 .unwrap(),
             _ => session
-                .prepare_revoke_credit(token, 1, 0, 2_000_000_100, sdk::Fee::default())
+                .prepare_revoke_credit_explicit(token, 1, 0, 2_000_000_100, sdk::Fee::default())
                 .unwrap(),
         };
         let operation = if kind == "revoke" {
@@ -3615,4 +3617,172 @@ fn record_store_reopen_uses_incrementally_aligned_paths_and_rejects_corrupt_repl
         .unwrap()
         .data
         .is_empty());
+}
+
+#[test]
+fn full_history_observes_public_generation_fence() {
+    use crate::public_history::*;
+    let h = synced();
+    let history = Arc::new(
+        PublicHistory::new(
+            Arc::new(
+                PublicHistoryStore::new(
+                    Arc::new(MemoryAtomicRecords::default()),
+                    Retention::default(),
+                )
+                .unwrap(),
+            ),
+            PublicHistoryScope {
+                chain_id: context().chain_id,
+                protocol_address: sdk::word_address(context().protocol_address).unwrap(),
+                runtime_code_hash: B256::with_last_byte(42),
+                deployment_block: 0,
+            },
+            h.source.clone(),
+        )
+        .unwrap(),
+    );
+    let session = h
+        .session
+        .clone()
+        .with_public_history(history.clone())
+        .unwrap();
+    history.store.rewind(&history.scope, None).unwrap();
+    assert!(session.history(None).unwrap().invalidated);
+}
+
+#[test]
+fn business_history_page_projects_metadata_and_abandon_is_failed() {
+    let h = synced();
+    let operation = h.session.prepare_transfer(transfer(&h)).unwrap();
+    let id = operation.id().to_owned();
+    operation.abandon().unwrap();
+    let page = h
+        .session
+        .history_page(HistoryDirection::Outgoing, None, 10, None)
+        .unwrap();
+    assert!(!page.invalidated);
+    assert_eq!(
+        page.checked_through,
+        h.session.snapshot().unwrap().discovery_through
+    );
+    assert_eq!(page.revision, h.session.snapshot().unwrap().revision);
+    assert_eq!(page.items.len(), 1);
+    assert!(!page.items[0].archived);
+    assert_eq!(page.items[0].canonical, "current");
+    let BusinessHistoryEntry::Outgoing(entry) = &page.items[0].entry else {
+        panic!("outgoing business entry required")
+    };
+    assert_eq!(entry.id, id);
+    assert_eq!(entry.status, OperationStatus::Failed);
+    assert!(h.session.snapshot().unwrap().notes[&h.commitment]
+        .reserved_by
+        .is_none());
+    let incoming = h
+        .session
+        .history_page(HistoryDirection::Incoming, None, 10, None)
+        .unwrap();
+    assert!(matches!(
+        incoming.items[0].entry,
+        BusinessHistoryEntry::Incoming(_)
+    ));
+}
+
+#[test]
+fn archived_history_keeps_its_captured_public_generation() {
+    let h = synced();
+    let mut state = h.session.snapshot().unwrap();
+    state.revision = 0;
+    state.public_history_generation = Some(1);
+    state.notes.get_mut(&h.commitment).unwrap().spent = true;
+    let store = Arc::new(
+        RecordWalletStore::with_recent_records(
+            Arc::new(MemoryAtomicRecords::default()),
+            [8; 32],
+            0,
+        )
+        .unwrap(),
+    );
+    store
+        .compare_and_swap(&h.session.scope.key(), 0, state)
+        .unwrap();
+    let mut session = h.session.clone();
+    session.store = store.clone();
+    let page = session
+        .history_page(HistoryDirection::Incoming, None, 10, None)
+        .unwrap();
+    assert!(page.items[0].archived);
+    assert_eq!(page.items[0].canonical, "current");
+    let mut next = store.snapshot(&session.scope.key()).unwrap();
+    next.public_history_generation = Some(2);
+    next.invalidated = false;
+    let revision = next.revision;
+    store
+        .compare_and_swap(&session.scope.key(), revision, next)
+        .unwrap();
+    let page = session
+        .history_page(HistoryDirection::Incoming, None, 10, None)
+        .unwrap();
+    assert!(!page.invalidated);
+    assert_eq!(page.items[0].canonical, "unknown");
+}
+
+#[test]
+fn session_preparation_preserves_structured_recipient_and_selection_errors() {
+    let h = synced();
+    let request = sdk::CreateCreditRequest {
+        token: sdk::word_address(h.note.token_address).unwrap(),
+        spender: "invalid".into(),
+        policy: crate::credit::CreditPolicy::default(),
+        available_credit: U256::from(1),
+        unlimited: false,
+        expiry: 3000000000,
+        payload: vec![],
+        deadline: 2000000100,
+        fee: sdk::Fee::default(),
+    };
+    let error = h
+        .session
+        .prepare_create_credit(request.clone(), None)
+        .err()
+        .unwrap();
+    assert_eq!(error.code, sdk::InvisiErrorCode::InvalidRecipient);
+    assert_eq!(error.details["operation"], "prepare_create_credit");
+    let mut missing = request;
+    missing.spender = format!("{}", Address::with_last_byte(9));
+    let error = h
+        .session
+        .prepare_create_credit(missing.clone(), None)
+        .err()
+        .unwrap();
+    assert_eq!(error.code, sdk::InvisiErrorCode::MissingCapability);
+    assert_eq!(error.details["capability"], "receiving key resolver");
+    struct Unregistered;
+    impl sdk::ReceivingKeyResolver for Unregistered {
+        fn resolve(
+            &self,
+            owner: Address,
+            _: ProtocolContext,
+            _: crate::payment_request::AddressLookup,
+        ) -> sdk::PreparationResult<crate::address::ReceivingKeys> {
+            Err(sdk::InvisiError::new(
+                sdk::InvisiErrorCode::EvmAddressNotRegistered,
+                "unregistered",
+                serde_json::json!({"address":owner}),
+            ))
+        }
+    }
+    let error = h
+        .session
+        .prepare_create_credit(missing, Some(&Unregistered))
+        .err()
+        .unwrap();
+    assert_eq!(error.code, sdk::InvisiErrorCode::EvmAddressNotRegistered);
+    assert_eq!(error.details["operation"], "prepare_create_credit");
+    let mut options = transfer(&h);
+    options.inputs.clear();
+    options.withdrawal = Some((h.session.wallet.owner_address(), U256::from(1000000)));
+    let error = h.session.prepare_transfer(options).err().unwrap();
+    assert_eq!(error.code, sdk::InvisiErrorCode::PreparationFailed);
+    assert_eq!(error.details["operation"], "prepare_transfer");
 }

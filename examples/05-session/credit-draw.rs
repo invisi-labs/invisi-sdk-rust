@@ -112,7 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         // The SDK rechecks both inputs and creates one recipient Note for their summed debits.
         let recipient = Wallet::from_address(&env::var("RECIPIENT_ADDRESS")?)?;
-        session.prepare_draw_credit(
+        session.prepare_draw_credit_explicit(
             &selections,
             &recipient,
             deadline,

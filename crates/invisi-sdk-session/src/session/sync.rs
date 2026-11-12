@@ -597,7 +597,7 @@ impl PendingWalletRefresh {
             next.discovery_ranges.clear();
             for record in next.operations.values_mut() {
                 if if self.offline {
-                    record.status != OperationStatus::Cancelled
+                    record.status != OperationStatus::Failed
                 } else {
                     !session.terminal_is_canonical(record)
                 } {

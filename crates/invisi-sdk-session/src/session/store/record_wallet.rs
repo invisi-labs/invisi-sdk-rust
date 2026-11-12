@@ -8,6 +8,7 @@ pub enum WalletRecord {
     Operation(super::super::OperationRecord),
 }
 pub struct WalletRecordEntry {
+    pub public_history_generation: Option<u64>,
     pub cursor: String,
     pub record: WalletRecord,
 }
@@ -33,6 +34,8 @@ struct Manifest {
 }
 #[derive(Serialize, Deserialize)]
 struct Row {
+    #[serde(default)]
+    public_history_generation: Option<u64>,
     id: String,
     record: WalletRecord,
     archive: Option<u64>,
@@ -355,6 +358,7 @@ impl WalletStore for RecordWalletStore {
                 return Err("archive locator binding mismatch".into());
             }
             entries.push(WalletRecordEntry {
+                public_history_generation: row.public_history_generation,
                 cursor: key,
                 record: row.record,
             });
@@ -434,6 +438,7 @@ impl WalletStore for RecordWalletStore {
                 None
             };
             let row = Row {
+                public_history_generation: next.public_history_generation,
                 id: id.clone(),
                 record,
                 archive: archived,

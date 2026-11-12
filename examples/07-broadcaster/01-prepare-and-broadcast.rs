@@ -18,7 +18,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         serde_json::from_slice(&fs::read(env::var("DEPLOYMENT_JSON")?)?)?;
     let ethereum = EthereumChain::new(HttpTransport::new(&env::var("ETH_RPC_URL")?)?);
     let chain = Arc::new(RpcChainState::new(ethereum, deployment.clone())?);
-    let mut invisi = Invisi::new(chain.clone());
+    let prover = Arc::new(invisi_sdk::prover::NativeProver {
+        bb_binary: env::var("BB_BINARY")?.into(),
+        timeout: std::time::Duration::from_secs(600),
+        threads: 4,
+        assets: Arc::new(invisi_sdk::prover::DirectoryAssets {
+            directory: env::var("PROVER_ASSETS")?.into(),
+        }),
+        witness_executor: Arc::new(invisi_sdk::prover::NoirCli {
+            binary: env::var("NOIR_EXECUTOR")?.into(),
+            timeout: std::time::Duration::from_secs(120),
+        }),
+    });
+    let mut invisi = Invisi::new(chain.clone()).with_prover(prover.clone())?;
     if env::var("SOURCE_PROVIDER_ID").is_ok() {
         invisi = invisi.with_provenance(Arc::new(
             sdk::PreparedProvenance::from_local_configuration(support::source_configuration()?)?,
@@ -92,22 +104,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let prepared = prepared.with_wallet_signature(&signature)?;
 
     // Proof generation uses pinned circuit assets and independently verifies the resulting proof.
-    let prover = invisi_sdk::prover::NativeProver {
-        bb_binary: env::var("BB_BINARY")?.into(),
-        timeout: std::time::Duration::from_secs(600),
-        threads: 4,
-        assets: Arc::new(invisi_sdk::prover::DirectoryAssets {
-            directory: env::var("PROVER_ASSETS")?.into(),
-        }),
-        witness_executor: Arc::new(invisi_sdk::prover::NoirCli {
-            binary: env::var("NOIR_EXECUTOR")?.into(),
-            timeout: std::time::Duration::from_secs(120),
-        }),
-    };
 
-    let mut prepared = prepared.prove(&prover, None)?;
+    let mut prepared = prepared.prove(prover.as_ref(), None)?;
     prepared.freeze_broadcaster_evidence(chain.as_ref(), relay.as_ref())?;
     let status = prepared.submit_broadcaster(chain.as_ref(), relay.as_ref())?;
     println!("{}", serde_json::to_string_pretty(&status)?);
+    let limit = std::time::Duration::from_secs(
+        env::var("CONFIRMATION_TIMEOUT_SECONDS")
+            .unwrap_or_else(|_| "180".into())
+            .parse()?,
+    );
+    let until = std::time::Instant::now() + limit;
+    let mut status = status;
+    let transaction = loop {
+        if let Some(hash) = status.transaction_hash {
+            break hash;
+        }
+        if matches!(
+            status.state,
+            invisi_sdk::broadcaster::StatusState::Rejected
+                | invisi_sdk::broadcaster::StatusState::Expired
+                | invisi_sdk::broadcaster::StatusState::Reverted
+        ) {
+            return Err("broadcast failed before canonical inclusion".into());
+        }
+        if std::time::Instant::now() >= until {
+            return Err(
+                "broadcast status timed out; preserve the submitted operation for recovery".into(),
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        status = relay.status(&status.id)?;
+    };
+    let until = std::time::Instant::now() + limit;
+    loop {
+        let observed = chain.transaction_confirmation(transaction)?;
+        if observed.level == invisi_sdk::rpc::ConfirmationLevel::Finalized
+            && observed.status == invisi_sdk::rpc::FinalityStatus::Available
+        {
+            break;
+        }
+        if std::time::Instant::now() >= until {
+            return Err("native finality wait timed out; do not resend the transaction".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    let independent = EthereumChain::new(HttpTransport::new(&env::var("ETH_RPC_URL")?)?);
+    let receipt = invisi_sdk::rpc::ChainReceipts::receipt(&independent, transaction)?
+        .ok_or("finalized receipt unavailable")?;
+    if !receipt.success {
+        return Err("canonical transaction reverted".into());
+    }
+    if prepared
+        .broadcaster_state()
+        .is_some_and(|state| state.provenance_mode().is_some())
+    {
+        let source = support::source_client()?;
+        let packet = prepared.prove_provenance(chain.as_ref())?;
+        let accepted = sdk::submit_provenance_proof(source.as_ref(), &packet)?;
+        let tracking = invisi_sdk::provenance_tracking::tracking_from_result(&accepted, None)?;
+        let result =
+            source.wait_tracking(&tracking.id, std::time::Duration::from_millis(500), limit)?;
+        println!("Source tracking after native finality: {result}");
+    }
     Ok(())
 }

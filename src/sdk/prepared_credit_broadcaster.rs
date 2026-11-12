@@ -62,12 +62,18 @@ impl PreparedCredit {
         relay: Arc<dyn PreparedBroadcaster>,
         options: &BroadcasterOptions,
     ) -> Result<Self> {
-        if options.max_fee_amount.is_none_or(|cap| cap == U256::ZERO) {
+        if options.fee_source.is_some() || options.funding_permit.is_some() {
+            return Err("Credit fees use owner allowance or gross draw deduction".into());
+        }
+        if options
+            .max_fee_amount
+            .is_none_or(|cap| cap == U256::ZERO || cap >= U256::from(1) << 128)
+        {
             return Err("positive maximum broadcaster fee required".into());
         }
         if self.phase != Phase::Prepared
             || chain.context() != self.context
-            || options.max_fee_rounds == 0
+            || !(1..=16).contains(&options.max_attempts)
         {
             return Err("Credit relay requires unsigned preparation and matching chain".into());
         }
@@ -87,13 +93,14 @@ impl PreparedCredit {
                 .as_ref()
                 .map_or_else(|| chain.clone(), |reads| reads.for_quote(chain.clone())),
             provenance: self.provenance.clone(),
+            provenance_factory: self.provenance_factory.clone(),
         };
         let template = self
             .reprice
             .as_ref()
             .ok_or("original Credit business preparation required for explicit repricing")?;
         let mut fee = relay.fee(self.token, Some(&self.broadcaster_intent()?.data))?;
-        for _round in 0..options.max_fee_rounds {
+        for _round in 0..options.max_attempts {
             if fee.fee_recipient != config.fee_recipient {
                 return Err("Credit relay fee recipient mismatch".into());
             }
@@ -110,16 +117,17 @@ impl PreparedCredit {
                 return Err("positive Credit relay fee required".into());
             }
             let mut candidate = match template {
-                CreditRepriceTemplate::Create(state, deadline) => runtime.prepare_create_credit(
-                    self.wallet
-                        .as_ref()
-                        .ok_or("complete wallet required for Credit repricing")?,
-                    state.clone(),
-                    *deadline,
-                    f,
-                )?,
+                CreditRepriceTemplate::Create(state, deadline) => runtime
+                    .prepare_create_credit_explicit(
+                        self.wallet
+                            .as_ref()
+                            .ok_or("complete wallet required for Credit repricing")?,
+                        state.clone(),
+                        *deadline,
+                        f,
+                    )?,
                 CreditRepriceTemplate::Update(input, changes, deadline) => runtime
-                    .prepare_update_credit(
+                    .prepare_update_credit_explicit(
                         self.wallet
                             .as_ref()
                             .ok_or("complete wallet required for Credit repricing")?,
@@ -129,7 +137,7 @@ impl PreparedCredit {
                         f,
                     )?,
                 CreditRepriceTemplate::Draw(inputs, recipient, deadline, payload) => runtime
-                    .prepare_draw_credit(
+                    .prepare_draw_credit_explicit(
                         self.wallet
                             .as_ref()
                             .ok_or("complete wallet required for Credit repricing")?,
@@ -140,7 +148,7 @@ impl PreparedCredit {
                         payload.clone(),
                     )?,
                 CreditRepriceTemplate::Revoke(token, shard, slot, deadline) => runtime
-                    .prepare_revoke_credit(
+                    .prepare_revoke_credit_explicit(
                         self.owner_address,
                         *token,
                         *shard,

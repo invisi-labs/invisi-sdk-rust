@@ -91,6 +91,7 @@ pub fn credit_inputs(state: &WalletState, token: Address, role: CreditRole) -> V
                 && value.delivery.note.token_address == sdk::address_word(token)
         })
         .map(|value| CreditInput {
+            payload: None,
             delivery: value.delivery.clone(),
             tree_id: value.tree_id,
             leaf_index: value.leaf_index,

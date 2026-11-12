@@ -643,9 +643,9 @@ impl Operation {
             _ => Err("funds transfer required".into()),
         }
     }
-    pub fn cancel(self) -> Result<()> {
+    pub fn abandon(self) -> Result<()> {
         self.session
-            .cancel_operation(&self.id, Some(self.generation))
+            .abandon_operation(&self.id, Some(self.generation))
     }
 }
 fn phase_status(phase: Phase) -> OperationStatus {
@@ -767,7 +767,17 @@ impl WalletSession {
             requests: BTreeMap::new(),
         })
     }
-    pub fn prepare_transfer(&self, mut options: TransferPreparation) -> Result<Operation> {
+    pub fn prepare_transfer(
+        &self,
+        options: TransferPreparation,
+    ) -> sdk::PreparationResult<Operation> {
+        self.prepare_transfer_internal(options)
+            .map_err(|error| error.with_operation("prepare_transfer"))
+    }
+    fn prepare_transfer_internal(
+        &self,
+        mut options: TransferPreparation,
+    ) -> sdk::PreparationResult<Operation> {
         if options.inputs.is_empty() {
             let state = self.snapshot()?;
             if state.invalidated {
@@ -818,35 +828,63 @@ impl WalletSession {
             ))
         })
     }
-    pub fn prepare_shield(&self, options: ShieldPreparation) -> Result<Operation> {
+    pub fn prepare_shield(&self, options: ShieldPreparation) -> sdk::PreparationResult<Operation> {
+        self.prepare_shield_internal(options)
+            .map_err(|error| error.with_operation("prepare_shield"))
+    }
+    fn prepare_shield_internal(
+        &self,
+        options: ShieldPreparation,
+    ) -> sdk::PreparationResult<Operation> {
         self.prepare_cached(|invisi| {
             Ok(ManagedPrepared::Funds(
                 invisi.prepare_shield(&self.wallet, options.clone())?,
             ))
         })
     }
-    pub fn prepare_create_credit(
+    pub fn prepare_create_credit_explicit(
         &self,
         state: CreditDeliveryState,
         deadline: u64,
         fee: sdk::Fee,
-    ) -> Result<Operation> {
+    ) -> sdk::PreparationResult<Operation> {
+        self.prepare_create_credit_explicit_internal(state, deadline, fee)
+            .map_err(|error| error.with_operation("prepare_create_credit"))
+    }
+    fn prepare_create_credit_explicit_internal(
+        &self,
+        state: CreditDeliveryState,
+        deadline: u64,
+        fee: sdk::Fee,
+    ) -> sdk::PreparationResult<Operation> {
         self.prepare_cached(|invisi| {
-            Ok(ManagedPrepared::Credit(invisi.prepare_create_credit(
-                &self.wallet,
-                state.clone(),
-                deadline,
-                fee.clone(),
-            )?))
+            Ok(ManagedPrepared::Credit(
+                invisi.prepare_create_credit_explicit(
+                    &self.wallet,
+                    state.clone(),
+                    deadline,
+                    fee.clone(),
+                )?,
+            ))
         })
     }
-    pub fn prepare_update_credit(
+    pub fn prepare_update_credit_explicit(
         &self,
         key: &str,
         changes: crate::credit::CreditUpdateChanges,
         deadline: u64,
         fee: sdk::Fee,
-    ) -> Result<Operation> {
+    ) -> sdk::PreparationResult<Operation> {
+        self.prepare_update_credit_explicit_internal(key, changes, deadline, fee)
+            .map_err(|error| error.with_operation("prepare_update_credit"))
+    }
+    fn prepare_update_credit_explicit_internal(
+        &self,
+        key: &str,
+        changes: crate::credit::CreditUpdateChanges,
+        deadline: u64,
+        fee: sdk::Fee,
+    ) -> sdk::PreparationResult<Operation> {
         let state = self.snapshot()?;
         let credit = state.credits.get(key).ok_or("Credit input not found")?;
         if credit.role != CreditRole::Owner
@@ -858,23 +896,36 @@ impl WalletSession {
         }
         let input = credit_input(credit, U256::ZERO);
         self.prepare_cached(|invisi| {
-            Ok(ManagedPrepared::Credit(invisi.prepare_update_credit(
-                &self.wallet,
-                input.clone(),
-                changes.clone(),
-                deadline,
-                fee.clone(),
-            )?))
+            Ok(ManagedPrepared::Credit(
+                invisi.prepare_update_credit_explicit(
+                    &self.wallet,
+                    input.clone(),
+                    changes.clone(),
+                    deadline,
+                    fee.clone(),
+                )?,
+            ))
         })
     }
-    pub fn prepare_draw_credit(
+    pub fn prepare_draw_credit_explicit(
         &self,
         selections: &[(String, U256)],
         recipient: &Wallet,
         deadline: u64,
         fee: sdk::Fee,
         payload: Vec<u8>,
-    ) -> Result<Operation> {
+    ) -> sdk::PreparationResult<Operation> {
+        self.prepare_draw_credit_explicit_internal(selections, recipient, deadline, fee, payload)
+            .map_err(|error| error.with_operation("prepare_draw_credit"))
+    }
+    fn prepare_draw_credit_explicit_internal(
+        &self,
+        selections: &[(String, U256)],
+        recipient: &Wallet,
+        deadline: u64,
+        fee: sdk::Fee,
+        payload: Vec<u8>,
+    ) -> sdk::PreparationResult<Operation> {
         let state = self.snapshot()?;
         let mut inputs = Vec::new();
         for (key, debit) in selections {
@@ -889,33 +940,48 @@ impl WalletSession {
             inputs.push(credit_input(credit, *debit));
         }
         self.prepare_cached(|invisi| {
-            Ok(ManagedPrepared::Credit(invisi.prepare_draw_credit(
-                &self.wallet,
-                inputs.clone(),
-                recipient,
-                deadline,
-                fee.clone(),
-                payload.clone(),
-            )?))
+            Ok(ManagedPrepared::Credit(
+                invisi.prepare_draw_credit_explicit(
+                    &self.wallet,
+                    inputs.clone(),
+                    recipient,
+                    deadline,
+                    fee.clone(),
+                    payload.clone(),
+                )?,
+            ))
         })
     }
-    pub fn prepare_revoke_credit(
+    pub fn prepare_revoke_credit_explicit(
         &self,
         token: Address,
         shard: u64,
         slot: u16,
         deadline: u64,
         fee: sdk::Fee,
-    ) -> Result<Operation> {
+    ) -> sdk::PreparationResult<Operation> {
+        self.prepare_revoke_credit_explicit_internal(token, shard, slot, deadline, fee)
+            .map_err(|error| error.with_operation("prepare_revoke_credit"))
+    }
+    fn prepare_revoke_credit_explicit_internal(
+        &self,
+        token: Address,
+        shard: u64,
+        slot: u16,
+        deadline: u64,
+        fee: sdk::Fee,
+    ) -> sdk::PreparationResult<Operation> {
         self.prepare_cached(|invisi| {
-            Ok(ManagedPrepared::Credit(invisi.prepare_revoke_credit(
-                self.wallet.owner_address(),
-                token,
-                shard,
-                slot,
-                deadline,
-                fee.clone(),
-            )?))
+            Ok(ManagedPrepared::Credit(
+                invisi.prepare_revoke_credit_explicit(
+                    self.wallet.owner_address(),
+                    token,
+                    shard,
+                    slot,
+                    deadline,
+                    fee.clone(),
+                )?,
+            ))
         })
     }
     /// Recovers the public proof packet, including for completed operations, without resuming spending.
@@ -998,7 +1064,7 @@ impl WalletSession {
             requests: BTreeMap::new(),
         })
     }
-    pub fn cancel_operation(&self, id: &str, generation: Option<u64>) -> Result<()> {
+    pub fn abandon_operation(&self, id: &str, generation: Option<u64>) -> Result<()> {
         let mut state = self.snapshot()?;
         let record = state.operations.get_mut(id).ok_or("operation not found")?;
         if generation.is_some_and(|v| v != record.generation) {
@@ -1009,10 +1075,12 @@ impl WalletSession {
                 "exported operation requires canonical reconciliation before release".into(),
             );
         }
-        if record.status.terminal() {
-            return Err("operation is already terminal".into());
+        if record.status.terminal() || record.status == OperationStatus::Reorged {
+            return Err(
+                "operation requires canonical reconciliation or is already terminal".into(),
+            );
         }
-        record.status = OperationStatus::Cancelled;
+        record.status = OperationStatus::Failed;
         record.generation = record
             .generation
             .checked_add(1)
@@ -1336,6 +1404,7 @@ pub enum Reconciliation {
 }
 fn credit_input(value: &StoredCredit, debit: U256) -> CreditInput {
     CreditInput {
+        payload: None,
         delivery: value.delivery.clone(),
         tree_id: value.tree_id,
         leaf_index: value.leaf_index,
@@ -1377,4 +1446,53 @@ fn reserve(state: &mut WalletState, input: &str, id: &str) -> Result<()> {
         return Ok(());
     }
     Err("unknown operation input reference".into())
+}
+
+impl WalletSession {
+    pub fn prepare_create_credit(
+        &self,
+        request: sdk::CreateCreditRequest,
+        resolver: Option<&dyn sdk::ReceivingKeyResolver>,
+    ) -> sdk::PreparationResult<Operation> {
+        self.prepare_cached(|invisi| {
+            invisi
+                .prepare_create_credit(&self.wallet, request.clone(), resolver)
+                .map(ManagedPrepared::Credit)
+        })
+        .map_err(|e| e.with_operation("prepare_create_credit"))
+    }
+    pub fn prepare_update_credit(
+        &self,
+        request: sdk::UpdateCreditRequest,
+    ) -> sdk::PreparationResult<Operation> {
+        self.prepare_cached(|invisi| {
+            invisi
+                .prepare_update_credit(&self.wallet, request.clone())
+                .map(ManagedPrepared::Credit)
+        })
+        .map_err(|e| e.with_operation("prepare_update_credit"))
+    }
+    pub fn prepare_draw_credit(
+        &self,
+        request: sdk::DrawCreditRequest,
+        resolver: Option<&dyn sdk::ReceivingKeyResolver>,
+    ) -> sdk::PreparationResult<Operation> {
+        self.prepare_cached(|invisi| {
+            invisi
+                .prepare_draw_credit(&self.wallet, request.clone(), resolver)
+                .map(ManagedPrepared::Credit)
+        })
+        .map_err(|e| e.with_operation("prepare_draw_credit"))
+    }
+    pub fn prepare_revoke_credit(
+        &self,
+        request: sdk::RevokeCreditRequest,
+    ) -> sdk::PreparationResult<Operation> {
+        self.prepare_cached(|invisi| {
+            invisi
+                .prepare_revoke_credit(&self.wallet, request.clone())
+                .map(ManagedPrepared::Credit)
+        })
+        .map_err(|e| e.with_operation("prepare_revoke_credit"))
+    }
 }

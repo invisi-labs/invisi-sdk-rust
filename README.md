@@ -18,6 +18,40 @@ are in `invisi_sdk_protocol::provenance`; local Source witnesses and proving
 capabilities are in `invisi_sdk_prover::provenance`. Encrypted Source recovery
 and its coordinator are in `invisi_sdk_session::provenance_recovery`.
 
+## Preparation and portable output APIs
+
+`Invisi::prepare_create_credit`, `prepare_update_credit`, `prepare_draw_credit`, and
+`prepare_revoke_credit` accept `CreateCreditRequest`, `UpdateCreditRequest`,
+`DrawCreditRequest`, and `RevokeCreditRequest`. Create allocates the revocation
+reference and generates the nonce/shared key. Spender and draw recipients accept
+complete receiving addresses; EVM addresses require an injected receiving-key
+resolver. The granular state-based variants are named `*_explicit`.
+Absent update/member draw payloads preserve the previous payload; `Some(vec![])` clears it.
+All ordinary preparation methods return `PreparationResult<T>` with a structured
+`InvisiError` code and details. Recipient errors distinguish invalid addresses,
+`EVM_ADDRESS_NOT_REGISTERED`, lookup failures, and missing capabilities.
+
+`PreparedTransaction::get_outputs()` and `PreparedCredit::get_outputs()`
+return detached `TransactionOutput` snapshots, including token, typed recipient and generated change. Export
+an opening with `export_payment_note()`, decode it with `PaymentNote::decode`, and
+verify inclusion or current spendability with `verify` / `verify_spendable` against
+an independent chain and Protocol RPC client. IPN encoding is the shared canonical
+149-byte, payload-free format. Verification defaults should use native finalized
+heads; explicit latest/safe choices remain available.
+
+Broadcaster fee preparation defaults to four attempts (allowed range 1..16).
+`BroadcasterFeeSource` selects public funding or private inputs. Public fees add to
+the explicit payer's funding amount; `funding_permit` receives the final gross
+amount once, before the final signed quote. Existing permits cannot silently
+cover increased funding. Source replay defaults are ten root pages and 100,000 leaves.
+
+Register a configured local backend with `Invisi::with_prover(Arc<dyn Prover>)`
+before preparing a Provenance broadcaster transaction. Native backends expose the
+bundled, authenticated Source circuits and inherit the main witness executor and
+BB configuration. Official scoped trust bootstraps lazily when Source service
+access is needed, without network access during local preparation. Explicit
+`with_provenance` private-service trust takes precedence.
+
 ## Workspace
 
 | Crate | Responsibility |

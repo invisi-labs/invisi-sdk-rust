@@ -46,14 +46,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         amount,
         chain.snapshot()?.timestamp,
     )?;
-    let recipient = Wallet::from_address(&env::var("RECIPIENT_ADDRESS")?)?;
     let prepared = invisi.prepare_draw_credit(
         &wallet,
-        inputs,
-        &recipient,
-        deadline,
-        Fee::default(),
-        Vec::new(),
+        invisi_sdk::sdk::DrawCreditRequest {
+            inputs,
+            recipient: env::var("RECIPIENT_ADDRESS")?,
+            deadline,
+            fee: Fee::default(),
+            payload: Vec::new(),
+        },
+        None,
     )?;
     // One ordinary Note receives the total debit. Each owner's grant remains separately accounted.
 

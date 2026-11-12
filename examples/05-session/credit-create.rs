@@ -105,7 +105,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             spender_receiving_keys: spender.receiving_keys().clone(),
         };
 
-        session.prepare_create_credit(state, env::var("DEADLINE")?.parse()?, Fee::default())?
+        session.prepare_create_credit_explicit(
+            state,
+            env::var("DEADLINE")?.parse()?,
+            Fee::default(),
+        )?
     };
 
     println!("Operation ID: {}", operation.id());

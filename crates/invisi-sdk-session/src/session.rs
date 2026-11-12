@@ -398,6 +398,8 @@ impl WalletSession {
         })
     }
     pub fn history(&self, token: Option<Address>) -> Result<WalletHistory> {
+        self.fence_public_history()?;
+        let public_generation = self.history_generation()?;
         let state = self.store.full_snapshot(&self.scope.key())?;
         let mut incoming: Vec<IncomingHistory> = state
             .notes
@@ -450,9 +452,11 @@ impl WalletSession {
                 entry.id.clone(),
             )
         });
+        self.ensure_history_generation(public_generation, state.revision)?;
         Ok(WalletHistory {
             scope: self.scope.clone(),
             revision: state.revision,
+            checked_through: state.discovery_through,
             incoming,
             outgoing,
             invalidated: state.invalidated,
@@ -475,7 +479,7 @@ impl WalletSession {
             .collect())
     }
     pub(crate) fn terminal_is_canonical(&self, operation: &OperationRecord) -> bool {
-        operation.status == OperationStatus::Cancelled
+        operation.status == OperationStatus::Failed
             || operation.status.terminal()
                 && operation
                     .resolved_at
@@ -544,6 +548,7 @@ pub struct OutgoingHistory {
 }
 #[derive(Clone, Debug)]
 pub struct WalletHistory {
+    pub checked_through: Option<CanonicalBlock>,
     pub scope: WalletScope,
     pub revision: u64,
     pub incoming: Vec<IncomingHistory>,

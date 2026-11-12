@@ -1,6 +1,6 @@
 use invisi_sdk::{
     rpc::{EthereumChain, HttpTransport, ProtocolDeployment},
-    sdk::{self, ManagedPrepared, Wallet},
+    sdk::{self, ChainState, ManagedPrepared, Wallet},
 };
 use std::{env, fs, sync::Arc};
 #[allow(dead_code)]
@@ -31,20 +31,31 @@ pub fn load(
         ManagedPrepared::Funds(p) => p,
         _ => return Err("private Note snapshot required".into()),
     };
-    let config = source_configuration()?;
-    Ok((
-        chain,
-        prepared.reattach_provenance(Arc::new(
-            sdk::PreparedProvenance::from_local_configuration(config)?,
-        ))?,
-    ))
+    let capability = if env::var("SOURCE_PROVIDER_ID").is_ok() {
+        Arc::new(sdk::PreparedProvenance::from_local_configuration(
+            source_configuration()?,
+        )?)
+    } else {
+        sdk::PreparedProvenance::from_prover(chain.context(), &prover)?
+    };
+    Ok((chain, prepared.reattach_provenance(capability)?))
 }
 
 #[allow(dead_code)]
 pub fn source_client(
-) -> Result<invisi_sdk::provenance_client::ProvenanceClient, Box<dyn std::error::Error>> {
+) -> Result<Arc<invisi_sdk::provenance_client::ProvenanceClient>, Box<dyn std::error::Error>> {
     use invisi_sdk::provenance::{parse_integer, Scope, TrustContext};
     use sha2::Digest;
+    if env::var("SOURCE_PROVIDER_ID").is_err() {
+        let deployment: ProtocolDeployment =
+            serde_json::from_slice(&fs::read(env::var("DEPLOYMENT_JSON")?)?)?;
+        return Ok(
+            invisi_sdk::provenance_official::OfficialProvenanceClients::new().get(&Scope {
+                chain_id: deployment.chain_id.parse()?,
+                protocol_address: sdk::address_word(deployment.protocol.address),
+            })?,
+        );
+    }
     let config = source_pins()?;
     let text = |key: &str| -> Result<&str, String> {
         config[key]
@@ -69,10 +80,12 @@ pub fn source_client(
         signing_key_validity: std::collections::BTreeMap::new(),
         manifest_sha256: text("manifestSha256")?.into(),
     };
-    Ok(invisi_sdk::provenance_client::ProvenanceClient::new(
-        config["endpoint"].as_str().unwrap_or(""),
-        trust,
-    )?)
+    Ok(Arc::new(
+        invisi_sdk::provenance_client::ProvenanceClient::new(
+            config["endpoint"].as_str().unwrap_or(""),
+            trust,
+        )?,
+    ))
 }
 
 #[allow(dead_code)]
@@ -91,6 +104,6 @@ pub fn source_configuration(
     value["timeoutSeconds"] = serde_json::json!(120);
     value["threads"] = serde_json::json!(4);
     value["budgets"] =
-        serde_json::json!({"maxRootPages":16,"maxCertificates":3200,"maxTotalLeaves":1000000});
+        serde_json::json!({"maxRootPages":10,"maxCertificates":3200,"maxTotalLeaves":100000});
     Ok(serde_json::from_value(value)?)
 }

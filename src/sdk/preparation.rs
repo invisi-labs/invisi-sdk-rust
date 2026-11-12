@@ -223,6 +223,8 @@ impl ChainState for PreparationChain {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PreparationSnapshot {
+    #[serde(skip)]
+    missing_read: Arc<std::sync::atomic::AtomicBool>,
     pub version: u32,
     pub deployment: Option<ProtocolDeployment>,
     pub context: ProtocolContext,
@@ -234,8 +236,23 @@ pub struct PreparationSnapshot {
     pub funding_nonces: Vec<(Address, U256)>,
 }
 impl PreparationSnapshot {
+    pub fn for_preparation(&self) -> Self {
+        let mut facts = self.clone();
+        facts.missing_read = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        facts
+    }
+    pub fn missing_read_observed(&self) -> bool {
+        self.missing_read.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    fn missing_read(&self) -> String {
+        self.missing_read
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        "missing synchronized preparation data".into()
+    }
+
     pub fn new(context: ProtocolContext, block: CanonicalBlock) -> Self {
         Self {
+            missing_read: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             version: 1,
             deployment: None,
             context,
@@ -311,7 +328,7 @@ impl ChainState for PreparationSnapshot {
             .iter()
             .find(|(t, r, _)| *t == tree && *r == root)
             .map(|(_, _, v)| *v)
-            .ok_or_else(|| "missing synchronized preparation data".into())
+            .ok_or_else(|| self.missing_read())
     }
     fn nullifier_spent(&self, nullifier: B256, block: &CanonicalBlock) -> Result<bool> {
         self.canonical(block)?;
@@ -319,7 +336,7 @@ impl ChainState for PreparationSnapshot {
             .iter()
             .find(|(n, _)| *n == nullifier)
             .map(|(_, v)| *v)
-            .ok_or_else(|| "missing synchronized preparation data".into())
+            .ok_or_else(|| self.missing_read())
     }
     fn credit_revoked(
         &self,
@@ -334,7 +351,7 @@ impl ChainState for PreparationSnapshot {
             .iter()
             .find(|(o, t, s, l, _)| (*o, *t, *s, *l) == (owner, token, shard, slot))
             .map(|(_, _, _, _, v)| *v)
-            .ok_or_else(|| "missing synchronized preparation data".into())
+            .ok_or_else(|| self.missing_read())
     }
     fn credit_allocation(
         &self,
@@ -347,7 +364,7 @@ impl ChainState for PreparationSnapshot {
             .iter()
             .find(|(o, t, _, _)| (*o, *t) == (owner, token))
             .map(|(_, _, s, l)| (*s, *l))
-            .ok_or_else(|| "missing synchronized preparation data".into())
+            .ok_or_else(|| self.missing_read())
     }
     fn funding_nonce(&self, owner: Address, block: &CanonicalBlock) -> Result<U256> {
         self.canonical(block)?;
@@ -355,7 +372,7 @@ impl ChainState for PreparationSnapshot {
             .iter()
             .find(|(o, _)| *o == owner)
             .map(|(_, v)| *v)
-            .ok_or_else(|| "missing synchronized preparation data".into())
+            .ok_or_else(|| self.missing_read())
     }
     fn token_balance_allowance(
         &self,
@@ -536,9 +553,9 @@ mod construction_tests {
             &block
         );
         plan.deadline = block.timestamp;
-        assert!(invisi
-            .prepare_transfer(&wallet, plan)
-            .unwrap_err()
-            .contains("expired"));
+        assert_eq!(
+            invisi.prepare_transfer(&wallet, plan).unwrap_err().code,
+            InvisiErrorCode::PreparationFailed
+        );
     }
 }

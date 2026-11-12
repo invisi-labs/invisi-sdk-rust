@@ -53,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let changes: invisi_sdk::credit::CreditUpdateChanges =
         serde_json::from_slice(&fs::read(env::var("CREDIT_CHANGES_JSON")?)?)?;
     let prepared =
-        invisi.prepare_update_credit(&wallet, input, changes, deadline, Fee::default())?;
+        invisi.prepare_update_credit_explicit(&wallet, input, changes, deadline, Fee::default())?;
 
     // Owner approval binds the successor state; historical gross usage is not reset by an update.
     // Available before authorization, proof generation and token approval.

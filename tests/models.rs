@@ -282,3 +282,21 @@ fn note_hashes_bind_protocol_instance() {
     .is_err());
     assert!(compute_note_nullifier(31337, U256::from(1) << 160, note.nonce, first).is_err());
 }
+
+#[test]
+fn credit_update_payload_absent_preserves_and_empty_clears() {
+    let changes: invisi_sdk::credit::CreditUpdateChanges =
+        serde_json::from_value(serde_json::json!({"payload":"0x"})).unwrap();
+    assert_eq!(changes.payload, Some(Vec::new()));
+    assert!(invisi_sdk::credit::CreditUpdateChanges::default()
+        .payload
+        .is_none());
+    let mut previous = current();
+    previous.payload = vec![1, 2];
+    let preserved =
+        derive_credit_update(&previous, &CreditUpdateChanges::default(), 2000000001).unwrap();
+    assert_eq!(preserved.state.payload, vec![1, 2]);
+    let cleared = derive_credit_update(&previous, &changes, 2000000001).unwrap();
+    assert!(cleared.state.payload.is_empty());
+    assert_eq!(preserved.state_commitment, cleared.state_commitment);
+}

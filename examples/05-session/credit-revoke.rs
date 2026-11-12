@@ -74,7 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
             .nth(index)
             .ok_or("no current unreserved owner Credit at CREDIT_INDEX")?;
-        session.prepare_revoke_credit(
+        session.prepare_revoke_credit_explicit(
             token,
             credit.delivery.note.revocation_shard,
             credit.delivery.note.revocation_slot,

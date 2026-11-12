@@ -24,36 +24,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let token: Address = env::var("TOKEN_ADDRESS")?.parse()?;
     let deadline: u64 = env::var("DEADLINE")?.parse()?;
 
-    // Allocate a fresh public revocation reference before freezing the grant and both role
-    // deliveries.
-    let spender = Wallet::from_address(&env::var("SPENDER_ADDRESS")?)?;
-    let anchor = chain.snapshot()?;
-    let (shard, slot) = chain.credit_allocation(wallet.owner_address(), token, &anchor)?;
-    let state = invisi_sdk::delivery::CreditDeliveryState {
-        note: invisi_sdk::credit::CreditState {
-            context: chain.context(),
-            token_address: sdk::address_word(token),
-            owner_wallet_identity: sdk::address_word(wallet.owner_address()),
-            spender_wallet_identity: sdk::address_word(spender.owner_address()),
-            revocation_shard: shard,
-            revocation_slot: slot,
-            nonce: invisi_sdk::note::generate_nonce(),
-            expiry: env::var("EXPIRES_AT")?.parse()?,
-            credit_shared_key: invisi_sdk::note::generate_credit_shared_key(),
+    let prepared = invisi.prepare_create_credit(
+        &wallet,
+        sdk::CreateCreditRequest {
+            token,
+            spender: env::var("SPENDER_ADDRESS")?,
             policy: invisi_sdk::credit::CreditPolicy::default(),
-            usage: invisi_sdk::credit::CreditUsage::default(),
             available_credit: U256::from_str_radix(&env::var("AVAILABLE_CREDIT")?, 10)?,
             unlimited: env::var("UNLIMITED")
                 .unwrap_or_else(|_| "false".into())
                 .parse()?,
+            expiry: env::var("EXPIRES_AT")?.parse()?,
             payload: Vec::new(),
+            deadline,
+            fee: Fee::default(),
         },
-        owner_receiving_keys: wallet.receiving_keys().clone(),
-        spender_receiving_keys: spender.receiving_keys().clone(),
-    };
-
-    // Zero single/day/month limits disable those checks; available credit remains a finite balance.
-    let prepared = invisi.prepare_create_credit(&wallet, state, deadline, Fee::default())?;
+        None,
+    )?;
 
     // Owner approval binds the allocated grant, spender, expiry and policy before proving.
     // Available before authorization, proof generation and token approval.

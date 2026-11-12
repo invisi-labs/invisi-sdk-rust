@@ -213,3 +213,227 @@ mod tests {
         Ok(())
     }
 }
+
+/// Local resources inherited from the configured main prover; contains no remote transport.
+#[derive(Clone)]
+pub struct ProvenanceCapability {
+    pub manifest: crate::provenance::ManifestIdentity,
+    pub prover: Arc<dyn OfflineProver + Send + Sync>,
+}
+struct BundledSourceProver {
+    bb_binary: PathBuf,
+    timeout: Duration,
+    threads: usize,
+    witness_executor: Arc<dyn WitnessExecutor>,
+}
+fn bundled_assets(capacity: usize) -> Result<(&'static [u8], &'static [u8])> {
+    Ok(match capacity {
+        10 => (
+            include_bytes!("../../provenance/circuits/provenance/k10/target/provenance_k10.json")
+                .as_slice(),
+            include_bytes!("../../provenance/circuits/provenance/k10/target/evm/vk").as_slice(),
+        ),
+        20 => (
+            include_bytes!("../../provenance/circuits/provenance/k20/target/provenance_k20.json")
+                .as_slice(),
+            include_bytes!("../../provenance/circuits/provenance/k20/target/evm/vk").as_slice(),
+        ),
+        40 => (
+            include_bytes!("../../provenance/circuits/provenance/k40/target/provenance_k40.json")
+                .as_slice(),
+            include_bytes!("../../provenance/circuits/provenance/k40/target/evm/vk").as_slice(),
+        ),
+        80 => (
+            include_bytes!("../../provenance/circuits/provenance/k80/target/provenance_k80.json")
+                .as_slice(),
+            include_bytes!("../../provenance/circuits/provenance/k80/target/evm/vk").as_slice(),
+        ),
+        120 => (
+            include_bytes!("../../provenance/circuits/provenance/k120/target/provenance_k120.json")
+                .as_slice(),
+            include_bytes!("../../provenance/circuits/provenance/k120/target/evm/vk").as_slice(),
+        ),
+        160 => (
+            include_bytes!("../../provenance/circuits/provenance/k160/target/provenance_k160.json")
+                .as_slice(),
+            include_bytes!("../../provenance/circuits/provenance/k160/target/evm/vk").as_slice(),
+        ),
+        190 => (
+            include_bytes!("../../provenance/circuits/provenance/k190/target/provenance_k190.json")
+                .as_slice(),
+            include_bytes!("../../provenance/circuits/provenance/k190/target/evm/vk").as_slice(),
+        ),
+        _ => return Err("source capacity unavailable".into()),
+    })
+}
+impl OfflineProver for BundledSourceProver {
+    fn prove(
+        &self,
+        pin: &str,
+        capacity: usize,
+        witness: &Witness,
+        expected: &[String],
+    ) -> ModelResult<(Vec<String>, Vec<u8>)> {
+        let run = || -> Result<(Vec<String>, Vec<u8>)> {
+            let manifest = include_bytes!("../../provenance/manifest.json");
+            let identity = authenticate_manifest(manifest, pin).map_err(|e| e.to_string())?;
+            let entry = identity
+                .manifest
+                .circuits
+                .iter()
+                .find(|c| c.capacity == capacity)
+                .ok_or("source capacity unavailable")?;
+            let (artifact, vk) = bundled_assets(capacity)?;
+            if sha256(artifact) != entry.artifact_sha256 || sha256(vk) != entry.vk_sha256 {
+                return Err("bundled source asset digest mismatch".into());
+            }
+            let raw: Value =
+                serde_json::from_slice(manifest).map_err(|_| "invalid bundled manifest")?;
+            let paths = raw["circuits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["capacity"] == capacity)
+                .unwrap();
+            let dir = PrivateDir::new()?;
+            write_private(&dir.path("manifest.json"), manifest)?;
+            for (key, bytes) in [("artifact", artifact), ("vk", vk)] {
+                let relative = Path::new(paths[key].as_str().ok_or("invalid bundled asset path")?);
+                if relative.is_absolute()
+                    || relative
+                        .components()
+                        .any(|c| !matches!(c, std::path::Component::Normal(_)))
+                {
+                    return Err("invalid bundled asset path".into());
+                }
+                let target = dir.0.join(relative);
+                fs::create_dir_all(target.parent().unwrap())
+                    .map_err(|_| "source resource directory unavailable")?;
+                write_private(&target, bytes)?;
+            }
+            NativeSourceProver {
+                directory: dir.0.clone(),
+                manifest_sha256: pin.into(),
+                bb_binary: self.bb_binary.clone(),
+                timeout: self.timeout,
+                threads: self.threads,
+                witness_executor: self.witness_executor.clone(),
+            }
+            .prove_local(pin, capacity, witness, expected)
+        };
+        run().map_err(|_| ModelError::Invalid("local bundled source proving"))
+    }
+}
+impl NativeProver {
+    pub fn provenance_capability(&self) -> Result<ProvenanceCapability> {
+        if self.timeout.is_zero() || self.threads == 0 {
+            return Err("invalid native prover options".into());
+        }
+        let bytes = include_bytes!("../../provenance/manifest.json");
+        let pin = "6107789c5c0d24c4130bff05da6d389336feb5ccb247c4030eae5198ab05d762";
+        let manifest = authenticate_manifest(bytes, pin).map_err(|e| e.to_string())?;
+        for entry in &manifest.manifest.circuits {
+            let (artifact, vk) = bundled_assets(entry.capacity)?;
+            if sha256(artifact) != entry.artifact_sha256 || sha256(vk) != entry.vk_sha256 {
+                return Err("bundled source asset digest mismatch".into());
+            }
+        }
+        Ok(ProvenanceCapability {
+            manifest,
+            prover: Arc::new(BundledSourceProver {
+                bb_binary: self.bb_binary.clone(),
+                timeout: self.timeout,
+                threads: self.threads,
+                witness_executor: self.witness_executor.clone(),
+            }),
+        })
+    }
+}
+
+#[cfg(test)]
+mod bundled_tests {
+    use super::*;
+    struct NoIo;
+    impl Assets for NoIo {
+        fn load(&self, _: &ProofStatement) -> Result<(Vec<u8>, Vec<u8>)> {
+            panic!("capability discovery must not load main circuit assets")
+        }
+    }
+    impl WitnessExecutor for NoIo {
+        fn execute(&self, _: &[u8], _: &LocalWitness) -> Result<Zeroizing<Vec<u8>>> {
+            panic!("capability discovery must not execute private witnesses")
+        }
+    }
+    #[test]
+    fn native_capability_authenticates_all_bundled_assets_without_executables() {
+        let prover = NativeProver {
+            bb_binary: "/nonexistent/bb".into(),
+            timeout: Duration::from_secs(10),
+            threads: 1,
+            assets: Arc::new(NoIo),
+            witness_executor: Arc::new(NoIo),
+        };
+        let capability = prover.get_provenance_capability().unwrap().unwrap();
+        assert_eq!(capability.manifest.manifest.circuits.len(), 7);
+        assert_eq!(
+            capability.manifest.sha256,
+            "6107789c5c0d24c4130bff05da6d389336feb5ccb247c4030eae5198ab05d762"
+        );
+    }
+}
+
+#[cfg(test)]
+mod bundled_native_smoke {
+    use super::*;
+    struct NoMainAssets;
+    impl Assets for NoMainAssets {
+        fn load(&self, _: &ProofStatement) -> Result<(Vec<u8>, Vec<u8>)> {
+            Err("main assets unavailable".into())
+        }
+    }
+    #[test]
+    #[ignore = "requires actual BB6 and Noir executables"]
+    fn actual_bundled_source_k10_proves_and_independently_verifies() -> Result<()> {
+        let timeout = Duration::from_secs(120);
+        let prover = NativeProver {
+            bb_binary: std::env::var("BB_BINARY")
+                .map_err(|_| "BB_BINARY required")?
+                .into(),
+            timeout,
+            threads: 4,
+            assets: Arc::new(NoMainAssets),
+            witness_executor: Arc::new(NoirCli {
+                binary: std::env::var("NOIR_EXECUTOR")
+                    .map_err(|_| "NOIR_EXECUTOR required")?
+                    .into(),
+                timeout,
+            }),
+        };
+        let capability = prover.provenance_capability()?;
+        let witness: Witness =
+            serde_json::from_slice(include_bytes!("../../testdata/provenance-k10.json"))
+                .map_err(|e| e.to_string())?;
+        let expected = PUBLIC_INPUTS
+            .iter()
+            .map(|key| {
+                Ok(format!(
+                    "0x{}",
+                    hex::encode(word(&witness[*key])?.as_slice())
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let (public, proof) = capability
+            .prover
+            .prove(&capability.manifest.sha256, 10, &witness, &expected)
+            .map_err(|e| e.to_string())?;
+        assert_eq!(public, expected);
+        assert!(!proof.is_empty());
+        let mut invalid = expected;
+        invalid[10] = "0x01".into();
+        assert!(capability
+            .prover
+            .prove(&capability.manifest.sha256, 10, &witness, &invalid)
+            .is_err());
+        Ok(())
+    }
+}

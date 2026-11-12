@@ -95,7 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?,
             ..Default::default()
         };
-        session.prepare_update_credit(
+        session.prepare_update_credit_explicit(
             &key,
             changes,
             env::var("DEADLINE")?.parse()?,

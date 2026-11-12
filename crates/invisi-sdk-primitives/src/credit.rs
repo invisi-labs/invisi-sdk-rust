@@ -324,6 +324,8 @@ pub fn recover_credit_state(
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreditUpdateChanges {
+    #[serde(default, with = "optional_payload")]
+    pub payload: Option<Vec<u8>>,
     #[serde(default, with = "optional_decimal")]
     pub single_limit: Option<U256>,
     #[serde(default, with = "optional_decimal")]
@@ -361,6 +363,9 @@ pub fn derive_credit_update(
         return Err(ModelError::Invalid("mutually exclusive credit adjustments"));
     }
     let mut state = previous.clone();
+    if let Some(payload) = &changes.payload {
+        state.payload = payload.clone();
+    }
     state.unlimited = changes.unlimited.unwrap_or(state.unlimited);
     if state.unlimited {
         if increase != U256::ZERO || decrease != U256::ZERO {
@@ -456,4 +461,24 @@ pub fn compute_credit_commitment(state: &CreditState) -> ModelResult<U256> {
 pub fn normalize_credit_state(state: &CreditState) -> ModelResult<CreditState> {
     state.validate()?;
     Ok(state.clone())
+}
+
+mod optional_payload {
+    use serde::{Deserialize, Deserializer, Serializer};
+    pub fn serialize<S: Serializer>(value: &Option<Vec<u8>>, s: S) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(v) => s.serialize_some(&format!("0x{}", hex::encode(v))),
+            None => s.serialize_none(),
+        }
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<u8>>, D::Error> {
+        Option::<String>::deserialize(d)?
+            .map(|s| {
+                let raw = s
+                    .strip_prefix("0x")
+                    .ok_or_else(|| serde::de::Error::custom("hex payload required"))?;
+                hex::decode(raw).map_err(serde::de::Error::custom)
+            })
+            .transpose()
+    }
 }

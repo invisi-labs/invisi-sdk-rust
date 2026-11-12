@@ -2233,6 +2233,7 @@ fn cancelled_shared_download_does_not_cancel_another_subscriber_or_duplicate_rec
     struct Slow {
         source: Arc<Source>,
         started: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+        resume: Mutex<std::sync::mpsc::Receiver<()>>,
     }
     impl SessionSource for Slow {
         fn context(&self) -> ProtocolContext {
@@ -2253,7 +2254,7 @@ fn cancelled_shared_download_does_not_cancel_another_subscriber_or_duplicate_rec
         fn receipt(&self, h: B256) -> Result<Option<CanonicalReceipt>> {
             if let Some(s) = self.started.lock().unwrap().take() {
                 s.send(()).unwrap();
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                self.resume.lock().unwrap().recv().unwrap();
             }
             self.source.receipt(h)
         }
@@ -2269,9 +2270,11 @@ fn cancelled_shared_download_does_not_cancel_another_subscriber_or_duplicate_rec
     }
     let h = harness();
     let (tx, rx) = std::sync::mpsc::channel();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
     let source = Arc::new(Slow {
         source: h.source.clone(),
         started: Mutex::new(Some(tx)),
+        resume: Mutex::new(resume_rx),
     });
     let history = Arc::new(
         PublicHistory::new(
@@ -2304,6 +2307,7 @@ fn cancelled_shared_download_does_not_cancel_another_subscriber_or_duplicate_rec
         let history = history.clone();
         std::thread::spawn(move || history.acquire(0, 10, &CancellationToken::default()))
     };
+    resume_tx.send(()).unwrap();
     assert!(worker.join().unwrap().is_err());
     assert_eq!(other.join().unwrap().unwrap().0.receipts.len(), 1);
     assert_eq!(h.source.receipt_reads.load(Ordering::SeqCst), 1);

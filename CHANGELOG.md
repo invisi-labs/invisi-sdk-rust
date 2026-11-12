@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.3
+
+- Align transaction preparation, public history and Provenance interfaces with the current protocol contracts.
+- Include complete Source runtime artifacts in distributable crates and preserve isolated archive verification.
+
 ## 1.2.2
 
 Rust skips version 1.2.1; this release includes all changes since 1.2.0.

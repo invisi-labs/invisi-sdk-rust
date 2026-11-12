@@ -15,8 +15,37 @@ spec = importlib.util.spec_from_file_location('publish_release', Path(__file__).
 release = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(release)
 
+spec = importlib.util.spec_from_file_location('check_release', Path(__file__).with_name('check-release.py'))
+archive_check = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(archive_check)
+
 
 class ReleaseTests(unittest.TestCase):
+    def test_only_authenticated_public_runtime_target_assets_are_allowed(self):
+        import hashlib
+        artifact = 'circuits/provenance/k10/target/provenance_k10.json'
+        vk = 'circuits/provenance/k10/target/evm/vk'
+        payload = b'public runtime data'
+        digest = hashlib.sha256(payload).hexdigest()
+        manifest = {'circuits': [{'artifact': artifact, 'artifactSha256': digest, 'vk': vk, 'vkSha256': digest}]}
+        base = {'provenance/manifest.json': json.dumps(manifest).encode(), 'provenance/' + artifact: payload, 'provenance/' + vk: payload}
+        def verify(files, name='invisi-sdk-prover'):
+            buffer = io.BytesIO()
+            with tarfile.open(fileobj=buffer, mode='w') as output:
+                for path, data in files.items():
+                    member = tarfile.TarInfo('crate-1.2.3/' + path)
+                    member.size = len(data)
+                    output.addfile(member, io.BytesIO(data))
+            buffer.seek(0)
+            with tarfile.open(fileobj=buffer) as contents:
+                archive_check.check_archive_artifacts(contents, name)
+        verify(base)
+        for files in [dict(base, **{'target/cache': payload}), dict(base, **{'provenance/' + artifact: b'tampered'}), {path: data for path, data in base.items() if path != 'provenance/' + vk}]:
+            with self.assertRaises(RuntimeError):
+                verify(files)
+        with self.assertRaises(RuntimeError):
+            verify(base, 'invisi-sdk')
+
     def cohort(self, root):
         for name in release.ORDER:
             directory = root if name == 'invisi-sdk' else root / 'crates' / name

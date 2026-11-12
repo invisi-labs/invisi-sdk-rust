@@ -21,6 +21,31 @@ def run(args, **kwargs):
     return subprocess.run(list(map(str, args)), check=True, **kwargs)
 
 
+def check_archive_artifacts(contents, name):
+    allowed = {}
+    if name == 'invisi-sdk-prover':
+        manifest_member = next(member for member in contents.getmembers() if member.name.endswith('/provenance/manifest.json'))
+        manifest = json.load(contents.extractfile(manifest_member))
+        for circuit in manifest['circuits']:
+            for key in ('artifact', 'vk'):
+                allowed['provenance/' + circuit[key]] = circuit[key + 'Sha256']
+    seen = set()
+    for member in contents.getmembers():
+        parts = Path(member.name).parts[1:]
+        relative = '/'.join(parts)
+        forbidden = any(part in {'target', 'vendor', '.git', '.cache', '.local'} for part in parts)
+        if forbidden and relative not in allowed:
+            raise RuntimeError(f'Forbidden package artifact: {member.name}')
+        if member.name.endswith(('.sqlite', '.pk', '.proof', '.env')) or not member.isfile():
+            raise RuntimeError(f'Private/generated artifact: {member.name}')
+        if relative in allowed:
+            if hashlib.sha256(contents.extractfile(member).read()).hexdigest() != allowed[relative]:
+                raise RuntimeError(f'Runtime artifact digest mismatch: {member.name}')
+            seen.add(relative)
+    if seen != allowed.keys():
+        raise RuntimeError('Missing authenticated public runtime artifacts')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--work-dir', type=Path, help='Retain local package artifacts here')
@@ -79,19 +104,14 @@ def main():
     for name in ORDER:
         source = ROOT if name == 'invisi-sdk' else ROOT / 'crates' / name
         run(['cargo', '--config', config, 'package', '--locked', '--offline', '--allow-dirty', '--manifest-path', source / 'Cargo.toml'], cwd=ROOT, env=environment)
-        archive = work / 'target' / 'package' / f'{name}-1.2.2.crate'
+        archive = work / 'target' / 'package' / f'{name}-1.2.3.crate'
         destination = vendor / name
         shutil.rmtree(destination)
-        unpacked = work / 'unpacked' / f'{name}-1.2.2'
+        unpacked = work / 'unpacked' / f'{name}-1.2.3'
         if unpacked.exists():
             shutil.rmtree(unpacked)
         with tarfile.open(archive) as contents:
-            for member in contents.getmembers():
-                parts = Path(member.name).parts[1:]
-                if any(part in {'target', 'vendor', '.git', '.cache', '.local'} for part in parts):
-                    raise RuntimeError(f'Forbidden package artifact: {member.name}')
-                if member.name.endswith(('.sqlite', '.pk', '.proof', '.env')):
-                    raise RuntimeError(f'Private/generated artifact: {member.name}')
+            check_archive_artifacts(contents, name)
             contents.extractall(work / 'unpacked', filter='data')
         # Cargo archives normalize mtimes; refresh them so repeated local checks
         # cannot reuse a stale test binary after an archive's contents change.
@@ -99,15 +119,15 @@ def main():
             if path.is_file():
                 os.utime(path, None)
         metadata = tomllib.loads((unpacked / 'Cargo.toml').read_text())
-        assert metadata['package']['version'] == '1.2.2'
+        assert metadata['package']['version'] == '1.2.3'
         for dependency_name, dependency in metadata.get('dependencies', {}).items():
             if isinstance(dependency, dict) and dependency.get('package', dependency_name).startswith('invisi-sdk'):
-                assert dependency['version'] == '=1.2.2' and 'path' not in dependency
+                assert dependency['version'] == '=1.2.3' and 'path' not in dependency
         shutil.copytree(unpacked, destination)
         files = {str(p.relative_to(destination)): hashlib.sha256(p.read_bytes()).hexdigest() for p in destination.rglob('*') if p.is_file()}
         (destination / '.cargo-checksum.json').write_text(json.dumps({'files': files, 'package': None}))
         run(['cargo', '--config', config, 'test', '--locked', '--offline', '--all-features', '--manifest-path', unpacked / 'Cargo.toml'], cwd=work, env=environment)
-    print(f'All seven 1.2.2 package archives verified and tested: {work}')
+    print(f'All seven 1.2.3 package archives verified and tested: {work}')
 
 
 if __name__ == '__main__':

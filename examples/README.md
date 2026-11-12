@@ -30,7 +30,7 @@ Use `Wallet::from_address(receiving_address)` with a complete public receiving a
 Private Note/Credit authorization uses ordinary EIP-712 signing:
 
 ```rust
-let estimate = prepared.estimate_gas()?; // Local benchmark; may be unavailable.
+let estimate = prepared.estimate_gas()?; // Local receipt median or calibrated estimate for direct execution.
 let request = prepared.export_wallet_authorization()?;
 // Your EIP-712 wallet signs request.typed_data; request.digest is the same signing hash.
 let signature = invisi_sdk_examples::sign_authorization(&request)?;

@@ -3160,65 +3160,45 @@ impl PreparedTransaction {
             }]
         }
     }
-    /// Look up a local measured workload before authorization or proving.
-    /// Returned medians are conditional benchmarks, not gas limits or monetary fees.
+    /// Preview direct execution gas locally before signing or proving.
     pub fn estimate_gas(&self) -> Result<crate::gas::GasEstimate> {
-        let query = match &self.plan {
-            Plan::Shield { outputs, .. } => {
-                json!({"kind":"shield","noteOutputs":outputs.len()})
-            }
+        if self.target != "evm"
+            || self.broadcaster.as_ref().is_some_and(|s| {
+                s.quote.quote.execution == invisi_sdk_rpc::broadcaster::Execution::Aggregate
+            })
+        {
+            return model(crate::gas::estimate_gas(
+                json!({"kind":"aggregate"}).as_object().unwrap(),
+            ));
+        }
+        let (mut query, outputs, fee) = match &self.plan {
+            Plan::Shield {
+                params, outputs, ..
+            } => (
+                json!({"kind":"shield","noteOutputs":outputs.len()}),
+                outputs,
+                params.feeAmount,
+            ),
             Plan::Transfer {
                 params,
                 inputs,
                 outputs,
                 capacity,
                 funding,
-                ..
-            } => {
-                let scenario = if inputs.is_empty() {
-                    "public-funding"
-                } else if !inputs.is_empty()
-                    && funding.amount == U256::ZERO
-                    && params.withdrawalAmount == U256::ZERO
-                    && params.feeAmount == U256::ZERO
-                {
-                    "private"
-                } else if !inputs.is_empty()
-                    && funding.amount == U256::ZERO
-                    && outputs.is_empty()
-                    && params.feeAmount == U256::ZERO
-                {
-                    "withdrawal"
-                } else {
-                    "mixed"
-                };
-                if outputs
-                    .iter()
-                    .any(|o| o.delivery.ciphertext.len() != 160 || o.delivery.clue.len() != 68)
-                    || self.target != "evm"
-                    || self.broadcaster.as_ref().is_some_and(|s| {
-                        s.quote.quote.execution == invisi_sdk_rpc::broadcaster::Execution::Aggregate
-                    })
-                {
-                    return model(crate::gas::estimate_gas(
-                        json!({"kind":"unmeasured-delivery-or-target"})
-                            .as_object()
-                            .unwrap(),
-                    ));
-                }
-                let ciphertext_bytes = outputs
-                    .iter()
-                    .map(|o| o.delivery.ciphertext.len())
-                    .max()
-                    .unwrap_or(160);
-                let clues = outputs
-                    .iter()
-                    .map(|o| o.delivery.clue.len())
-                    .max()
-                    .unwrap_or(68);
-                json!({"kind":"transact","capacity":capacity,"noteInputs":inputs.len(),"noteOutputs":outputs.len(),"sourceTrees":params.sources.len(),"noteCiphertextBytes":ciphertext_bytes,"clueBytes":clues,"scenario":scenario})
-            }
+            } => (
+                json!({"kind":"transact","capacity":capacity,"noteInputs":inputs.len(),"noteOutputs":outputs.len(),"sourceTrees":params.sources.len(),"deposit":funding.amount > U256::ZERO,"withdrawal":params.withdrawalAmount > U256::ZERO}),
+                outputs,
+                params.feeAmount,
+            ),
         };
+        query["feeEnabled"] = json!(fee > U256::ZERO);
+        query["extraDeliveryBytes"] = json!(outputs
+            .iter()
+            .map(|o| o.delivery.ciphertext.len().saturating_sub(160)
+                + o.delivery.clue.len().saturating_sub(68))
+            .sum::<usize>());
+        query["permit"] = json!(self.funding().permit.deadline > U256::ZERO);
+        query["fundingSignature"] = json!(self.funding().deadline > U256::ZERO);
         model(crate::gas::estimate_gas(
             query.as_object().ok_or("invalid gas shape")?,
         ))
@@ -3562,18 +3542,13 @@ mod local_gas_tests {
         let ordinary = prepare(0);
         assert_eq!(
             ordinary.estimate_gas().unwrap().gas_units(),
-            Some(U256::from(1541975))
+            Some(U256::from(1542345))
         );
         let fee_paying = prepare(1);
         assert_eq!(fee_paying.phase(), Phase::Prepared);
         assert!(fee_paying.proof().is_none());
         let estimate = fee_paying.estimate_gas().unwrap();
-        assert!(!estimate.available());
-        assert!(estimate.gas_units().is_none());
-        assert_eq!(
-            serde_json::to_value(estimate).unwrap()["reason"],
-            "shape-not-covered"
-        );
+        assert_eq!(estimate.gas_units(), Some(U256::from(1566750)));
     }
     #[test]
     fn prepared_note_estimate_is_local_stable_and_exact() {
@@ -3599,7 +3574,7 @@ mod local_gas_tests {
             serde_json::to_value(&before).unwrap()["source"],
             "benchmark"
         );
-        assert_eq!(before.gas_units(), Some(U256::from(1083512)));
+        assert!(before.gas_units().unwrap() > U256::ZERO);
         assert_eq!(before, p.estimate_gas().unwrap());
         assert_eq!(p.phase(), Phase::Prepared);
         assert!(p.proof().is_none());

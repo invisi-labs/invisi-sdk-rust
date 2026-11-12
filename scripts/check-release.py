@@ -28,6 +28,8 @@ def main():
     options = parser.parse_args()
     run(['python3', ROOT / 'scripts/check-boundaries.py'], cwd=ROOT)
     fixture_pairs = [
+        ('crates/invisi-sdk-protocol/assets/gas/measured-model.json', 'tests/fixtures/measured-model.json'),
+        ('crates/invisi-sdk-protocol/assets/gas/model-validation.json', 'tests/fixtures/model-validation.json'),
         ('crates/invisi-sdk-rpc/testdata/golden-vectors.json', 'testdata/provenance-golden-vectors.json'),
         ('crates/invisi-sdk-prover/provenance/manifest.json', 'provenance/manifest.json'),
         ('crates/invisi-sdk-prover/provenance/manifest.json', 'crates/invisi-sdk-session/testdata/source-manifest.json'),
@@ -35,7 +37,6 @@ def main():
         ('crates/invisi-sdk-protocol/src/provenance-testdata/golden-vectors.json', 'crates/invisi-sdk-prover/src/provenance-testdata/golden-vectors.json'),
         ('crates/invisi-sdk-rpc/testdata/provenance-recovery.json', 'crates/invisi-sdk-session/testdata/provenance-recovery.json'),
         ('tests/fixtures/wallet-wire-vectors.json', 'crates/invisi-sdk-ffi/tests/fixtures/wallet-wire-vectors.json'),
-        ('crates/invisi-sdk-protocol/assets/gas/documented-references.json', 'tests/fixtures/documented-references.json'),
     ]
     for original, packaged in fixture_pairs:
         if (ROOT / original).read_bytes() != (ROOT / packaged).read_bytes():

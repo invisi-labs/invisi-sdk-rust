@@ -1448,9 +1448,11 @@ mod lifecycle_tests {
             let mut nonstandard = p.clone();
             nonstandard.deliveries[0].clue.clear();
             let unsupported = nonstandard.estimate_gas().unwrap();
+            assert_eq!(unsupported, estimate);
+            nonstandard.deliveries[0].clue = vec![1; 78].into();
             assert_eq!(
-                serde_json::to_value(unsupported).unwrap()["reason"],
-                "shape-not-covered"
+                serde_json::to_value(nonstandard.estimate_gas().unwrap()).unwrap()["statistic"],
+                "estimate"
             );
             let proved = p.prove(&SyntheticCreditBackend).unwrap();
             assert_eq!(estimate, proved.estimate_gas().unwrap());
@@ -2152,11 +2154,8 @@ mod revocation_tests {
             .prepare_revoke_credit(owner, token, 1, 0, deadline, Fee::default())
             .unwrap();
         let estimate = direct.estimate_gas().unwrap();
-        assert!(!estimate.available());
-        assert_eq!(
-            serde_json::to_value(estimate).unwrap()["reason"],
-            "shape-not-covered"
-        );
+        assert!(estimate.available());
+        assert!(estimate.gas_units().unwrap() > U256::from(60000));
         assert!(!direct.needs_authorization());
         assert!(direct.calldata(&*chain, owner).is_ok());
         assert!(direct.calldata(&*chain, Address::repeat_byte(9)).is_err());
@@ -2228,7 +2227,7 @@ impl PreparedCredit {
                 true,
             ),
             CreditPlan::Revoke { fee, .. } => (
-                json!({"kind":"revoke-credit","authorization":"unknown","bitmapWord":"unknown"}),
+                json!({"kind":"revoke-credit","authorization":"unknown","bitmapWord":"empty"}),
                 fee.amount,
                 false,
             ),
@@ -2246,10 +2245,19 @@ impl PreparedCredit {
             CreditPlan::Draw { inputs, .. } => 2 * inputs.len(),
             CreditPlan::Revoke { .. } => 0,
         };
-        if self.deliveries.iter().enumerate().any(|(i, d)| {
-            d.clue.len() != 68 || d.ciphertext.len() != if i < credit_count { 485 } else { 160 }
+        query["extraDeliveryBytes"] = json!(self
+            .deliveries
+            .iter()
+            .enumerate()
+            .map(|(i, d)| d.clue.len().saturating_sub(68)
+                + d.ciphertext
+                    .len()
+                    .saturating_sub(if i < credit_count { 485 } else { 160 }))
+            .sum::<usize>());
+        if self.broadcaster.as_ref().is_some_and(|s| {
+            s.quote.quote.execution == invisi_sdk_rpc::broadcaster::Execution::Aggregate
         }) {
-            query = json!({"kind":"unmeasured-delivery-size"});
+            query = json!({"kind":"aggregate"});
         }
         model(crate::gas::estimate_gas(
             query.as_object().ok_or("invalid gas shape")?,

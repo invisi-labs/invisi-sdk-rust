@@ -44,6 +44,8 @@ pub struct OperationRecord {
     pub broadcaster_submission_id: Option<String>,
     #[serde(default)]
     pub broadcaster_cancelled: bool,
+    #[serde(default)]
+    pub broadcaster_cancellation_status: Option<crate::broadcaster::Status>,
     pub resolved_at: Option<CanonicalBlock>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

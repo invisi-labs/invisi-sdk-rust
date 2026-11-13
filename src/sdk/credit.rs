@@ -1570,7 +1570,7 @@ mod lifecycle_tests {
                 .unwrap();
             match restored {
                 journal::ManagedPrepared::Credit(mut v) => {
-                    v.submit_broadcaster(chain.as_ref(), relay.as_ref())
+                    v.submit_for_broadcaster(chain.as_ref(), relay.as_ref())
                         .unwrap();
                     let saved = journal::ManagedPrepared::Credit(v.clone())
                         .snapshot()
@@ -1587,7 +1587,7 @@ mod lifecycle_tests {
                     };
                     assert_eq!(restored.phase(), Phase::Prepared);
                     restored
-                        .submit_broadcaster(chain.as_ref(), relay.as_ref())
+                        .submit_for_broadcaster(chain.as_ref(), relay.as_ref())
                         .unwrap();
                     assert_eq!(
                         restored.broadcaster_state().unwrap().submitted_data,
@@ -2420,7 +2420,7 @@ mod revocation_tests {
         let restored = saved.restore_for_owner(owner, None).unwrap();
         match restored {
             journal::ManagedPrepared::Credit(mut v) => {
-                v.submit_broadcaster(chain.as_ref(), relay.as_ref())
+                v.submit_for_broadcaster(chain.as_ref(), relay.as_ref())
                     .unwrap();
                 let saved = journal::ManagedPrepared::Credit(v.clone())
                     .snapshot()
@@ -2434,7 +2434,7 @@ mod revocation_tests {
                     _ => panic!("Credit"),
                 };
                 restored
-                    .submit_broadcaster(chain.as_ref(), relay.as_ref())
+                    .submit_for_broadcaster(chain.as_ref(), relay.as_ref())
                     .unwrap();
                 assert_eq!(
                     restored.broadcaster_state().unwrap().submitted_data,

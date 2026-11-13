@@ -130,7 +130,7 @@ fn cancellation_rpc_uses_only_scoped_id_and_preimage() {
     .unwrap();
     assert_eq!(
         relay
-            .cancel("scheduled-id", B256::repeat_byte(0x55))
+            .cancel_transaction("scheduled-id", B256::repeat_byte(0x55))
             .unwrap()
             .state,
         invisi_sdk_rpc::broadcaster::StatusState::Cancelled
@@ -203,8 +203,8 @@ fn scheduled_submit_accepts_opaque_server_id_and_replays_identical_frozen_payloa
         transport.clone(),
     )
     .unwrap();
-    assert!(relay.submit(&data, &verified).is_err());
-    let accepted = relay.submit(&data, &verified).unwrap();
+    assert!(relay.submit_transaction(&data, &verified).is_err());
+    let accepted = relay.submit_transaction(&data, &verified).unwrap();
     assert_eq!(accepted.id, "server-assigned/opaque-job-93");
     assert_eq!(transport.0.lock().unwrap().len(), 2);
 }

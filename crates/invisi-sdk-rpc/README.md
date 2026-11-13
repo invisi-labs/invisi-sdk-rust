@@ -2,9 +2,10 @@
 
 Version `1.2.3`. ProtocolRPC, broadcaster and Provenance network clients, canonical response validation and transport errors. Depends on primitives and protocol; no local proving or wallet storage.
 
-Wallet-aware quotation is provided by `invisi_sdk::broadcaster::BroadcasterClient::quote`,
+Wallet-aware quotation is provided by `invisi_sdk::broadcaster::BroadcasterClient::{quote, submit, cancel}`,
 which accepts ordinary preparations and managed Session operations. This module keeps
-its independent calldata-level API; access it through `client.rpc()` from the SDK wrapper.
+its independent calldata-level `submit_transaction` and `cancel_transaction` APIs;
+access them through `client.rpc()` from the SDK wrapper.
 
 See the [workspace documentation](https://github.com/invisi-lab/invisi-sdk-rust) for usage. Licensed under Apache-2.0.
 
@@ -26,18 +27,18 @@ High-level `BroadcasterOptions.schedule` generates a random cancellation preimag
 and stores it with the signed quote and frozen submission evidence before sending.
 Submission IDs are opaque values allocated by the broadcaster. The managed session
 persists the returned ID before returning success. After a lost response, replay
-`submit_broadcaster` on the previously attempted saved operation: it reuses the
+`client.submit(&mut operation, chain.as_ref())` on the previously attempted saved operation: it reuses the
 exact frozen request without requoting or reproving and persists the returned ID.
 Cancellation requires that recovered ID; a never-submitted operation is not sent
 merely to obtain a cancellation ID. Treat saved operation
 journals as secrets and encrypt them at rest. Debug output redacts the token.
-Managed sessions expose `cancel_broadcaster` scoped to the persisted relay and
-submission ID; cancellation results never directly release input reservations.
-After a confirmed cancellation, `reconcile_cancelled_operation` independently
-checks canonical unspent inputs before releasing reservations, without waiting
-for the original deadline. Cancellation acknowledges broadcaster custody; it
-does not revoke calldata or signatures at the protocol level. Uncertain or
-rejected cancellation responses retain reservations. The acknowledgement is
-persisted before reconciliation so recovery after restart remains safe.
+`client.cancel(&mut operation)` is scoped to the saved relay and submission ID.
+For managed operations it persists the cancellation acknowledgement, independently
+checks canonical unspent inputs, and releases reservations before returning success.
+On a canonical-reader outage, retry the same call: the saved acknowledgement avoids
+another relay request. Completed safe cancellations are idempotent. Ordinary prepared
+targets have no managed inventory and return the acknowledgement directly.
+Cancellation acknowledges relay custody and does not revoke protocol signatures.
+Uncertain cancellation responses retain reservations.
 `scheduled`, `preparing`, and `cancelled` statuses coexist with existing native
 confirmation metadata. Scheduling does not change provenance statements.

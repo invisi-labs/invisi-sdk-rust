@@ -174,12 +174,15 @@ fn client_verifies_registered_quote_and_submit_status_correlation() {
         }
     }
     assert_eq!(client.estimate_quote(&data).unwrap().fee_amount, "1");
-    assert_eq!(client.submit(&data, &verified).unwrap().id, "server-owned");
+    assert_eq!(
+        client.submit_transaction(&data, &verified).unwrap().id,
+        "server-owned"
+    );
     assert!(client.status("operation-1").is_err());
     for state in ["queued", "proving", "confirmed"] {
         let malformed=BroadcasterClient::new(configuration.clone(),Transport{signed:json!({"quote":row["quote"],"signature":row["signature"]}),service:service.clone(),submission:Some(json!({"id":"server-owned","state":state,"confirmation":{"level":"finalized","status":"available","block":{"number":"10","hash":B256::repeat_byte(1),"timestamp":123}}}))}).unwrap();
         assert!(
-            malformed.submit(&data, &verified).is_err(),
+            malformed.submit_transaction(&data, &verified).is_err(),
             "accepted impossible submit confirmation context"
         );
     }
@@ -401,7 +404,7 @@ fn aggregate_rpc_sends_the_public_member_and_checks_nested_capability() {
         )
         .unwrap();
         assert_eq!(client.submission_requirements(&verified).is_ok(), supported);
-        assert!(client.submit(&data, &verified).is_err());
+        assert!(client.submit_transaction(&data, &verified).is_err());
         assert_eq!(
             client
                 .submit_with_member_proof(&data, &verified, &[], Some(&member))

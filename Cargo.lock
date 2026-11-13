@@ -1735,6 +1735,7 @@ dependencies = [
  "invisi-sdk",
  "invisi-sdk-session",
  "k256",
+ "rlp",
  "serde_json",
  "sha2",
  "tempfile",

@@ -88,3 +88,21 @@ commits the quote and any scheduling capability through the encrypted Store.
 A successful quote advances the operation generation; a failed quote preserves
 the previous journal and reservations. Use the original local operation ID to
 resume, and the Broadcaster-returned opaque ID to query remote status.
+
+
+## Host transaction submission
+
+`WalletSession::send_transaction(&mut target, &sender, SessionTransactionOptions { caller, gas_limit })`
+accepts a raw `TransactionCall` or a managed `Operation`. The host implements `TransactionSender`
+(address, chain ID, standard transaction send); the SDK stores no EVM account keys. Gas must be
+explicit and positive, and the host address/chain must match the caller and session context.
+Managed calls validate the live submission, enforce session/store/worker ownership, persist
+externalization before sending exactly once, and persist the returned hash. Send failures retain
+reservations. A `TransactionSendError.transaction_hash` identifies a known sent transaction after
+host uncertainty or a journal save failure: resume, track that hash and reconcile instead of resending.
+Raw calls are sent unchanged and return the host hash; hosts own their tracking.
+
+The SDK `BroadcasterClient` owns `quote`, `submit` and `cancel` for Note/Credit preparations and
+managed operations. Managed cancellation persists the relay acknowledgement before independent
+canonical reconciliation and reservation release. Retrying after canonical outages uses that durable
+acknowledgement without requiring relay availability. No second release call is needed.

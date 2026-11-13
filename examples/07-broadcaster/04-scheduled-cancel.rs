@@ -127,7 +127,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     operation = operation
         .with_wallet_signature(&signature)?
         .prove(prover.as_ref(), false)?;
-    let submitted = operation.submit_broadcaster(relay.as_ref())?;
+    let submitted = relay.submit(&mut operation, chain.as_ref())?;
     println!("Submission state: {:?}", submitted.state);
     // Resume uses the local operation ID; remote status uses the ID returned by the Broadcaster.
     let mut recovered = session.resume(&operation_id, Some(prover.as_ref()))?;
@@ -136,14 +136,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Recovered relay status: id={} state={:?}",
         observed.id, observed.state
     );
-    let cancelled = recovered.cancel_broadcaster(relay.as_ref())?;
+    let cancelled = relay.cancel(&mut recovered)?;
     if cancelled.state != StatusState::Cancelled || cancelled.transaction_hash.is_some() {
         return Err(
             "Cancellation was not acknowledged; saved operation retains its reservations".into(),
         );
     }
     // Relay custody cancellation does not revoke protocol signatures; release requires canonical checks.
-    session.reconcile_cancelled_operation(&operation_id)?;
+
     println!("Cancellation acknowledged and canonical input state reconciled.");
     Ok(())
 }

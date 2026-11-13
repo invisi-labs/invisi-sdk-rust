@@ -1,4 +1,4 @@
-//! Read-only discovery for the flat examples. Wallet execution remains visible in each main.
+//! Application discovery and signing adapters; wallet flows remain visible in each example main.
 use alloy_primitives::{Address, U256};
 use invisi_sdk::{
     credit::{apply_credit_draw_usage, credit_periods},
@@ -349,4 +349,124 @@ pub fn sign_authorization(request: &sdk::EvmSigningRequest) -> Result<Vec<u8>> {
     let mut output = signature.to_bytes().to_vec();
     output.push(recovery.to_byte() + 27);
     Ok(output)
+}
+
+/// Example host adapter, sharing OWNER_PRIVATE_KEY with the application authorization helper.
+/// Production apps can inject a hardware wallet or external signer instead.
+pub struct AppTransactionSender {
+    rpc: invisi_sdk::rpc::JsonRpc<HttpTransport>,
+    signer: k256::ecdsa::SigningKey,
+    address: Address,
+}
+impl AppTransactionSender {
+    pub fn connect(endpoint: &str) -> Result<Self> {
+        let key =
+            zeroize::Zeroizing::new(std::env::var("OWNER_PRIVATE_KEY").map_err(|e| e.to_string())?);
+        let bytes = zeroize::Zeroizing::new(
+            hex::decode(key.trim().trim_start_matches("0x")).map_err(|e| e.to_string())?,
+        );
+        let signer = k256::ecdsa::SigningKey::from_slice(&bytes).map_err(|e| e.to_string())?;
+        let public = signer.verifying_key().to_encoded_point(false);
+        let address =
+            Address::from_slice(&alloy_primitives::keccak256(&public.as_bytes()[1..])[12..]);
+        Ok(Self {
+            rpc: invisi_sdk::rpc::JsonRpc::new(
+                HttpTransport::new(endpoint).map_err(|e| e.to_string())?,
+            ),
+            signer,
+            address,
+        })
+    }
+    fn quantity(&self, method: &str, params: serde_json::Value) -> Result<U256> {
+        let value = self.rpc.call(method, params).map_err(|e| e.to_string())?;
+        U256::from_str_radix(
+            value
+                .as_str()
+                .ok_or("invalid host RPC quantity")?
+                .trim_start_matches("0x"),
+            16,
+        )
+        .map_err(|e| e.to_string())
+    }
+}
+impl invisi_sdk_session::session::TransactionSender for AppTransactionSender {
+    fn address(&self) -> Result<Address> {
+        Ok(self.address)
+    }
+    fn chain_id(&self) -> Result<u64> {
+        self.quantity("eth_chainId", serde_json::json!([]))?
+            .try_into()
+            .map_err(|_| "host chain ID overflow".into())
+    }
+    fn send_transaction(
+        &self,
+        call: &invisi_sdk::protocol::TransactionCall,
+        gas_limit: u64,
+    ) -> std::result::Result<
+        alloy_primitives::B256,
+        invisi_sdk_session::session::TransactionSendError,
+    > {
+        use invisi_sdk_session::session::TransactionSendError;
+        let chain_id = self.chain_id()?;
+        let nonce = self.quantity(
+            "eth_getTransactionCount",
+            serde_json::json!([self.address, "pending"]),
+        )?;
+        let gas_price = self.quantity("eth_gasPrice", serde_json::json!([]))?;
+        let append_quantity = |stream: &mut rlp::RlpStream, value: U256| {
+            let bytes = value.to_be_bytes::<32>();
+            let offset = bytes.iter().position(|b| *b != 0).unwrap_or(32);
+            stream.append(&&bytes[offset..]);
+        };
+        let prefix = |stream: &mut rlp::RlpStream| {
+            append_quantity(stream, nonce);
+            append_quantity(stream, gas_price);
+            append_quantity(stream, U256::from(gas_limit));
+            stream.append(&call.to.as_slice());
+            append_quantity(stream, call.value);
+            stream.append(&call.data.as_slice());
+        };
+        let mut unsigned = rlp::RlpStream::new_list(9);
+        prefix(&mut unsigned);
+        append_quantity(&mut unsigned, U256::from(chain_id));
+        unsigned.append_empty_data();
+        unsigned.append_empty_data();
+        let digest = alloy_primitives::keccak256(unsigned.out());
+        let (signature, recovery) = self
+            .signer
+            .sign_prehash_recoverable(digest.as_slice())
+            .map_err(|e| e.to_string())?;
+        let mut signed = rlp::RlpStream::new_list(9);
+        prefix(&mut signed);
+        append_quantity(
+            &mut signed,
+            U256::from(chain_id) * U256::from(2) + U256::from(35 + recovery.to_byte()),
+        );
+        let bytes = signature.to_bytes();
+        append_quantity(&mut signed, U256::from_be_slice(&bytes[..32]));
+        append_quantity(&mut signed, U256::from_be_slice(&bytes[32..]));
+        let raw = signed.out();
+        let hash = alloy_primitives::keccak256(&raw);
+        let value = self
+            .rpc
+            .call(
+                "eth_sendRawTransaction",
+                serde_json::json!([format!("0x{}", hex::encode(raw))]),
+            )
+            .map_err(|e| TransactionSendError {
+                message: e.to_string(),
+                transaction_hash: Some(hash),
+            })?;
+        if value
+            .as_str()
+            .and_then(|v| v.parse::<alloy_primitives::B256>().ok())
+            != Some(hash)
+        {
+            return Err(TransactionSendError {
+                message: "host RPC returned unexpected transaction hash".into(),
+                transaction_hash: Some(hash),
+            });
+        }
+        Ok(hash)
+    }
 }

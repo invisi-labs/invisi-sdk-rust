@@ -21,6 +21,8 @@ mod journal;
 pub use journal::*;
 mod preparation;
 pub use preparation::RetainedPreparation;
+mod transaction;
+pub use transaction::*;
 mod operation;
 pub use operation::*;
 #[cfg(feature = "sqlite")]

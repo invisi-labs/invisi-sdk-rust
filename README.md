@@ -174,7 +174,7 @@ Run `CHAIN_RPC_URL=https://your-independent-node cargo run -p invisi-sdk-example
 
 Preparation and quotation preserve the existing API. Independent Note/Credit checks use at most four workers per group and preserve statement order. Each prepared handle can reuse block-bound public reads during fee convergence for up to 30 seconds (1,024 entries); snapshots, canonical checks, funding nonces and signature verification remain live. Transaction export retains its existing live submission checks, now with bounded parallel input and payer validation. Portable recovery snapshots do not serialize read caches.
 
-### Broadcaster quotation
+### Broadcaster client
 
 Call `client.quote(&mut prepared, chain.clone(), &options)` before authorization or proving.
 The same client accepts ordinary Note/Credit preparations and managed Session operations.
@@ -184,3 +184,18 @@ failed quotation leaves the target unchanged. The independent RPC client remains
 `let client = invisi_sdk::broadcaster::BroadcasterClient::from_rpc(raw_client);`
 before calling the same high-level `quote`. SDK and Session preparation objects do not expose
 an alternate quotation entry point.
+
+After proving, call `client.submit(&mut target, chain.as_ref())`; cancel scheduled custody with
+`client.cancel(&mut target)`. Both accept ordinary Note/Credit preparations and Session operations.
+Managed cancellation saves the remote acknowledgement, independently reconciles canonical input
+consumption, and releases reservations before returning success. Retry after a canonical outage;
+the durable acknowledgement allows recovery without another relay request. Ordinary prepared
+objects have no wallet inventory to release. Raw transport calls are named `submit_transaction`
+and `cancel_transaction` and remain wallet-independent.
+
+`WalletSession::send_transaction(&mut target, &host_sender, options)` accepts a raw `TransactionCall`
+or its own managed `Operation`. The injected `TransactionSender` supplies the caller, chain and
+standard EVM send; options require explicit positive gas. The SDK validates caller/chain and managed
+submission, exports the exact call durably, sends once and records the hash. EVM keys remain in the
+host. Recover a `TransactionSendError.transaction_hash` by tracking and reconciling that original hash;
+uncertain sends and post-send storage failures retain reservations and never automatically resend.

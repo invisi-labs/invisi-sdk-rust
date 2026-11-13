@@ -1,46 +1,8 @@
 use invisi_sdk::{
     rpc::{EthereumChain, HttpTransport, ProtocolDeployment},
-    sdk::{self, ChainState, ManagedPrepared, Wallet},
+    sdk::{self, Wallet},
 };
 use std::{env, fs, sync::Arc};
-#[allow(dead_code)]
-pub fn load(
-) -> Result<(Arc<dyn sdk::ChainState>, sdk::PreparedTransaction), Box<dyn std::error::Error>> {
-    let deployment: ProtocolDeployment =
-        serde_json::from_slice(&fs::read(env::var("DEPLOYMENT_JSON")?)?)?;
-    let chain = Arc::new(sdk::RpcChainState::new(
-        EthereumChain::new(HttpTransport::new(&env::var("ETH_RPC_URL")?)?),
-        deployment,
-    )?);
-    let wallet = Wallet::from_address(&env::var("WALLET_ADDRESS")?)?;
-    let snapshot: sdk::PreparedSnapshot =
-        serde_json::from_slice(&fs::read(env::var("PREPARED_SNAPSHOT")?)?)?;
-    let prover = invisi_sdk::prover::NativeProver {
-        bb_binary: env::var("BB_BINARY")?.into(),
-        timeout: std::time::Duration::from_secs(600),
-        threads: 4,
-        assets: Arc::new(invisi_sdk::prover::DirectoryAssets {
-            directory: env::var("PROVER_ASSETS")?.into(),
-        }),
-        witness_executor: Arc::new(invisi_sdk::prover::NoirCli {
-            binary: env::var("NOIR_EXECUTOR")?.into(),
-            timeout: std::time::Duration::from_secs(120),
-        }),
-    };
-    let prepared = match snapshot.restore(&wallet, Some(&prover))? {
-        ManagedPrepared::Funds(p) => p,
-        _ => return Err("private Note snapshot required".into()),
-    };
-    let capability = if env::var("SOURCE_PROVIDER_ID").is_ok() {
-        Arc::new(sdk::PreparedProvenance::from_local_configuration(
-            source_configuration()?,
-        )?)
-    } else {
-        sdk::PreparedProvenance::from_prover(chain.context(), &prover)?
-    };
-    Ok((chain, prepared.reattach_provenance(capability)?))
-}
-
 #[allow(dead_code)]
 pub fn source_client(
 ) -> Result<Arc<invisi_sdk::provenance_client::ProvenanceClient>, Box<dyn std::error::Error>> {
@@ -106,4 +68,73 @@ pub fn source_configuration(
     value["budgets"] =
         serde_json::json!({"maxRootPages":10,"maxCertificates":3200,"maxTotalLeaves":100000});
     Ok(serde_json::from_value(value)?)
+}
+
+#[cfg(feature = "sqlite")]
+#[allow(dead_code)]
+pub struct SessionRuntime {
+    pub chain: Arc<sdk::RpcChainState<EthereumChain<HttpTransport>>>,
+    pub session: invisi_sdk_session::session::WalletSession,
+    pub prover: Arc<invisi_sdk::prover::NativeProver>,
+    pub from_block: u64,
+}
+#[cfg(feature = "sqlite")]
+#[allow(dead_code)]
+pub fn session_runtime() -> Result<SessionRuntime, Box<dyn std::error::Error>> {
+    use invisi_sdk_session::session::{sqlite::SQLiteRecords, EncryptedWalletStore, WalletSession};
+    let deployment: ProtocolDeployment =
+        serde_json::from_slice(&fs::read(env::var("DEPLOYMENT_JSON")?)?)?;
+    let from_block = deployment.protocol.from_block;
+    let chain = Arc::new(sdk::RpcChainState::new(
+        EthereumChain::new(HttpTransport::new(&env::var("ETH_RPC_URL")?)?),
+        deployment.clone(),
+    )?);
+    let prover = Arc::new(invisi_sdk::prover::NativeProver {
+        bb_binary: env::var("BB_BINARY")?.into(),
+        timeout: std::time::Duration::from_secs(600),
+        threads: 4,
+        assets: Arc::new(invisi_sdk::prover::DirectoryAssets {
+            directory: env::var("PROVER_ASSETS")?.into(),
+        }),
+        witness_executor: Arc::new(invisi_sdk::prover::NoirCli {
+            binary: env::var("NOIR_EXECUTOR")?.into(),
+            timeout: std::time::Duration::from_secs(120),
+        }),
+    });
+    let mut invisi = sdk::Invisi::new(chain.clone()).with_prover(prover.clone())?;
+    if env::var("SOURCE_PROVIDER_ID").is_ok() {
+        invisi = invisi.with_provenance(Arc::new(
+            sdk::PreparedProvenance::from_local_configuration(source_configuration()?)?,
+        ))?;
+    }
+    let source = Arc::new(invisi_sdk::rpc::ProtocolRpcClient::new(
+        HttpTransport::protocol(&env::var("PROTOCOL_RPC_URL")?, deployment.chain_id()?)?,
+        EthereumChain::new(HttpTransport::new(&env::var("ETH_RPC_URL")?)?),
+        deployment,
+    )?);
+    let key = zeroize::Zeroizing::new(fs::read(env::var("WALLET_STORE_KEY_FILE")?)?);
+    let storage_key: [u8; 32] = key
+        .as_slice()
+        .try_into()
+        .map_err(|_| "storage key must contain 32 raw bytes")?;
+    let store = Arc::new(EncryptedWalletStore::new(
+        Arc::new(SQLiteRecords::open(env::var("WALLET_DB")?)?),
+        storage_key,
+    )?);
+    let wallet = Wallet::from_address(&env::var("WALLET_ADDRESS")?)?;
+    let session = WalletSession::connect(invisi, wallet, store, source, "source-examples")?;
+    Ok(SessionRuntime {
+        chain,
+        session,
+        prover,
+        from_block,
+    })
+}
+#[allow(dead_code)]
+pub fn confirmation_timeout() -> Result<std::time::Duration, Box<dyn std::error::Error>> {
+    Ok(std::time::Duration::from_secs(
+        env::var("CONFIRMATION_TIMEOUT_SECONDS")
+            .unwrap_or_else(|_| "180".into())
+            .parse()?,
+    ))
 }

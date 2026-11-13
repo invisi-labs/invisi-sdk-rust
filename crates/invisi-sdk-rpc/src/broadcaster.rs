@@ -796,7 +796,7 @@ impl<T: RpcTransport> BroadcasterClient<T> {
         }
         Ok(VerifiedQuote { signed, trust })
     }
-    pub fn submit(&self, data: &[u8], verified: &VerifiedQuote) -> Result<Status> {
+    pub fn submit_transaction(&self, data: &[u8], verified: &VerifiedQuote) -> Result<Status> {
         self.submit_with_sidecars(data, verified, &[])
     }
     pub fn submit_with_sidecars(
@@ -856,7 +856,7 @@ impl<T: RpcTransport> BroadcasterClient<T> {
             Err(error) => Err(error),
         }
     }
-    pub fn cancel(&self, id: &str, cancel_token: B256) -> Result<Status> {
+    pub fn cancel_transaction(&self, id: &str, cancel_token: B256) -> Result<Status> {
         validate_id(id)?;
         if cancel_token == B256::ZERO {
             return Err(Error::Invalid("invalid cancellation token"));

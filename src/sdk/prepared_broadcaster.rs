@@ -345,7 +345,7 @@ pub trait PreparedBroadcaster: Send + Sync {
 }
 impl<T: RpcTransport + Send + Sync> PreparedBroadcaster for BroadcasterClient<T> {
     fn cancel(&self, id: &str, token: &CancellationToken) -> Result<RelayStatus> {
-        BroadcasterClient::cancel(self, id, token.0).map_err(|e| e.to_string())
+        BroadcasterClient::cancel_transaction(self, id, token.0).map_err(|e| e.to_string())
     }
     fn scheduled_fee(
         &self,
@@ -909,7 +909,7 @@ impl PreparedTransaction {
         saved.member_proof = member;
         Ok(())
     }
-    pub fn submit_broadcaster(
+    pub(crate) fn submit_for_broadcaster(
         &mut self,
         chain: &dyn ChainState,
         relay: &dyn PreparedBroadcaster,
@@ -1788,13 +1788,19 @@ mod tests {
                     .unwrap()
                     .signed())
                 }
+                "broadcaster_getTransactionStatus" => {
+                    json!({"id":request["params"][0]["id"],"state":"pending"})
+                }
+                "broadcaster_cancelTransaction" => {
+                    json!({"id":request["params"][0]["id"],"state":"cancelled"})
+                }
                 method => panic!("unexpected quote RPC: {method}"),
             };
             Ok(json!({"jsonrpc":"2.0", "id":request["id"], "result":result}))
         }
     }
     #[test]
-    fn client_quote_accepts_note_and_credit_and_leaves_failed_target_unchanged() {
+    fn client_lifecycle_accepts_note_and_credit_and_leaves_failed_target_unchanged() {
         let (chain, wallet, mut p, _) = note_fixture();
         p.outputs =
             vec![
@@ -1881,10 +1887,51 @@ mod tests {
             .unwrap(),
             before
         );
-        client.quote(&mut credit, chain, &options).unwrap();
+        client.quote(&mut credit, chain.clone(), &options).unwrap();
         assert_eq!(
             credit.broadcaster_state().unwrap().quote.quote.fee_amount,
             "1"
+        );
+
+        assert!(client.cancel(&mut note).unwrap_err().contains("recover"));
+        assert!(client.cancel(&mut credit).unwrap_err().contains("recover"));
+        let note_data = note.broadcaster_intent().unwrap().data;
+        let credit_data = credit.broadcaster_intent().unwrap().data;
+        for (state, data) in [
+            (note.broadcaster.as_mut().unwrap(), note_data),
+            (credit.broadcaster.as_mut().unwrap(), credit_data),
+        ] {
+            state.attempted = true;
+            state.submitted_data = data;
+            state.submission_id = Some("server-owned".into());
+        }
+        assert!(client
+            .submit(&mut note, chain.as_ref())
+            .unwrap_err()
+            .contains("proof"));
+        assert!(client
+            .submit(&mut credit, chain.as_ref())
+            .unwrap_err()
+            .contains("proof"));
+        for state in [
+            note.broadcaster.as_mut().unwrap(),
+            credit.broadcaster.as_mut().unwrap(),
+        ] {
+            let token = CancellationToken::generate();
+            state.quote.quote.schedule = Some(invisi_sdk_rpc::broadcaster::Schedule {
+                publish_after: "1".into(),
+                execute_before: "2".into(),
+                cancel_token_hash: token.commitment(),
+            });
+            state.cancellation_token = Some(token);
+        }
+        assert_eq!(
+            client.cancel(&mut note).unwrap().state,
+            invisi_sdk_rpc::broadcaster::StatusState::Cancelled
+        );
+        assert_eq!(
+            client.cancel(&mut credit).unwrap().state,
+            invisi_sdk_rpc::broadcaster::StatusState::Cancelled
         );
     }
     #[test]
@@ -2019,7 +2066,7 @@ mod tests {
         };
         assert_eq!(
             attempted
-                .submit_broadcaster(chain.as_ref(), &replay)
+                .submit_for_broadcaster(chain.as_ref(), &replay)
                 .unwrap()
                 .id,
             "server-id"
@@ -2038,7 +2085,7 @@ mod tests {
             ..replay.clone()
         };
         assert!(attempted
-            .submit_broadcaster(chain.as_ref(), &wrong)
+            .submit_for_broadcaster(chain.as_ref(), &wrong)
             .unwrap_err()
             .contains("ID mismatch"));
         let wrong = RetryRelay {
@@ -2046,7 +2093,7 @@ mod tests {
             ..replay.clone()
         };
         assert!(attempted
-            .submit_broadcaster(chain.as_ref(), &wrong)
+            .submit_for_broadcaster(chain.as_ref(), &wrong)
             .unwrap_err()
             .contains("not found"));
         assert_eq!(
@@ -2061,7 +2108,7 @@ mod tests {
         let mut wrong = replay.clone();
         wrong.config.endpoint = "https://other.example".into();
         assert!(attempted
-            .submit_broadcaster(chain.as_ref(), &wrong)
+            .submit_for_broadcaster(chain.as_ref(), &wrong)
             .unwrap_err()
             .contains("configuration"));
         let saved = journal::ManagedPrepared::snapshot_funds(&quoted)

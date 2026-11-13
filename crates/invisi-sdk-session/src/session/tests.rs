@@ -258,6 +258,7 @@ fn log<E: SolEvent>(event: &E, index: u32) -> CanonicalLog {
 }
 #[derive(Default)]
 struct GasGuardStore {
+    fail_writes: AtomicBool,
     inner: MemoryWalletStore,
     forbidden: AtomicBool,
 }
@@ -274,6 +275,9 @@ impl WalletStore for GasGuardStore {
             !self.forbidden.load(Ordering::SeqCst),
             "estimator wrote wallet store"
         );
+        if self.fail_writes.load(Ordering::SeqCst) {
+            return Err("injected journal save failure".into());
+        }
         self.inner.compare_and_swap(scope, revision, next)
     }
     fn persistent(&self) -> bool {
@@ -1264,12 +1268,12 @@ fn credit_relay_context_survives_encrypted_restart_and_fences_uncertain_submissi
     let mut operation = restarted.resume(&id, Some(&Backend)).unwrap();
     assert!(operation.broadcaster_state().is_some());
     assert!(operation
-        .cancel_broadcaster(relay.as_ref())
+        .cancel_for_broadcaster(relay.as_ref())
         .unwrap_err()
         .contains("recover"));
     assert_eq!(relay.attempts.load(std::sync::atomic::Ordering::SeqCst), 0);
-    assert!(operation
-        .submit_broadcaster(relay.as_ref())
+    assert!(quote_client(relay.clone(), h.chain.clone())
+        .submit(&mut operation, h.chain.as_ref())
         .unwrap_err()
         .contains("uncertain"));
     assert_eq!(relay.attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -1291,7 +1295,10 @@ fn credit_relay_context_survives_encrypted_restart_and_fences_uncertain_submissi
         .height
         .store(200, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
-        operation.submit_broadcaster(relay.as_ref()).unwrap().id,
+        quote_client(relay.clone(), h.chain.clone())
+            .submit(&mut operation, h.chain.as_ref())
+            .unwrap()
+            .id,
         "server-owned"
     );
     assert_eq!(
@@ -1315,15 +1322,15 @@ fn credit_relay_context_survives_encrypted_restart_and_fences_uncertain_submissi
     relay
         .lookup_mode
         .store(1, std::sync::atomic::Ordering::SeqCst);
-    assert!(operation
-        .submit_broadcaster(relay.as_ref())
+    assert!(quote_client(relay.clone(), h.chain.clone())
+        .submit(&mut operation, h.chain.as_ref())
         .unwrap_err()
         .contains("offline"));
     relay
         .lookup_mode
         .store(2, std::sync::atomic::Ordering::SeqCst);
-    assert!(operation
-        .submit_broadcaster(relay.as_ref())
+    assert!(quote_client(relay.clone(), h.chain.clone())
+        .submit(&mut operation, h.chain.as_ref())
         .unwrap_err()
         .contains("not found"));
     assert_eq!(relay.attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
@@ -1334,35 +1341,65 @@ struct ClientQuoteTransport {
 }
 impl crate::rpc::RpcTransport for ClientQuoteTransport {
     fn send(&self, request: &serde_json::Value) -> crate::rpc::Result<serde_json::Value> {
-        let data = hex::decode(
-            request["params"][0]["data"]
-                .as_str()
-                .unwrap()
-                .trim_start_matches("0x"),
-        )
-        .unwrap();
-        let value = match request["method"].as_str().unwrap() {
-            "broadcaster_estimateQuote" => {
-                serde_json::to_value(self.relay.fee(Address::ZERO, Some(&data)).unwrap()).unwrap()
-            }
-            "broadcaster_getQuote" => serde_json::to_value(
+        let method = request["method"].as_str().unwrap();
+        let data = request["params"][0]["data"]
+            .as_str()
+            .map(|v| hex::decode(v.trim_start_matches("0x")).unwrap())
+            .unwrap_or_default();
+        let config = self.relay.configuration();
+        let result: Result<serde_json::Value> = match method {
+            "broadcaster_estimateQuote" => self
+                .relay
+                .fee(Address::ZERO, Some(&data))
+                .map(|v| serde_json::to_value(v).unwrap()),
+            "broadcaster_getQuote" => self
+                .relay
+                .quote(
+                    &data,
+                    self.chain.context().chain_id,
+                    sdk::word_address(self.chain.context().protocol_address).unwrap(),
+                    self.chain.snapshot().unwrap().timestamp,
+                    &[],
+                )
+                .map(|v| serde_json::to_value(v.signed()).unwrap()),
+            "broadcaster_getStatus" => Ok(
+                serde_json::json!({"apiVersion":"v1","protocolVersion":"1","chainId":self.chain.context().chain_id.to_string(),"protocol":sdk::word_address(self.chain.context().protocol_address).unwrap(),"sender":config.quote_signer,"feeRecipient":config.fee_recipient,"submissionHalted":false,"provenance":{"enabled":false}}),
+            ),
+            "broadcaster_getTransactionStatus" => self
+                .relay
+                .lookup_status(request["params"][0]["id"].as_str().unwrap())
+                .and_then(|v| v.ok_or("not found".into()))
+                .map(|v| serde_json::to_value(v).unwrap()),
+            "broadcaster_submitTransaction" => {
+                let signed = crate::broadcaster::SignedQuote {
+                    quote: serde_json::from_value(request["params"][0]["quote"].clone()).unwrap(),
+                    signature: request["params"][0]["signature"].as_str().unwrap().into(),
+                    request_hash_format: None,
+                    provenance_required: None,
+                };
+                let quote = crate::broadcaster::VerifiedQuote::authenticate(
+                    signed,
+                    crate::broadcaster::Trust {
+                        chain_id: self.chain.context().chain_id,
+                        protocol: sdk::word_address(self.chain.context().protocol_address).unwrap(),
+                        signer: config.quote_signer,
+                    },
+                    &data,
+                    0,
+                    None,
+                )
+                .unwrap();
                 self.relay
-                    .quote(
-                        &data,
-                        self.chain.context().chain_id,
-                        sdk::word_address(self.chain.context().protocol_address).unwrap(),
-                        self.chain.snapshot().unwrap().timestamp,
-                        &[],
-                    )
-                    .unwrap()
-                    .signed(),
-            )
-            .unwrap(),
-            method => panic!("unexpected quote RPC: {method}"),
+                    .submit(&data, &quote, &[])
+                    .map(|v| serde_json::to_value(v).unwrap())
+            }
+            method => panic!("unexpected client RPC: {method}"),
         };
-        Ok(serde_json::json!({"jsonrpc":"2.0", "id":request["id"], "result":value}))
+        let value = result.map_err(crate::rpc::Error::Transport)?;
+        Ok(serde_json::json!({"jsonrpc":"2.0","id":request["id"],"result":value}))
     }
 }
+
 fn quote_client(
     relay: Arc<dyn sdk::PreparedBroadcaster>,
     chain: Arc<dyn sdk::ChainState>,
@@ -1543,7 +1580,9 @@ fn funds_relay_retry_reads_known_journal_even_when_inputs_are_spent() {
         .prove(&Backend, false)
         .unwrap();
     let id = op.id().to_string();
-    assert!(op.submit_broadcaster(relay.as_ref()).is_err());
+    assert!(quote_client(relay.clone(), h.chain.clone())
+        .submit(&mut op, h.chain.as_ref())
+        .is_err());
     drop(op);
     h.chain
         .spent
@@ -1555,21 +1594,24 @@ fn funds_relay_retry_reads_known_journal_even_when_inputs_are_spent() {
         .store(200, std::sync::atomic::Ordering::SeqCst);
     let mut op = h.session.resume(&id, Some(&Backend)).unwrap();
     assert_eq!(
-        op.submit_broadcaster(relay.as_ref()).unwrap().id,
+        quote_client(relay.clone(), h.chain.clone())
+            .submit(&mut op, h.chain.as_ref())
+            .unwrap()
+            .id,
         "server-owned"
     );
     relay
         .lookup_mode
         .store(1, std::sync::atomic::Ordering::SeqCst);
-    assert!(op
-        .submit_broadcaster(relay.as_ref())
+    assert!(quote_client(relay.clone(), h.chain.clone())
+        .submit(&mut op, h.chain.as_ref())
         .unwrap_err()
         .contains("offline"));
     relay
         .lookup_mode
         .store(2, std::sync::atomic::Ordering::SeqCst);
-    assert!(op
-        .submit_broadcaster(relay.as_ref())
+    assert!(quote_client(relay.clone(), h.chain.clone())
+        .submit(&mut op, h.chain.as_ref())
         .unwrap_err()
         .contains("not found"));
     assert_eq!(relay.attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
@@ -2976,7 +3018,7 @@ fn signed_aggregate_defaults_recursive_and_restores_exact_request_without_reprov
     assert!(operation.calldata(Address::ZERO).is_err());
     let id = operation.id().to_string();
     assert!(operation
-        .submit_broadcaster(relay.as_ref())
+        .submit_for_broadcaster(relay.as_ref())
         .unwrap_err()
         .contains("response lost"));
     let snapshot = h.session.snapshot().unwrap();
@@ -3002,7 +3044,7 @@ fn signed_aggregate_defaults_recursive_and_restores_exact_request_without_reprov
         .store(200, std::sync::atomic::Ordering::SeqCst);
     let mut operation = h.session.resume(&id, None).unwrap();
     assert_eq!(
-        operation.submit_broadcaster(relay.as_ref()).unwrap().id,
+        operation.submit_for_broadcaster(relay.as_ref()).unwrap().id,
         "aggregate-owned"
     );
     for mode in 0..4 {
@@ -3010,7 +3052,7 @@ fn signed_aggregate_defaults_recursive_and_restores_exact_request_without_reprov
             .base
             .lookup_mode
             .store(mode, std::sync::atomic::Ordering::SeqCst);
-        operation.submit_broadcaster(relay.as_ref()).unwrap();
+        operation.submit_for_broadcaster(relay.as_ref()).unwrap();
         let state = h.session.snapshot().unwrap();
         assert!(!state.operations[&id].status.terminal());
         assert!(state
@@ -3023,7 +3065,7 @@ fn signed_aggregate_defaults_recursive_and_restores_exact_request_without_reprov
         .lookup_mode
         .store(4, std::sync::atomic::Ordering::SeqCst);
     assert!(operation
-        .submit_broadcaster(relay.as_ref())
+        .submit_for_broadcaster(relay.as_ref())
         .unwrap_err()
         .contains("not found"));
     assert_eq!(
@@ -3611,7 +3653,7 @@ fn cached_broadcaster_repricing_preserves_offline_preparation_but_new_submission
         .lock()
         .unwrap()
         .insert(sdk::field_word(h.note.nullifier().unwrap()));
-    assert!(operation.submit_broadcaster(relay.as_ref()).is_err());
+    assert!(operation.submit_for_broadcaster(relay.as_ref()).is_err());
     assert_eq!(relay.attempts.load(Ordering::SeqCst), 0);
 }
 
@@ -3917,4 +3959,367 @@ fn confirmed_cancellation_releases_only_after_canonical_unspent_reconciliation()
     let state = h.session.snapshot().unwrap();
     assert_eq!(state.operations[&id].status, OperationStatus::Failed);
     assert!(state.notes[&h.commitment].reserved_by.is_none());
+}
+
+struct HostSender {
+    caller: Address,
+    chain_id: u64,
+    calls: Mutex<Vec<(crate::protocol::TransactionCall, u64)>>,
+    fail: bool,
+    known_error_hash: Option<B256>,
+    fail_store: Option<Arc<GasGuardStore>>,
+}
+impl TransactionSender for HostSender {
+    fn address(&self) -> Result<Address> {
+        Ok(self.caller)
+    }
+    fn chain_id(&self) -> Result<u64> {
+        Ok(self.chain_id)
+    }
+    fn send_transaction(
+        &self,
+        call: &crate::protocol::TransactionCall,
+        gas: u64,
+    ) -> std::result::Result<B256, TransactionSendError> {
+        self.calls.lock().unwrap().push((call.clone(), gas));
+        if let Some(store) = &self.fail_store {
+            store.fail_writes.store(true, Ordering::SeqCst);
+        }
+        if self.fail {
+            return Err(TransactionSendError {
+                message: "host send uncertain".into(),
+                transaction_hash: self.known_error_hash,
+            });
+        }
+        Ok(B256::repeat_byte(0x71))
+    }
+}
+fn host_sender(h: &Harness) -> HostSender {
+    HostSender {
+        caller: h.session.wallet.owner_address(),
+        chain_id: context().chain_id,
+        calls: Mutex::new(vec![]),
+        fail: false,
+        known_error_hash: None,
+        fail_store: None,
+    }
+}
+fn send_options(h: &Harness) -> SessionTransactionOptions {
+    SessionTransactionOptions {
+        caller: h.session.wallet.owner_address(),
+        gas_limit: 1_234_567,
+    }
+}
+#[test]
+fn host_transaction_send_validates_chain_caller_gas_and_preserves_exact_raw_call() {
+    let h = synced();
+    let mut call = crate::protocol::TransactionCall {
+        to: Address::repeat_byte(3),
+        data: vec![1, 2, 3],
+        value: U256::from(7),
+    };
+    let mut sender = host_sender(&h);
+    sender.chain_id += 1;
+    assert!(h
+        .session
+        .send_transaction(&mut call, &sender, send_options(&h))
+        .unwrap_err()
+        .message
+        .contains("chain"));
+    sender.chain_id -= 1;
+    sender.caller = Address::repeat_byte(9);
+    assert!(h
+        .session
+        .send_transaction(&mut call, &sender, send_options(&h))
+        .unwrap_err()
+        .message
+        .contains("caller"));
+    sender.caller = h.session.wallet.owner_address();
+    let mut options = send_options(&h);
+    options.gas_limit = 0;
+    assert!(h
+        .session
+        .send_transaction(&mut call, &sender, options)
+        .is_err());
+    assert!(sender.calls.lock().unwrap().is_empty());
+    assert_eq!(
+        h.session
+            .send_transaction(&mut call, &sender, send_options(&h))
+            .unwrap(),
+        B256::repeat_byte(0x71)
+    );
+    let calls = sender.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0.to, call.to);
+    assert_eq!(calls[0].0.value, call.value);
+    assert_eq!(calls[0].0.data, call.data);
+    assert_eq!(calls[0].1, 1_234_567);
+}
+#[test]
+fn managed_host_send_tracks_hash_once_and_retains_reservations_on_uncertainty() {
+    for fail in [false, true] {
+        let h = synced();
+        let mut operation = h
+            .session
+            .prepare_transfer(transfer(&h))
+            .unwrap()
+            .prove(&Backend, false)
+            .unwrap();
+        let id = operation.id().to_owned();
+        let mut sender = host_sender(&h);
+        sender.fail = fail;
+        let result = h
+            .session
+            .send_transaction(&mut operation, &sender, send_options(&h));
+        assert_eq!(result.is_err(), fail);
+        assert!(h
+            .session
+            .send_transaction(&mut operation, &sender, send_options(&h))
+            .is_err());
+        assert_eq!(sender.calls.lock().unwrap().len(), 1);
+        let state = h.session.snapshot().unwrap();
+        assert_eq!(
+            state.operations[&id].transaction_hash,
+            (!fail).then_some(B256::repeat_byte(0x71))
+        );
+        assert!(state.operations[&id].externalized);
+        assert!(state.notes[&h.commitment].reserved_by.is_some());
+    }
+}
+#[test]
+fn managed_host_send_reports_sent_hash_when_journal_save_fails_and_never_retries() {
+    let h = synced();
+    let mut operation = h
+        .session
+        .prepare_transfer(transfer(&h))
+        .unwrap()
+        .prove(&Backend, false)
+        .unwrap();
+    let id = operation.id().to_owned();
+    let mut sender = host_sender(&h);
+    sender.fail_store = Some(h.store.clone());
+    let error = h
+        .session
+        .send_transaction(&mut operation, &sender, send_options(&h))
+        .unwrap_err();
+    assert_eq!(error.transaction_hash, Some(B256::repeat_byte(0x71)));
+    assert!(error.to_string().contains("do not resend"));
+    h.store.fail_writes.store(false, Ordering::SeqCst);
+    let state = h.session.snapshot().unwrap();
+    assert!(state.operations[&id].transaction_hash.is_none());
+    assert!(state.notes[&h.commitment].reserved_by.is_some());
+    assert!(h
+        .session
+        .send_transaction(&mut operation, &sender, send_options(&h))
+        .is_err());
+    assert_eq!(sender.calls.lock().unwrap().len(), 1);
+    let mut recovered = h.session.resume(&id, Some(&Backend)).unwrap();
+    recovered
+        .track_transaction(error.transaction_hash.unwrap())
+        .unwrap();
+}
+#[test]
+fn managed_host_send_rejects_other_session_before_externalizing() {
+    let h = synced();
+    let other = synced();
+    let mut operation = h
+        .session
+        .prepare_transfer(transfer(&h))
+        .unwrap()
+        .prove(&Backend, false)
+        .unwrap();
+    let sender = host_sender(&h);
+    assert!(other
+        .session
+        .send_transaction(&mut operation, &sender, send_options(&h))
+        .unwrap_err()
+        .message
+        .contains("another session"));
+    assert!(sender.calls.lock().unwrap().is_empty());
+    assert!(!h.session.snapshot().unwrap().operations[operation.id()].externalized);
+}
+
+struct CancellationTransport {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+    offline: Arc<AtomicBool>,
+}
+impl crate::rpc::RpcTransport for CancellationTransport {
+    fn send(&self, request: &serde_json::Value) -> crate::rpc::Result<serde_json::Value> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.offline.load(Ordering::SeqCst) {
+            return Err(crate::rpc::Error::Transport("relay unavailable".into()));
+        }
+        assert_eq!(request["method"], "broadcaster_cancelTransaction");
+        Ok(
+            serde_json::json!({"jsonrpc":"2.0","id":request["id"],"result":{"id":request["params"][0]["id"],"state":"cancelled"}}),
+        )
+    }
+}
+#[test]
+fn client_cancel_persists_ack_before_canonical_release_and_retries_without_relay() {
+    use crate::broadcaster::*;
+    let h = synced();
+    let mut operation = h
+        .session
+        .prepare_transfer(transfer(&h))
+        .unwrap()
+        .prove(&Backend, false)
+        .unwrap();
+    let id = operation.id().to_owned();
+    operation
+        .calldata(h.session.wallet.owner_address())
+        .unwrap();
+    let config = Configuration {
+        endpoint: "https://relay.example".into(),
+        quote_signer: Address::repeat_byte(8),
+        fee_recipient: Address::repeat_byte(9),
+    };
+    let token = sdk::CancellationToken::generate();
+    let saved = sdk::PreparedBroadcasterState {
+        cancellation_token: Some(token.clone()),
+        endpoint: config.endpoint.clone(),
+        signer: config.quote_signer,
+        fee_recipient: config.fee_recipient,
+        quote: SignedQuote {
+            quote: Quote {
+                schedule: Some(Schedule {
+                    publish_after: "1".into(),
+                    execute_before: "2".into(),
+                    cancel_token_hash: token.commitment(),
+                }),
+                execution: Execution::Direct,
+                token: Address::repeat_byte(1),
+                fee_recipient: config.fee_recipient,
+                fee_amount: "1".into(),
+                deadline: "3".into(),
+                max_gas: "100000".into(),
+                request_hash: B256::repeat_byte(3),
+            },
+            signature: "unused cancellation signature".into(),
+            request_hash_format: None,
+            provenance_required: None,
+        },
+        intent_hash: B256::repeat_byte(3),
+        sidecars: vec![],
+        attempted: true,
+        submission_id: None,
+        submitted_data: vec![],
+        member_proof: None,
+    };
+    // Restore through the snapshot codec so the test exercises the same persistence boundary as restart.
+    let mut state = h.session.snapshot().unwrap();
+    let record = state.operations.get_mut(&id).unwrap();
+    let mut snapshot = serde_json::to_value(&record.snapshot).unwrap();
+    snapshot["broadcaster"] = serde_json::to_value(&saved).unwrap();
+    record.snapshot = serde_json::from_value(snapshot).unwrap();
+    record.broadcaster_id = Some(id.clone());
+    h.session.commit(state).unwrap();
+    let mut operation = h.session.resume(&id, Some(&Backend)).unwrap();
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let offline = Arc::new(AtomicBool::new(false));
+    let client = BroadcasterClient::new(
+        config,
+        CancellationTransport {
+            calls: calls.clone(),
+            offline: offline.clone(),
+        },
+    )
+    .unwrap();
+    assert!(client
+        .cancel(&mut operation)
+        .unwrap_err()
+        .contains("recover"));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let mut state = h.session.snapshot().unwrap();
+    state
+        .operations
+        .get_mut(&id)
+        .unwrap()
+        .broadcaster_submission_id = Some("server-id".into());
+    h.session.commit(state).unwrap();
+    let nullifier = h.session.snapshot().unwrap().notes[&h.commitment].nullifier;
+    h.chain.spent.lock().unwrap().insert(nullifier);
+    assert!(client.cancel(&mut operation).is_err());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let state = h.session.snapshot().unwrap();
+    assert!(state.operations[&id].broadcaster_cancelled);
+    assert!(state.notes[&h.commitment].reserved_by.is_some());
+    offline.store(true, Ordering::SeqCst);
+    h.chain.spent.lock().unwrap().clear();
+    h.chain.offline.store(true, Ordering::SeqCst);
+    assert!(client.cancel(&mut operation).is_err());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    h.chain.offline.store(false, Ordering::SeqCst);
+    // Reopen the journal after the durable acknowledgement, while the relay remains offline.
+    operation = h.session.resume(&id, Some(&Backend)).unwrap();
+    h.chain.reorg.store(true, Ordering::SeqCst);
+    assert!(client.cancel(&mut operation).is_err());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    h.chain.reorg.store(false, Ordering::SeqCst);
+    assert_eq!(
+        client.cancel(&mut operation).unwrap().state,
+        StatusState::Cancelled
+    );
+    assert_eq!(
+        client.cancel(&mut operation).unwrap().state,
+        StatusState::Cancelled
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(h.session.snapshot().unwrap().notes[&h.commitment]
+        .reserved_by
+        .is_none());
+}
+
+#[test]
+fn managed_host_send_preserves_known_hash_on_host_error_without_resending() {
+    let h = synced();
+    let mut operation = h
+        .session
+        .prepare_transfer(transfer(&h))
+        .unwrap()
+        .prove(&Backend, false)
+        .unwrap();
+    let mut sender = host_sender(&h);
+    sender.fail = true;
+    sender.known_error_hash = Some(B256::repeat_byte(0x72));
+    let error = h
+        .session
+        .send_transaction(&mut operation, &sender, send_options(&h))
+        .unwrap_err();
+    assert_eq!(error.transaction_hash, sender.known_error_hash);
+    assert!(error.to_string().contains("do not resend"));
+    assert!(h
+        .session
+        .send_transaction(&mut operation, &sender, send_options(&h))
+        .is_err());
+    assert_eq!(sender.calls.lock().unwrap().len(), 1);
+    assert!(h.session.snapshot().unwrap().notes[&h.commitment]
+        .reserved_by
+        .is_some());
+}
+#[test]
+fn managed_host_send_rejects_independent_worker_of_same_store() {
+    let h = synced();
+    let mut operation = h
+        .session
+        .prepare_transfer(transfer(&h))
+        .unwrap()
+        .prove(&Backend, false)
+        .unwrap();
+    let other = WalletSession::connect(
+        h.session.invisi.clone(),
+        h.session.wallet.clone(),
+        h.session.store.clone(),
+        h.session.source.clone(),
+        h.session.scope.namespace.clone(),
+    )
+    .unwrap();
+    let sender = host_sender(&h);
+    assert!(other
+        .send_transaction(&mut operation, &sender, send_options(&h))
+        .unwrap_err()
+        .message
+        .contains("worker"));
+    assert!(sender.calls.lock().unwrap().is_empty());
+    assert!(!h.session.snapshot().unwrap().operations[operation.id()].externalized);
 }

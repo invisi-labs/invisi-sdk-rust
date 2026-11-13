@@ -10,7 +10,7 @@ cargo run -p invisi-sdk-examples --bin transfer -- --execute
 cargo run -p invisi-sdk-examples --features sqlite --bin restore-session -- --execute
 ```
 
-`note-output` constructs an encrypted Note offline using public receiving material only. Every other binary returns before opening configuration, files, databases, keys or network unless `--execute` is present. Examples 01–06 export unsigned EVM transactions for the application to review, sign and submit. Broadcaster and independent Source proof flows live in `07-broadcaster`.
+`note-output` constructs an encrypted Note offline using public receiving material only. Examples 01–06 and the Broadcaster submit/cancel examples require `--execute` before opening their configuration. Source examples `pre-submit-provenance` and `recover-and-submit-provenance` run their configured normal flow directly with `--features sqlite`. Examples 01–06 export unsigned EVM transactions for the application to review, sign and submit. Broadcaster and independent Source proof flows live in `07-broadcaster`.
 
 ## Files
 
@@ -22,6 +22,7 @@ cargo run -p invisi-sdk-examples --features sqlite --bin restore-session -- --ex
 | `04-credit` | `create-credit`, `draw-credit`, `update-credit`, `revoke-credit` | Available spending authority, distinct payer draws, policy updates, public EVM revocation |
 | `05-session` | `restore-session`, `send-session`, `create-credit-session`, `draw-credit-session`, `update-credit-session`, `revoke-credit-session` | Encrypted SQLite inventory, application decryption callbacks, managed operations and recovery |
 | `06-disclosure` | `disclose-note`, `disclose-credit` | Explicit financial opening exports and independent commitment checks |
+| `07-broadcaster` | `prepare-and-broadcast`, `pre-submit-provenance`, `recover-and-submit-provenance`, `scheduled-broadcaster`, `transaction-confirmation` | Client-owned Broadcaster lifecycle, host-paid Source precheck, encrypted recovery and independent confirmation |
 
 ## Public Wallet initialization
 
@@ -159,11 +160,11 @@ Run the other binaries without `--execute` to inspect their guard behavior witho
 
 ## Broadcaster and independent Source proofs
 
-See `07-broadcaster` for fee-frozen prepared quotation, ready transaction proving and broadcaster submission. Example 02 takes `PREPARED_SNAPSHOT` plus local prover/Source configuration, prints the complete public packet and submits it before the transaction. Example 03 reads only `SOURCE_PROOF_JSON` plus public pins in flat environment settings to validate and resubmit before or after chain confirmation; it needs no private wallet state, proof generator or transaction hash. Ordinary examples 01–06 have no optional Broadcaster mode or Source availability requirement.
+See `07-broadcaster` for fee-frozen quotation and submission. Example 02 is a normal managed payment: synchronize/decrypt inventory, prepare, authorize, prove, submit Source precheck, then call `session.send_transaction` with a host signer and an explicit `GAS_LIMIT`. It prints the saved operation ID, Source digest/tracking, and sent hash, waits for independent native finality, reconciles inventory, and waits for Source recognition. Example 03 reopens the encrypted session by `OPERATION_ID`, records `HOST_TRANSACTION_HASH` only when a crash prevented the original hash from being journaled, reconciles canonical state, generates Source evidence from retained openings, submits it and waits for recognition. Already completed payments use their retained journal directly. Both examples require `--features sqlite` and run directly without scenario flags. The native `AppDecryptor` remains a host integration placeholder.
 
-Broadcaster uses separate `estimateQuote` and `getQuote` requests. Its server assigns submission IDs; applications retain those IDs and the exact final request. Source uses its official default endpoint or an explicitly configured trusted endpoint, with bounded checkpoint replay and locally verified proof generation. No policy ID or mandatory transaction hash is part of the public Source packet.
+These flows use `DEPLOYMENT_JSON`, `ETH_RPC_URL`, `PROTOCOL_RPC_URL`, `WALLET_ADDRESS`, `WALLET_DB`, `WALLET_STORE_KEY_FILE`, `BB_BINARY`, `NOIR_EXECUTOR` and `PROVER_ASSETS`. Example 02 also uses `TOKEN_ADDRESS`, `RECIPIENT_ADDRESS`, `AMOUNT`, `DEADLINE`, `CALLER_ADDRESS`, positive `GAS_LIMIT`, and `OWNER_PRIVATE_KEY` for the example application signer. The same host signer signs EIP-712 authorizations and standard EIP-155 Ethereum transactions; the SDK never receives the EVM private key. Production hosts can inject a hardware wallet or external signer. SQLite stores the encrypted operation journal; the examples do not export extra JSON records. Optional `CONFIRMATION_TIMEOUT_SECONDS` defaults to 180.
 
-Example 01 uses `BROADCASTER_ENDPOINT`, `BROADCASTER_QUOTE_SIGNER`, `BROADCASTER_FEE_RECIPIENT` and a positive `MAX_FEE_AMOUNT`. Source trust uses `SOURCE_CHAIN_ID`, `SOURCE_PROTOCOL_ADDRESS`, `SOURCE_GENERATION`, `SOURCE_PROVIDER_ID`, `SOURCE_SIGNING_KEY_ID` and `SOURCE_SIGNING_PUBLIC_KEY`; `SOURCE_ENDPOINT` defaults to the official service. Local Source proving additionally requires `SOURCE_ASSET_ROOT`, `BB_BINARY` and `NOIR_EXECUTOR`. Example 03 takes the public packet in `SOURCE_PROOF_JSON`, without opening those proving assets. Examples print outputs and never create record/configuration files.
+Example 01 uses `BROADCASTER_ENDPOINT`, `BROADCASTER_QUOTE_SIGNER`, `BROADCASTER_FEE_RECIPIENT` and positive `MAX_FEE_AMOUNT`. Registering the native prover enables the official Source configuration automatically. Private Source overrides use `SOURCE_CHAIN_ID`, `SOURCE_PROTOCOL_ADDRESS`, `SOURCE_GENERATION`, `SOURCE_PROVIDER_ID`, `SOURCE_SIGNING_KEY_ID`, `SOURCE_SIGNING_PUBLIC_KEY` and optional `SOURCE_ENDPOINT`; local override proving additionally needs `SOURCE_ASSET_ROOT`. Ordinary examples 01–06 have no optional Broadcaster mode or Source availability requirement.
 
 The SQLite `restore-session` example uses `RecordWalletStore` for independently encrypted private rows and `SQLiteRecords::open_public` for a deployment-wide canonical cache in a separate table of the same database. `session.scan` recovers the current head first, then historical gaps; reuse the public store for other accounts while providing separate private account storage keys. `AppDecryptor` is a host integration stub: implement complete-context native detection and explicit nonrecipient/authentication-ambiguity/error outcomes before using `--execute`. Shared history never requires exporting detection or viewing keys.
 
@@ -201,6 +202,9 @@ The complete `prepare-and-broadcast` example
 also accepts `PUBLISH_AFTER` and optional `EXECUTE_BEFORE` (defaults to 300
 seconds after publication). Set the signed operation deadline beyond execution
 plus the broadcaster's advertised slack. For restart-safe cancellation, use a
-managed session, call `client.quote(&mut operation, chain.clone(), &options)` before submit, call
-`cancel_broadcaster`, then `reconcile_cancelled_operation` to check canonical
-consumption before releasing reservations. Keep operation journals encrypted.
+managed session, call `client.quote(&mut operation, chain.clone(), &options)`,
+`client.submit(&mut operation, chain.as_ref())`, then `client.cancel(&mut operation)`.
+Cancellation persists the acknowledgement and independently checks canonical consumption
+before returning and releasing reservations. Retry cancellation after canonical outages;
+the saved acknowledgement permits recovery even while the relay is offline.
+Keep operation journals encrypted.

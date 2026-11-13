@@ -235,7 +235,7 @@ impl PreparedCredit {
         }
         Err("Credit relay fee convergence budget exceeded".into())
     }
-    pub fn submit_broadcaster(
+    pub(crate) fn submit_for_broadcaster(
         &mut self,
         chain: &dyn ChainState,
         relay: &dyn PreparedBroadcaster,

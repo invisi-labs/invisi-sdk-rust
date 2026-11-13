@@ -214,12 +214,11 @@ impl Operation {
         self.requests.clear();
         Ok(())
     }
-    /// Cancellation never releases reservations; use canonical reconciliation afterwards.
-    pub fn cancel_broadcaster(
+    pub(crate) fn cancel_for_broadcaster(
         &mut self,
         relay: &dyn sdk::PreparedBroadcaster,
     ) -> Result<invisi_sdk_rpc::broadcaster::Status> {
-        let state = self.current()?;
+        let state = self.session.snapshot()?;
         let record = state
             .operations
             .get(&self.id)
@@ -236,22 +235,45 @@ impl Operation {
         {
             return Err("saved broadcaster submission ID mismatch".into());
         }
+        let config = relay.configuration();
+        if config.endpoint != saved.endpoint
+            || config.quote_signer != saved.signer
+            || config.fee_recipient != saved.fee_recipient
+        {
+            return Err("saved cancellation relay scope mismatch".into());
+        }
+        // The durable acknowledgement permits canonical recovery while the relay is offline.
+        if record.broadcaster_cancelled {
+            let status = record.broadcaster_cancellation_status.clone().unwrap_or(
+                invisi_sdk_rpc::broadcaster::Status {
+                    id: submission_id.to_owned(),
+                    state: invisi_sdk_rpc::broadcaster::StatusState::Cancelled,
+                    transaction_hash: None,
+                    confirmation: None,
+                },
+            );
+            self.session.reconcile_cancelled_operation(&self.id)?;
+            return Ok(status);
+        }
+        self.current()?;
         saved.submission_id = Some(submission_id.to_owned());
         let status = saved.cancel(relay, submission_id)?;
         if status.state == invisi_sdk_rpc::broadcaster::StatusState::Cancelled
             && status.transaction_hash.is_none()
         {
             let mut state = self.current()?;
-            state
+            let record = state
                 .operations
                 .get_mut(&self.id)
-                .ok_or("operation not found")?
-                .broadcaster_cancelled = true;
+                .ok_or("operation not found")?;
+            record.broadcaster_cancelled = true;
+            record.broadcaster_cancellation_status = Some(status.clone());
             self.session.commit(state)?;
+            self.session.reconcile_cancelled_operation(&self.id)?;
         }
         Ok(status)
     }
-    pub fn submit_broadcaster(
+    pub(crate) fn submit_for_broadcaster(
         &mut self,
         relay: &dyn sdk::PreparedBroadcaster,
     ) -> Result<invisi_sdk_rpc::broadcaster::Status> {
@@ -445,10 +467,18 @@ impl Operation {
         self.generation = generation;
         let status = match &mut self.prepared {
             ManagedPrepared::Funds(v) => {
-                v.submit_broadcaster(self.session.invisi.chain.as_ref(), relay)
+                crate::broadcaster::BroadcasterSubmitTarget::submit_for_client(
+                    v,
+                    self.session.invisi.chain.as_ref(),
+                    relay,
+                )
             }
             ManagedPrepared::Credit(v) => {
-                v.submit_broadcaster(self.session.invisi.chain.as_ref(), relay)
+                crate::broadcaster::BroadcasterSubmitTarget::submit_for_client(
+                    v,
+                    self.session.invisi.chain.as_ref(),
+                    relay,
+                )
             }
         }?;
         let mut next = self.current()?;
@@ -816,6 +846,7 @@ impl WalletSession {
                 broadcaster_id: None,
                 broadcaster_submission_id: None,
                 broadcaster_cancelled: false,
+                broadcaster_cancellation_status: None,
                 resolved_at: None,
             },
         );
@@ -1403,7 +1434,7 @@ impl WalletSession {
         self.release_inactive_operation(id, false)
     }
     /// Cancellation acknowledges relay custody only; independently reconcile canonical consumption.
-    pub fn reconcile_cancelled_operation(&self, id: &str) -> Result<()> {
+    pub(crate) fn reconcile_cancelled_operation(&self, id: &str) -> Result<()> {
         self.release_inactive_operation(id, true)
     }
     fn release_inactive_operation(&self, id: &str, cancelled: bool) -> Result<()> {
@@ -1413,6 +1444,14 @@ impl WalletSession {
         }
         let record = state.operations.get(id).ok_or("operation not found")?;
         if record.status.terminal() {
+            if cancelled
+                && record.broadcaster_cancelled
+                && record.status == OperationStatus::Failed
+                && record.resolved_at.is_some()
+                && record.transaction_hash.is_none()
+            {
+                return Ok(());
+            }
             return Err("operation is already terminal".into());
         }
         let block = self.invisi.chain.snapshot()?;
@@ -1584,5 +1623,54 @@ impl crate::broadcaster::BroadcasterQuoteTarget for Operation {
             return Err("broadcaster chain differs from managed operation".into());
         }
         self.quote_for_broadcaster(relay, options)
+    }
+}
+
+impl crate::broadcaster::BroadcasterSubmitTarget for Operation {
+    fn submit_for_client(
+        &mut self,
+        _chain: &dyn sdk::ChainState,
+        relay: &dyn sdk::PreparedBroadcaster,
+    ) -> Result<crate::broadcaster::Status> {
+        self.submit_for_broadcaster(relay)
+    }
+}
+impl crate::broadcaster::BroadcasterCancelTarget for Operation {
+    fn cancel_for_client(
+        &mut self,
+        relay: &dyn sdk::PreparedBroadcaster,
+    ) -> Result<crate::broadcaster::Status> {
+        self.cancel_for_broadcaster(relay)
+    }
+}
+
+impl super::SessionTransactionTarget for Operation {
+    fn prepare_send(
+        &mut self,
+        session: &WalletSession,
+        caller: Address,
+    ) -> Result<crate::protocol::TransactionCall> {
+        if self.session.scope != session.scope
+            || !Arc::ptr_eq(&self.session.store, &session.store)
+            || !Arc::ptr_eq(
+                &self.session.validated_snapshot,
+                &session.validated_snapshot,
+            )
+        {
+            return Err("operation belongs to another session scope, store or worker".into());
+        }
+        let state = self.current()?;
+        let record = &state.operations[&self.id];
+        if record.externalized || record.transaction_hash.is_some() {
+            return Err(
+                "operation was already externalized; recover and reconcile instead of resending"
+                    .into(),
+            );
+        }
+        self.validate_submission(caller)?;
+        self.calldata(caller)
+    }
+    fn record_sent(&mut self, hash: B256) -> Result<()> {
+        self.track_transaction(hash)
     }
 }

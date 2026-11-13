@@ -1313,7 +1313,7 @@ mod lifecycle_tests {
         let original = prepared.preparation_reads.clone().unwrap();
         for _ in 0..2 {
             prepared = prepared
-                .with_broadcaster(
+                .quote_for_broadcaster(
                     chain.clone(),
                     Arc::new(CreditRelay {
                         fees: 0.into(),
@@ -1344,7 +1344,7 @@ mod lifecycle_tests {
             )
             .unwrap();
         assert!(prepared
-            .with_broadcaster(
+            .quote_for_broadcaster(
                 chain,
                 std::sync::Arc::new(RejectedRelay),
                 &BroadcasterOptions {
@@ -1467,7 +1467,7 @@ mod lifecycle_tests {
             };
             assert!(restarted.reprice.is_some());
             let prepared = restarted
-                .with_broadcaster(
+                .quote_for_broadcaster(
                     chain.clone(),
                     relay.clone(),
                     &BroadcasterOptions {
@@ -2386,7 +2386,7 @@ mod revocation_tests {
             submits: std::sync::atomic::AtomicUsize::new(0),
         });
         let prepared = original
-            .with_broadcaster(
+            .quote_for_broadcaster(
                 chain.clone(),
                 relay.clone(),
                 &BroadcasterOptions {

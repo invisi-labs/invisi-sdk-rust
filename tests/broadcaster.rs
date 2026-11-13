@@ -74,7 +74,7 @@ fn quotes_reject_different_context_expiry_and_noncanonical_calldata() {
 }
 #[test]
 fn client_verifies_registered_quote_and_submit_status_correlation() {
-    use invisi_sdk::{
+    use invisi_sdk_rpc::{
         broadcaster::{BroadcasterClient, Configuration},
         rpc::{Result, RpcTransport},
     };
@@ -239,7 +239,7 @@ fn recursive_member_wire_rejects_an_evm_bundle_before_transport() {
 #[test]
 fn broadcaster_aggregate_confirmation_matches_business_member_exactly_once() {
     use alloy_sol_types::SolCall;
-    use invisi_sdk::{
+    use invisi_sdk_rpc::{
         broadcaster::{matches_execution_transaction, Execution},
         protocol::InvisiProtocol as P,
     };
@@ -293,7 +293,7 @@ fn broadcaster_aggregate_confirmation_matches_business_member_exactly_once() {
 fn aggregate_rpc_sends_the_public_member_and_checks_nested_capability() {
     use alloy_primitives::U256;
     use alloy_sol_types::SolCall;
-    use invisi_sdk::{
+    use invisi_sdk_rpc::{
         broadcaster::{
             BroadcasterClient, Configuration, Execution, MemberProof, Quote, VerifiedQuote,
         },

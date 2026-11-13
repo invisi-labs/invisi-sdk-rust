@@ -167,7 +167,7 @@ impl Operation {
             ManagedPrepared::Credit(v) => v.broadcaster_state(),
         }
     }
-    pub fn with_broadcaster(
+    pub(crate) fn quote_for_broadcaster(
         &mut self,
         relay: Arc<dyn sdk::PreparedBroadcaster>,
         options: &sdk::BroadcasterOptions,
@@ -177,16 +177,26 @@ impl Operation {
             return Err("cannot reprice an externalized operation".into());
         }
         let prepared = match &self.prepared {
-            ManagedPrepared::Funds(v) => ManagedPrepared::Funds(v.with_broadcaster(
-                self.preparation_chain()?,
-                relay,
-                options,
-            )?),
-            ManagedPrepared::Credit(v) => ManagedPrepared::Credit(v.with_broadcaster(
-                self.preparation_chain()?,
-                relay,
-                options,
-            )?),
+            ManagedPrepared::Funds(v) => ManagedPrepared::Funds({
+                let mut quoted = v.clone();
+                crate::broadcaster::BroadcasterQuoteTarget::apply_broadcaster_quote(
+                    &mut quoted,
+                    self.preparation_chain()?,
+                    relay,
+                    options,
+                )?;
+                quoted
+            }),
+            ManagedPrepared::Credit(v) => ManagedPrepared::Credit({
+                let mut quoted = v.clone();
+                crate::broadcaster::BroadcasterQuoteTarget::apply_broadcaster_quote(
+                    &mut quoted,
+                    self.preparation_chain()?,
+                    relay,
+                    options,
+                )?;
+                quoted
+            }),
         };
         let record = state
             .operations
@@ -1560,5 +1570,19 @@ impl WalletSession {
                 .map(ManagedPrepared::Credit)
         })
         .map_err(|e| e.with_operation("prepare_revoke_credit"))
+    }
+}
+
+impl crate::broadcaster::BroadcasterQuoteTarget for Operation {
+    fn apply_broadcaster_quote(
+        &mut self,
+        chain: std::sync::Arc<dyn sdk::ChainState>,
+        relay: std::sync::Arc<dyn sdk::PreparedBroadcaster>,
+        options: &sdk::BroadcasterOptions,
+    ) -> Result<()> {
+        if chain.context() != self.session.scope.context {
+            return Err("broadcaster chain differs from managed operation".into());
+        }
+        self.quote_for_broadcaster(relay, options)
     }
 }

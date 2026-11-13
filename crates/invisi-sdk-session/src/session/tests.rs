@@ -1233,9 +1233,10 @@ fn credit_relay_context_survives_encrypted_restart_and_fences_uncertain_submissi
         lookup_mode: std::sync::atomic::AtomicUsize::new(0),
         attempts: std::sync::atomic::AtomicUsize::new(0),
     });
-    operation
-        .with_broadcaster(
-            relay.clone(),
+    quote_client(relay.clone(), h.chain.clone())
+        .quote(
+            &mut operation,
+            h.chain.clone(),
             &sdk::BroadcasterOptions {
                 max_fee_amount: Some(U256::from(100)),
                 ..Default::default()
@@ -1326,6 +1327,51 @@ fn credit_relay_context_survives_encrypted_restart_and_fences_uncertain_submissi
         .unwrap_err()
         .contains("not found"));
     assert_eq!(relay.attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+struct ClientQuoteTransport {
+    relay: Arc<dyn sdk::PreparedBroadcaster>,
+    chain: Arc<dyn sdk::ChainState>,
+}
+impl crate::rpc::RpcTransport for ClientQuoteTransport {
+    fn send(&self, request: &serde_json::Value) -> crate::rpc::Result<serde_json::Value> {
+        let data = hex::decode(
+            request["params"][0]["data"]
+                .as_str()
+                .unwrap()
+                .trim_start_matches("0x"),
+        )
+        .unwrap();
+        let value = match request["method"].as_str().unwrap() {
+            "broadcaster_estimateQuote" => {
+                serde_json::to_value(self.relay.fee(Address::ZERO, Some(&data)).unwrap()).unwrap()
+            }
+            "broadcaster_getQuote" => serde_json::to_value(
+                self.relay
+                    .quote(
+                        &data,
+                        self.chain.context().chain_id,
+                        sdk::word_address(self.chain.context().protocol_address).unwrap(),
+                        self.chain.snapshot().unwrap().timestamp,
+                        &[],
+                    )
+                    .unwrap()
+                    .signed(),
+            )
+            .unwrap(),
+            method => panic!("unexpected quote RPC: {method}"),
+        };
+        Ok(serde_json::json!({"jsonrpc":"2.0", "id":request["id"], "result":value}))
+    }
+}
+fn quote_client(
+    relay: Arc<dyn sdk::PreparedBroadcaster>,
+    chain: Arc<dyn sdk::ChainState>,
+) -> crate::broadcaster::BroadcasterClient<ClientQuoteTransport> {
+    crate::broadcaster::BroadcasterClient::new(
+        relay.configuration(),
+        ClientQuoteTransport { relay, chain },
+    )
+    .unwrap()
 }
 struct SessionCreditRelay {
     requests: Mutex<Vec<serde_json::Value>>,
@@ -1477,14 +1523,16 @@ fn funds_relay_retry_reads_known_journal_even_when_inputs_are_spent() {
         lookup_mode: std::sync::atomic::AtomicUsize::new(0),
         attempts: std::sync::atomic::AtomicUsize::new(0),
     });
-    op.with_broadcaster(
-        relay.clone(),
-        &sdk::BroadcasterOptions {
-            max_fee_amount: Some(U256::from(100)),
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    quote_client(relay.clone(), h.chain.clone())
+        .quote(
+            &mut op,
+            h.chain.clone(),
+            &sdk::BroadcasterOptions {
+                max_fee_amount: Some(U256::from(100)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
     let request = op.export_wallet_request("funds-relay").unwrap();
     let response: sdk::WalletResponse =
         serde_json::from_value(crate::wallet::execute(&key(1), &request.as_value()).unwrap())
@@ -2772,7 +2820,7 @@ fn signed_direct_quote_rejects_manual_recursive_proving() {
         attempts: std::sync::atomic::AtomicUsize::new(0),
     });
     operation
-        .with_broadcaster(
+        .quote_for_broadcaster(
             relay,
             &sdk::BroadcasterOptions {
                 max_fee_amount: Some(U256::from(100)),
@@ -2906,7 +2954,7 @@ fn signed_aggregate_defaults_recursive_and_restores_exact_request_without_reprov
         request: std::sync::Mutex::new(None),
     });
     operation
-        .with_broadcaster(
+        .quote_for_broadcaster(
             relay.clone(),
             &sdk::BroadcasterOptions {
                 max_fee_amount: Some(U256::from(100)),
@@ -3542,7 +3590,7 @@ fn cached_broadcaster_repricing_preserves_offline_preparation_but_new_submission
         attempts: 0.into(),
     });
     operation
-        .with_broadcaster(
+        .quote_for_broadcaster(
             relay.clone(),
             &sdk::BroadcasterOptions {
                 max_fee_amount: Some(U256::from(10)),

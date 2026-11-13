@@ -80,3 +80,11 @@ Normal online private refresh retains a typed preparation snapshot inside encryp
 After reopening the encrypted store, existing `prepare_transfer`, `prepare_shield` and all four Credit preparation methods automatically reuse these facts. Local wallet authorization, EOA funding/revocation signatures, proving with local artifacts and final `operation.calldata(caller)` export can run without chain or Protocol RPC access. A missing fact falls back to ordinary online preparation; unsupported nonce readers retain online-only behavior. New tokens and third-party funding may require an online refresh. Credit draws use the later of local construction time and cached block time for usage periods, while preserving the original canonical anchor in the saved operation.
 
 `operation.submission_validation_pending()` reports that exported calldata still requires live checks. External senders must call `operation.validate_submission(caller)` immediately before sending. The live gate verifies deployment/canonical identity, deadlines and usage period, funding nonce/signature, root acceptance, input consumption, Credit revocation/allocation and payer balances/allowances. Managed Broadcaster submission performs its live gate automatically. Cached facts never establish that a transaction is currently safe to submit. Saved operations retain their preparation facts across restarts; restoring a proof verifies it locally rather than proving or requesting authorization again.
+
+Broadcaster quotation starts at the SDK client:
+`client.quote(&mut operation, chain.clone(), &options)?` accepts both managed
+Note and Credit operations. It freezes fees before authorization/proving and
+commits the quote and any scheduling capability through the encrypted Store.
+A successful quote advances the operation generation; a failed quote preserves
+the previous journal and reservations. Use the original local operation ID to
+resume, and the Broadcaster-returned opaque ID to query remote status.

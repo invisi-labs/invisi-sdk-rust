@@ -63,7 +63,7 @@ fn broadcaster_status_lookup_only_treats_current_unknown_request_code_as_missing
         }
     }
     for code in [-32001, -32000] {
-        let client = invisi_sdk::broadcaster::BroadcasterClient::new(
+        let client = invisi_sdk_rpc::broadcaster::BroadcasterClient::new(
             invisi_sdk::broadcaster::Configuration {
                 endpoint: "https://relay.example".into(),
                 quote_signer: Address::repeat_byte(1),

@@ -89,9 +89,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     )?;
 
-    let prepared = prepared.with_broadcaster(
+    let mut prepared = prepared;
+    relay.quote(
+        &mut prepared,
         chain.clone(),
-        relay.clone(),
         &sdk::BroadcasterOptions {
             schedule: env::var("PUBLISH_AFTER")
                 .ok()

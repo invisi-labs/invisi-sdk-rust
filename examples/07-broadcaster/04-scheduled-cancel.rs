@@ -108,8 +108,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         automatic_change: true,
     })?;
     // Quotation persists the scoped cancellation capability in the encrypted journal before submission.
-    operation.with_broadcaster(
-        relay.clone(),
+    relay.quote(
+        &mut operation,
+        chain.clone(),
         &sdk::BroadcasterOptions {
             schedule: Some(sdk::BroadcasterSchedule {
                 publish_after,

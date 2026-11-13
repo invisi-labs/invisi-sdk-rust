@@ -411,6 +411,82 @@ impl<T: RpcTransport + Send + Sync> PreparedBroadcaster for BroadcasterClient<T>
             .map_err(|e| e.to_string())
     }
 }
+impl<T: RpcTransport + Send + Sync + 'static> PreparedBroadcaster
+    for crate::broadcaster::BroadcasterClient<T>
+{
+    fn cancel(&self, id: &str, token: &CancellationToken) -> Result<RelayStatus> {
+        PreparedBroadcaster::cancel(self.rpc(), id, token)
+    }
+    fn scheduled_fee(
+        &self,
+        token: Address,
+        data: Option<&[u8]>,
+        schedule: Option<&invisi_sdk_rpc::broadcaster::Schedule>,
+    ) -> Result<RelayFee> {
+        PreparedBroadcaster::scheduled_fee(self.rpc(), token, data, schedule)
+    }
+    fn scheduled_quote(
+        &self,
+        data: &[u8],
+        chain_id: u64,
+        protocol: Address,
+        now: u64,
+        sidecars: &[ProofSidecar],
+        schedule: Option<&invisi_sdk_rpc::broadcaster::Schedule>,
+    ) -> Result<VerifiedQuote> {
+        PreparedBroadcaster::scheduled_quote(
+            self.rpc(),
+            data,
+            chain_id,
+            protocol,
+            now,
+            sidecars,
+            schedule,
+        )
+    }
+    fn submit_member(
+        &self,
+        data: &[u8],
+        quote: &VerifiedQuote,
+        sidecars: &[ProofSidecar],
+        member: Option<&MemberProof>,
+    ) -> Result<RelayStatus> {
+        PreparedBroadcaster::submit_member(self.rpc(), data, quote, sidecars, member)
+    }
+    fn lookup_status(&self, id: &str) -> Result<Option<RelayStatus>> {
+        PreparedBroadcaster::lookup_status(self.rpc(), id)
+    }
+    fn submission_requirements(&self, quote: &VerifiedQuote) -> Result<bool> {
+        PreparedBroadcaster::submission_requirements(self.rpc(), quote)
+    }
+    fn configuration(&self) -> Configuration {
+        PreparedBroadcaster::configuration(self.rpc())
+    }
+    fn provenance_mode(&self) -> Option<()> {
+        PreparedBroadcaster::provenance_mode(self.rpc())
+    }
+    fn fee(&self, token: Address, data: Option<&[u8]>) -> Result<RelayFee> {
+        PreparedBroadcaster::fee(self.rpc(), token, data)
+    }
+    fn quote(
+        &self,
+        data: &[u8],
+        chain_id: u64,
+        protocol: Address,
+        now: u64,
+        sidecars: &[ProofSidecar],
+    ) -> Result<VerifiedQuote> {
+        PreparedBroadcaster::quote(self.rpc(), data, chain_id, protocol, now, sidecars)
+    }
+    fn submit(
+        &self,
+        data: &[u8],
+        quote: &VerifiedQuote,
+        sidecars: &[ProofSidecar],
+    ) -> Result<RelayStatus> {
+        PreparedBroadcaster::submit(self.rpc(), data, quote, sidecars)
+    }
+}
 
 pub(crate) fn provenance_factory_for_prover(
     prover: &dyn Prover,
@@ -493,7 +569,7 @@ impl PreparedTransaction {
         self.provenance = Some(capability);
         Ok(self)
     }
-    pub fn with_broadcaster(
+    pub(crate) fn quote_for_broadcaster(
         &self,
         chain: Arc<dyn ChainState>,
         relay: Arc<dyn PreparedBroadcaster>,
@@ -506,7 +582,7 @@ impl PreparedTransaction {
             if let Some(factory) = &self.provenance_factory {
                 let mut prepared = self.clone();
                 prepared.provenance = Some(factory(self.context)?);
-                return prepared.with_broadcaster(chain, relay, options);
+                return prepared.quote_for_broadcaster(chain, relay, options);
             }
         }
         if options
@@ -1682,6 +1758,135 @@ mod tests {
         *prepared.provenance_packet.lock().unwrap() = Some(wrong);
         assert!(prepared.prove_provenance(chain.as_ref()).is_err());
     }
+    struct ClientQuoteTransport {
+        context: ProtocolContext,
+        fee: u64,
+    }
+    impl RpcTransport for ClientQuoteTransport {
+        fn send(&self, request: &Value) -> invisi_sdk_rpc::rpc::Result<Value> {
+            let relay = SignedRelay {
+                fees: 0.into(),
+                quotes: 0.into(),
+            };
+            let result = match request["method"].as_str().unwrap() {
+                "broadcaster_estimateQuote" => json!(RelayFee {
+                    fee_recipient: relay.configuration().fee_recipient,
+                    fee_amount: self.fee.to_string(),
+                    max_gas: "100000".into(),
+                }),
+                "broadcaster_getQuote" => {
+                    let data =
+                        hex_bytes(request["params"][0]["data"].as_str().unwrap(), None).unwrap();
+                    json!(PreparedBroadcaster::quote(
+                        &relay,
+                        &data,
+                        self.context.chain_id,
+                        word_address(self.context.protocol_address).unwrap(),
+                        0,
+                        &[]
+                    )
+                    .unwrap()
+                    .signed())
+                }
+                method => panic!("unexpected quote RPC: {method}"),
+            };
+            Ok(json!({"jsonrpc":"2.0", "id":request["id"], "result":result}))
+        }
+    }
+    #[test]
+    fn client_quote_accepts_note_and_credit_and_leaves_failed_target_unchanged() {
+        let (chain, wallet, mut p, _) = note_fixture();
+        p.outputs =
+            vec![
+                NoteOutput::identity(chain.context(), p.token, U256::from(123), U256::from(1))
+                    .unwrap(),
+            ];
+        p.withdrawal = None;
+        p.automatic_change = true;
+        let mut note = Invisi::new(chain.clone())
+            .prepare_transfer(&wallet, p)
+            .unwrap();
+        let relay = SignedRelay {
+            fees: 0.into(),
+            quotes: 0.into(),
+        };
+        let client = crate::broadcaster::BroadcasterClient::new(
+            relay.configuration(),
+            ClientQuoteTransport {
+                context: chain.context(),
+                fee: 1,
+            },
+        )
+        .unwrap();
+        let options = BroadcasterOptions {
+            max_fee_amount: Some(U256::from(10)),
+            ..Default::default()
+        };
+        client.quote(&mut note, chain.clone(), &options).unwrap();
+        assert_eq!(
+            note.broadcaster_state().unwrap().quote.quote.fee_amount,
+            "1"
+        );
+        let state = CreditDeliveryState {
+            note: crate::credit::CreditState {
+                context: chain.context(),
+                token_address: address_word(note.token),
+                spender_wallet_identity: address_word(Address::repeat_byte(2)),
+                owner_wallet_identity: address_word(wallet.owner_address()),
+                revocation_shard: 1,
+                revocation_slot: 0,
+                nonce: U256::from(74),
+                expiry: chain.snapshot().unwrap().timestamp + 1000,
+                credit_shared_key: U256::from(75),
+                policy: crate::credit::CreditPolicy::default(),
+                usage: crate::credit::CreditUsage::default(),
+                available_credit: U256::from(400),
+                unlimited: false,
+                payload: Vec::new(),
+            },
+            owner_receiving_keys: wallet.receiving_keys().clone(),
+            spender_receiving_keys: wallet.receiving_keys().clone(),
+        };
+        let mut credit = Invisi::new(chain.clone())
+            .prepare_create_credit_explicit(
+                &wallet,
+                state,
+                chain.snapshot().unwrap().timestamp + 100,
+                Fee::default(),
+            )
+            .unwrap();
+        let before = serde_json::to_value(
+            journal::ManagedPrepared::Credit(credit.clone())
+                .snapshot()
+                .unwrap(),
+        )
+        .unwrap();
+        let expensive = crate::broadcaster::BroadcasterClient::new(
+            relay.configuration(),
+            ClientQuoteTransport {
+                context: chain.context(),
+                fee: 11,
+            },
+        )
+        .unwrap();
+        assert!(expensive
+            .quote(&mut credit, chain.clone(), &options)
+            .is_err());
+        assert_eq!(
+            serde_json::to_value(
+                journal::ManagedPrepared::Credit(credit.clone())
+                    .snapshot()
+                    .unwrap()
+            )
+            .unwrap(),
+            before
+        );
+        client.quote(&mut credit, chain, &options).unwrap();
+        assert_eq!(
+            credit.broadcaster_state().unwrap().quote.quote.fee_amount,
+            "1"
+        );
+    }
     #[test]
     fn original_preparation_survives_missing_provenance_capability() {
         let (chain, wallet, p, _) = note_fixture();
@@ -1690,7 +1895,7 @@ mod tests {
             .unwrap();
         let relay = Arc::new(MissingCapabilityRelay);
         assert!(prepared
-            .with_broadcaster(
+            .quote_for_broadcaster(
                 chain,
                 relay,
                 &BroadcasterOptions {
@@ -1732,7 +1937,7 @@ mod tests {
             quotes: std::sync::atomic::AtomicUsize::new(0),
         });
         assert!(prepared
-            .with_broadcaster(
+            .quote_for_broadcaster(
                 chain.clone(),
                 capped.clone(),
                 &BroadcasterOptions {
@@ -1745,11 +1950,11 @@ mod tests {
         assert!(prepared.broadcaster_state().is_none());
         assert_eq!(capped.quotes.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert!(prepared
-            .with_broadcaster(chain.clone(), relay.clone(), &BroadcasterOptions::default())
+            .quote_for_broadcaster(chain.clone(), relay.clone(), &BroadcasterOptions::default())
             .unwrap_err()
             .contains("maximum"));
         let quoted = prepared
-            .with_broadcaster(
+            .quote_for_broadcaster(
                 chain.clone(),
                 relay.clone(),
                 &BroadcasterOptions {
@@ -1901,7 +2106,7 @@ mod tests {
             quotes: std::sync::atomic::AtomicUsize::new(0),
         });
         assert!(prepared
-            .with_broadcaster(
+            .quote_for_broadcaster(
                 chain,
                 relay.clone(),
                 &BroadcasterOptions {
@@ -2328,7 +2533,7 @@ mod tests {
         let original = prepared.preparation_reads.clone().unwrap();
         for _ in 0..2 {
             prepared = prepared
-                .with_broadcaster(
+                .quote_for_broadcaster(
                     chain.clone(),
                     Arc::new(SignedRelay {
                         fees: 0.into(),
@@ -2367,7 +2572,7 @@ mod tests {
         let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
         let seen = calls.clone();
         let quoted = prepared
-            .with_broadcaster(
+            .quote_for_broadcaster(
                 chain,
                 Arc::new(SignedRelay {
                     fees: 0.into(),

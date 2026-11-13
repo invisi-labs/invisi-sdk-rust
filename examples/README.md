@@ -161,7 +161,7 @@ Run the other binaries without `--execute` to inspect their guard behavior witho
 
 See `07-broadcaster` for fee-frozen prepared quotation, ready transaction proving and broadcaster submission. Example 02 takes `PREPARED_SNAPSHOT` plus local prover/Source configuration, prints the complete public packet and submits it before the transaction. Example 03 reads only `SOURCE_PROOF_JSON` plus public pins in flat environment settings to validate and resubmit before or after chain confirmation; it needs no private wallet state, proof generator or transaction hash. Ordinary examples 01–06 have no optional Broadcaster mode or Source availability requirement.
 
-Broadcaster uses separate `estimateQuote` and `getQuote` requests. Its server assigns submission IDs; applications retain those IDs and the exact final request. Source uses its official default endpoint or an explicitly configured trusted endpoint, with bounded checkpoint replay and locally verified proof generation. No policy ID or mandatory transaction hash is part of the public Source packet. See [PROVENANCE.md](../PROVENANCE.md) for the full contract and assets.
+Broadcaster uses separate `estimateQuote` and `getQuote` requests. Its server assigns submission IDs; applications retain those IDs and the exact final request. Source uses its official default endpoint or an explicitly configured trusted endpoint, with bounded checkpoint replay and locally verified proof generation. No policy ID or mandatory transaction hash is part of the public Source packet.
 
 Example 01 uses `BROADCASTER_ENDPOINT`, `BROADCASTER_QUOTE_SIGNER`, `BROADCASTER_FEE_RECIPIENT` and a positive `MAX_FEE_AMOUNT`. Source trust uses `SOURCE_CHAIN_ID`, `SOURCE_PROTOCOL_ADDRESS`, `SOURCE_GENERATION`, `SOURCE_PROVIDER_ID`, `SOURCE_SIGNING_KEY_ID` and `SOURCE_SIGNING_PUBLIC_KEY`; `SOURCE_ENDPOINT` defaults to the official service. Local Source proving additionally requires `SOURCE_ASSET_ROOT`, `BB_BINARY` and `NOIR_EXECUTOR`. Example 03 takes the public packet in `SOURCE_PROOF_JSON`, without opening those proving assets. Examples print outputs and never create record/configuration files.
 
@@ -201,6 +201,6 @@ The complete `prepare-and-broadcast` example
 also accepts `PUBLISH_AFTER` and optional `EXECUTE_BEFORE` (defaults to 300
 seconds after publication). Set the signed operation deadline beyond execution
 plus the broadcaster's advertised slack. For restart-safe cancellation, use a
-managed session, persist `with_broadcaster` before submit, call
+managed session, call `client.quote(&mut operation, chain.clone(), &options)` before submit, call
 `cancel_broadcaster`, then `reconcile_cancelled_operation` to check canonical
 consumption before releasing reservations. Keep operation journals encrypted.

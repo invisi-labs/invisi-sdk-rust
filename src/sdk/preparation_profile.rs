@@ -201,7 +201,7 @@ fn preparation_latency_10x10_profile() {
         times.insert("transaction_export", start.elapsed().as_millis());
         let start = std::time::Instant::now();
         prepared
-            .with_broadcaster(
+            .quote_for_broadcaster(
                 chain.clone(),
                 Arc::new(SignedRelay {
                     fees: 0.into(),

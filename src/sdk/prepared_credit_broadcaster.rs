@@ -56,7 +56,7 @@ impl PreparedCredit {
             }),
         })
     }
-    pub fn with_broadcaster(
+    pub(crate) fn quote_for_broadcaster(
         &self,
         chain: Arc<dyn ChainState>,
         relay: Arc<dyn PreparedBroadcaster>,

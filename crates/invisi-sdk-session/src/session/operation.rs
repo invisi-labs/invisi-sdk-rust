@@ -204,6 +204,43 @@ impl Operation {
         self.requests.clear();
         Ok(())
     }
+    /// Cancellation never releases reservations; use canonical reconciliation afterwards.
+    pub fn cancel_broadcaster(
+        &mut self,
+        relay: &dyn sdk::PreparedBroadcaster,
+    ) -> Result<invisi_sdk_rpc::broadcaster::Status> {
+        let state = self.current()?;
+        let record = state
+            .operations
+            .get(&self.id)
+            .ok_or("operation not found")?;
+        let mut saved = self
+            .broadcaster_state()
+            .ok_or("saved broadcaster context required")?
+            .clone();
+        let submission_id = record.broadcaster_submission_id.as_deref().ok_or("submission ID unknown; recover the previously attempted submission before cancellation")?;
+        if saved
+            .submission_id
+            .as_deref()
+            .is_some_and(|id| id != submission_id)
+        {
+            return Err("saved broadcaster submission ID mismatch".into());
+        }
+        saved.submission_id = Some(submission_id.to_owned());
+        let status = saved.cancel(relay, submission_id)?;
+        if status.state == invisi_sdk_rpc::broadcaster::StatusState::Cancelled
+            && status.transaction_hash.is_none()
+        {
+            let mut state = self.current()?;
+            state
+                .operations
+                .get_mut(&self.id)
+                .ok_or("operation not found")?
+                .broadcaster_cancelled = true;
+            self.session.commit(state)?;
+        }
+        Ok(status)
+    }
     pub fn submit_broadcaster(
         &mut self,
         relay: &dyn sdk::PreparedBroadcaster,
@@ -325,11 +362,15 @@ impl Operation {
             {
                 return Err("broadcaster submission ID mismatch".into());
             }
+            self.prepared
+                .record_broadcaster_submission_id(&status.id, &call.data)?;
             let mut next = self.current()?;
-            next.operations
+            let record = next
+                .operations
                 .get_mut(&self.id)
-                .ok_or("operation not found")?
-                .broadcaster_submission_id = Some(status.id.clone());
+                .ok_or("operation not found")?;
+            record.broadcaster_submission_id = Some(status.id.clone());
+            record.snapshot = self.prepared.snapshot()?;
             self.session.commit(next)?;
             if let Some(hash) = status.transaction_hash {
                 self.track_transaction(hash)?;
@@ -401,10 +442,19 @@ impl Operation {
             }
         }?;
         let mut next = self.current()?;
-        next.operations
+        let call = next
+            .operations
+            .get(&self.id)
+            .and_then(|record| record.call.as_ref())
+            .ok_or("saved broadcaster calldata required")?;
+        self.prepared
+            .record_broadcaster_submission_id(&status.id, &call.data)?;
+        let record = next
+            .operations
             .get_mut(&self.id)
-            .ok_or("operation not found")?
-            .broadcaster_submission_id = Some(status.id.clone());
+            .ok_or("operation not found")?;
+        record.broadcaster_submission_id = Some(status.id.clone());
+        record.snapshot = self.prepared.snapshot()?;
         self.session.commit(next)?;
         if let Some(hash) = status.transaction_hash {
             self.track_transaction(hash)?;
@@ -755,6 +805,7 @@ impl WalletSession {
                 externalized: false,
                 broadcaster_id: None,
                 broadcaster_submission_id: None,
+                broadcaster_cancelled: false,
                 resolved_at: None,
             },
         );
@@ -1339,6 +1390,13 @@ impl WalletSession {
     }
     /// Release only when canonical post-deadline facts prove the exported input spend cannot execute.
     pub fn expire_operation(&self, id: &str) -> Result<()> {
+        self.release_inactive_operation(id, false)
+    }
+    /// Cancellation acknowledges relay custody only; independently reconcile canonical consumption.
+    pub fn reconcile_cancelled_operation(&self, id: &str) -> Result<()> {
+        self.release_inactive_operation(id, true)
+    }
+    fn release_inactive_operation(&self, id: &str, cancelled: bool) -> Result<()> {
         let mut state = self.snapshot()?;
         if state.invalidated {
             return Err("wallet requires canonical resync".into());
@@ -1348,10 +1406,14 @@ impl WalletSession {
             return Err("operation is already terminal".into());
         }
         let block = self.invisi.chain.snapshot()?;
-        if block.timestamp <= record.deadline {
+        if cancelled {
+            if !record.broadcaster_cancelled || record.transaction_hash.is_some() {
+                return Err("confirmed cancellation without a transaction hash required".into());
+            }
+        } else if block.timestamp <= record.deadline {
             return Err("operation has not expired on chain".into());
         }
-        if record.externalized {
+        if record.externalized && !record.broadcaster_cancelled {
             let hash = record
                 .transaction_hash
                 .ok_or("exported operation needs a tracked hash before expiry reconciliation")?;
@@ -1388,7 +1450,11 @@ impl WalletSession {
         }
         self.invisi.chain.canonical(&block)?;
         let record = state.operations.get_mut(id).ok_or("operation not found")?;
-        record.status = OperationStatus::Expired;
+        record.status = if cancelled {
+            OperationStatus::Failed
+        } else {
+            OperationStatus::Expired
+        };
         record.resolved_at = Some(block);
         record.generation = record
             .generation

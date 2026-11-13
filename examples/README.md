@@ -190,3 +190,17 @@ payloads (`None` preserves, `Some(Vec::new())` clears). Broadcaster example 01 r
 the main native prover before quoting, so the official Provenance service and bundled
 local Source resources work without `SOURCE_*` trust/asset configuration. Explicit
 `SOURCE_PROVIDER_ID` still selects private trust overrides. Fee limits remain app configured.
+
+Scheduling: `scheduled-broadcaster` (with `--features sqlite`) quotes, submits,
+resumes the encrypted operation by its local ID, checks the returned Broadcaster ID,
+and cancels a Note transfer, then independently reconciles its inputs.
+It uses the existing environment configuration plus `PUBLISH_AFTER`, optional
+`EXECUTE_BEFORE`, `WALLET_DB`, and `WALLET_STORE_KEY_FILE`; its cancellation
+capability is persisted in the encrypted SQLite journal before submission.
+The complete `prepare-and-broadcast` example
+also accepts `PUBLISH_AFTER` and optional `EXECUTE_BEFORE` (defaults to 300
+seconds after publication). Set the signed operation deadline beyond execution
+plus the broadcaster's advertised slack. For restart-safe cancellation, use a
+managed session, persist `with_broadcaster` before submit, call
+`cancel_broadcaster`, then `reconcile_cancelled_operation` to check canonical
+consumption before releasing reservations. Keep operation journals encrypted.

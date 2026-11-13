@@ -32,6 +32,8 @@ impl Execution {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Quote {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<Schedule>,
     pub execution: Execution,
     pub token: Address,
     pub fee_recipient: Address,
@@ -39,6 +41,85 @@ pub struct Quote {
     pub deadline: String,
     pub max_gas: String,
     pub request_hash: B256,
+}
+/// Public scheduling commitment; cancellation preimages must never be sent with a quote.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Schedule {
+    pub publish_after: String,
+    pub execute_before: String,
+    #[serde(deserialize_with = "canonical_cancel_hash")]
+    pub cancel_token_hash: B256,
+}
+fn canonical_cancel_hash<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<B256, D::Error> {
+    let value = String::deserialize(deserializer)?;
+    let hash: B256 = value.parse().map_err(serde::de::Error::custom)?;
+    if hash == B256::ZERO || value != format!("{hash}") {
+        return Err(serde::de::Error::custom("noncanonical cancellation hash"));
+    }
+    Ok(hash)
+}
+impl Schedule {
+    pub fn validate(&self) -> Result<(u64, u64)> {
+        let parse = |v: &str| -> Result<u64> {
+            let n = v
+                .parse::<u64>()
+                .map_err(|_| Error::Invalid("invalid schedule timestamp"))?;
+            if n == 0 || n > rpc::MAX_SAFE_INTEGER || n.to_string() != v {
+                return Err(Error::Invalid("noncanonical schedule timestamp"));
+            }
+            Ok(n)
+        };
+        let after = parse(&self.publish_after)?;
+        let before = parse(&self.execute_before)?;
+        if before <= after || self.cancel_token_hash == B256::ZERO {
+            return Err(Error::Invalid(
+                "invalid schedule bounds or cancellation hash",
+            ));
+        }
+        Ok((after, before))
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SchedulingCapability {
+    pub enabled: bool,
+    pub max_delay_seconds: String,
+    pub default_execution_window_seconds: String,
+    pub max_execution_window_seconds: String,
+    pub min_deadline_slack_seconds: String,
+}
+impl SchedulingCapability {
+    pub fn validate_schedule(&self, schedule: &Schedule, now: u64, deadline: U256) -> Result<()> {
+        let (after, before) = schedule.validate()?;
+        let parse = |s: &str| -> Result<u64> {
+            let v = s
+                .parse::<u64>()
+                .map_err(|_| Error::Invalid("invalid scheduling capability seconds"))?;
+            if v == 0 || v > rpc::MAX_SAFE_INTEGER || v.to_string() != s {
+                return Err(Error::Invalid("invalid scheduling capability seconds"));
+            }
+            Ok(v)
+        };
+        let max_delay = parse(&self.max_delay_seconds)?;
+        let default_window = parse(&self.default_execution_window_seconds)?;
+        let max_window = parse(&self.max_execution_window_seconds)?;
+        let slack = parse(&self.min_deadline_slack_seconds)?;
+        if !self.enabled
+            || default_window > max_window
+            || after <= now
+            || after - now > max_delay
+            || before - after > max_window
+            || deadline < U256::from(before) + U256::from(slack)
+        {
+            return Err(Error::Invalid(
+                "schedule outside broadcaster capability or intent deadline",
+            ));
+        }
+        Ok(())
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -251,7 +332,13 @@ pub fn quote_digest(quote: &Quote, trust: &Trust) -> Result<B256> {
         return Err(Error::Invalid("invalid broadcaster trust"));
     }
     let domain=keccak256((keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),keccak256("InvisiBroadcaster"),keccak256("1"),U256::from(trust.chain_id),trust.protocol).abi_encode());
-    let structure=keccak256((keccak256("Quote(address token,address feeRecipient,uint256 feeAmount,uint256 deadline,uint256 maxGas,bytes32 requestHash,string execution)"),quote.token,quote.fee_recipient,decimal(&json!(quote.fee_amount))?,decimal(&json!(quote.deadline))?,decimal(&json!(quote.max_gas))?,quote.request_hash,keccak256(quote.execution.as_str())).abi_encode());
+    let structure = if let Some(schedule) = &quote.schedule {
+        let (after, before) = schedule.validate()?;
+        keccak256((keccak256("ScheduledQuote(address token,address feeRecipient,uint256 feeAmount,uint256 deadline,uint256 maxGas,bytes32 requestHash,string execution,uint256 publishAfter,uint256 executeBefore,bytes32 cancelTokenHash)"),quote.token,quote.fee_recipient,decimal(&json!(quote.fee_amount))?,decimal(&json!(quote.deadline))?,decimal(&json!(quote.max_gas))?,quote.request_hash,keccak256(quote.execution.as_str()),U256::from(after),U256::from(before),schedule.cancel_token_hash).abi_encode())
+    } else {
+        keccak256((keccak256("Quote(address token,address feeRecipient,uint256 feeAmount,uint256 deadline,uint256 maxGas,bytes32 requestHash,string execution)"),quote.token,quote.fee_recipient,decimal(&json!(quote.fee_amount))?,decimal(&json!(quote.deadline))?,decimal(&json!(quote.max_gas))?,quote.request_hash,keccak256(quote.execution.as_str())).abi_encode())
+    };
+
     let mut message = vec![0x19, 0x01];
     message.extend_from_slice(domain.as_slice());
     message.extend_from_slice(structure.as_slice());
@@ -399,6 +486,9 @@ pub struct Fee {
 #[serde(rename_all = "snake_case")]
 pub enum StatusState {
     Pending,
+    Scheduled,
+    Preparing,
+    Cancelled,
     Queued,
     Proving,
     Rejected,
@@ -591,10 +681,25 @@ impl<T: RpcTransport> BroadcasterClient<T> {
         &self.configuration
     }
     pub fn estimate_quote(&self, data: &[u8]) -> Result<Fee> {
+        self.estimate_quote_with_schedule(data, None)
+    }
+    pub fn estimate_quote_with_schedule(
+        &self,
+        data: &[u8],
+        schedule: Option<&Schedule>,
+    ) -> Result<Fee> {
         let intent = decode_intent(data)?;
-        self.fee(intent.token, Some(data))
+        self.fee_with_schedule(intent.token, Some(data), schedule)
     }
     pub fn fee(&self, token: Address, data: Option<&[u8]>) -> Result<Fee> {
+        self.fee_with_schedule(token, data, None)
+    }
+    pub fn fee_with_schedule(
+        &self,
+        token: Address,
+        data: Option<&[u8]>,
+        schedule: Option<&Schedule>,
+    ) -> Result<Fee> {
         if token == Address::ZERO {
             return Err(Error::Invalid("nonzero fee token required"));
         }
@@ -602,7 +707,11 @@ impl<T: RpcTransport> BroadcasterClient<T> {
             "public calldata required for broadcaster estimate",
         ))?;
         decode_intent(data)?;
-        let params = json!({"data":format!("0x{}", hex::encode(data))});
+        let mut params = json!({"data":format!("0x{}", hex::encode(data))});
+        if let Some(schedule) = schedule {
+            schedule.validate()?;
+            params["schedule"] = json!(schedule);
+        }
         let fee: Fee = serde_json::from_value(
             self.rpc
                 .call("broadcaster_estimateQuote", json!([params]))?,
@@ -638,6 +747,25 @@ impl<T: RpcTransport> BroadcasterClient<T> {
         now: u64,
         sidecars: &[ProofSidecar],
     ) -> Result<VerifiedQuote> {
+        self.quote_with_schedule(data, chain_id, protocol, now, sidecars, None)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn quote_with_schedule(
+        &self,
+        data: &[u8],
+        chain_id: u64,
+        protocol: Address,
+        now: u64,
+        sidecars: &[ProofSidecar],
+        schedule: Option<&Schedule>,
+    ) -> Result<VerifiedQuote> {
+        if let Some(schedule) = schedule {
+            self.scheduling_capability()?.validate_schedule(
+                schedule,
+                now,
+                decode_intent(data)?.deadline,
+            )?;
+        }
         if self.provenance_mode.is_none() && !sidecars.is_empty() {
             return Err(Error::Invalid("unexpected proof sidecars"));
         }
@@ -647,11 +775,16 @@ impl<T: RpcTransport> BroadcasterClient<T> {
             .map(invisi_sdk_protocol::provenance::proof_sidecar_to_wire)
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|_| Error::Invalid("invalid proof sidecar"))?;
-        let signed: SignedQuote = serde_json::from_value(self.rpc.call(
-            "broadcaster_getQuote",
-            json!([{"data":format!("0x{}",hex::encode(data))}]),
-        )?)
-        .map_err(|_| Error::Invalid("invalid signed broadcaster quote"))?;
+        let mut params = json!({"data":format!("0x{}",hex::encode(data))});
+        if let Some(schedule) = schedule {
+            params["schedule"] = json!(schedule);
+        }
+        let signed: SignedQuote =
+            serde_json::from_value(self.rpc.call("broadcaster_getQuote", json!([params]))?)
+                .map_err(|_| Error::Invalid("invalid signed broadcaster quote"))?;
+        if signed.quote.schedule.as_ref() != schedule {
+            return Err(Error::Invalid("quote schedule mismatch"));
+        }
         let trust = Trust {
             chain_id,
             protocol,
@@ -723,6 +856,23 @@ impl<T: RpcTransport> BroadcasterClient<T> {
             Err(error) => Err(error),
         }
     }
+    pub fn cancel(&self, id: &str, cancel_token: B256) -> Result<Status> {
+        validate_id(id)?;
+        if cancel_token == B256::ZERO {
+            return Err(Error::Invalid("invalid cancellation token"));
+        }
+        let status: Status = serde_json::from_value(self.rpc.call(
+            "broadcaster_cancelTransaction",
+            json!([{"id":id,"cancelToken":cancel_token}]),
+        )?)
+        .map_err(|_| Error::Invalid("invalid broadcaster cancellation status"))?;
+        check_status(status, id)
+    }
+    pub fn scheduling_capability(&self) -> Result<SchedulingCapability> {
+        let status = self.rpc.call("broadcaster_getStatus", json!([]))?;
+        serde_json::from_value(status["scheduling"].clone())
+            .map_err(|_| Error::Invalid("invalid scheduling capability"))
+    }
     pub fn status(&self, id: &str) -> Result<Status> {
         validate_id(id)?;
         let status: Status = serde_json::from_value(
@@ -743,7 +893,10 @@ fn check_status(status: Status, id: &str) -> Result<Status> {
     if let Some(confirmation) = &status.confirmation {
         if matches!(
             status.state,
-            StatusState::Queued
+            StatusState::Scheduled
+                | StatusState::Preparing
+                | StatusState::Cancelled
+                | StatusState::Queued
                 | StatusState::Proving
                 | StatusState::Rejected
                 | StatusState::Expired

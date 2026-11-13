@@ -99,7 +99,26 @@ impl PreparedCredit {
             .reprice
             .as_ref()
             .ok_or("original Credit business preparation required for explicit repricing")?;
-        let mut fee = relay.fee(self.token, Some(&self.broadcaster_intent()?.data))?;
+        let cancellation_token = options
+            .schedule
+            .as_ref()
+            .map(|_| CancellationToken::generate());
+        let schedule = options
+            .schedule
+            .as_ref()
+            .map(|s| invisi_sdk_rpc::broadcaster::Schedule {
+                publish_after: s.publish_after.to_string(),
+                execute_before: s.execute_before.to_string(),
+                cancel_token_hash: cancellation_token.as_ref().unwrap().commitment(),
+            });
+        if let Some(schedule) = &schedule {
+            schedule.validate().map_err(|e| e.to_string())?;
+        }
+        let mut fee = relay.scheduled_fee(
+            self.token,
+            Some(&self.broadcaster_intent()?.data),
+            schedule.as_ref(),
+        )?;
         for _round in 0..options.max_attempts {
             if fee.fee_recipient != config.fee_recipient {
                 return Err("Credit relay fee recipient mismatch".into());
@@ -158,7 +177,7 @@ impl PreparedCredit {
                     )?,
             };
             let data = candidate.broadcaster_intent()?.data;
-            let next = relay.fee(self.token, Some(&data))?;
+            let next = relay.scheduled_fee(self.token, Some(&data), schedule.as_ref())?;
             let next_amount = decimal(&json!(next.fee_amount))?;
             if next.fee_recipient != config.fee_recipient
                 || next_amount == U256::ZERO
@@ -171,13 +190,17 @@ impl PreparedCredit {
                 continue;
             }
             let block = chain.snapshot()?;
-            let quote = relay.quote(
+            let quote = relay.scheduled_quote(
                 &data,
                 self.context.chain_id,
                 word_address(self.context.protocol_address)?,
                 chain.construction_timestamp(&block),
                 &[],
+                schedule.as_ref(),
             )?;
+            if quote.signed().quote.schedule.as_ref() != schedule.as_ref() {
+                return Err("broadcaster quote schedule mismatch".into());
+            }
             let trust = Trust {
                 chain_id: self.context.chain_id,
                 protocol: word_address(self.context.protocol_address)?,
@@ -196,6 +219,7 @@ impl PreparedCredit {
                 candidate.preparation_reads = Some(reads);
             }
             candidate.broadcaster = Some(PreparedBroadcasterState {
+                cancellation_token: cancellation_token.clone(),
                 endpoint: config.endpoint,
                 signer: config.quote_signer,
                 fee_recipient: config.fee_recipient,

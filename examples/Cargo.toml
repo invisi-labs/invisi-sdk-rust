@@ -101,3 +101,8 @@ path = "07-broadcaster/03-recover-and-submit-provenance.rs"
 [[bin]]
 name = "transaction-confirmation"
 path = "07-broadcaster/confirmation.rs"
+
+[[bin]]
+name = "scheduled-broadcaster"
+path = "07-broadcaster/04-scheduled-cancel.rs"
+required-features = ["sqlite"]

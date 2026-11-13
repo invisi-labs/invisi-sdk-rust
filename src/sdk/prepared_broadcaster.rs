@@ -161,8 +161,33 @@ pub struct FundingPermitRequest {
 pub type FundingPermitCallback = Arc<
     dyn Fn(FundingPermitRequest) -> Result<crate::protocol::IMetaTx::TokenPermit> + Send + Sync,
 >;
+/// Persist only in the encrypted operation journal; Debug never reveals the preimage.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CancellationToken(B256);
+impl std::fmt::Debug for CancellationToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CancellationToken([REDACTED])")
+    }
+}
+impl CancellationToken {
+    pub fn generate() -> Self {
+        use rand::RngCore;
+        let mut bytes = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        Self(B256::from(bytes))
+    }
+    pub fn commitment(&self) -> B256 {
+        alloy_primitives::keccak256(self.0)
+    }
+}
+#[derive(Clone, Debug)]
+pub struct BroadcasterSchedule {
+    pub publish_after: u64,
+    pub execute_before: u64,
+}
 #[derive(Clone)]
 pub struct BroadcasterOptions {
+    pub schedule: Option<BroadcasterSchedule>,
     pub fee_source: Option<BroadcasterFeeSource>,
     pub funding_permit: Option<FundingPermitCallback>,
     pub max_attempts: usize,
@@ -171,6 +196,7 @@ pub struct BroadcasterOptions {
 impl Default for BroadcasterOptions {
     fn default() -> Self {
         Self {
+            schedule: None,
             fee_source: None,
             funding_permit: None,
             max_attempts: 4,
@@ -194,6 +220,8 @@ pub struct BroadcasterSubmission {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PreparedBroadcasterState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancellation_token: Option<CancellationToken>,
     pub endpoint: String,
     pub signer: Address,
     pub fee_recipient: Address,
@@ -210,11 +238,77 @@ pub struct PreparedBroadcasterState {
     pub member_proof: Option<MemberProof>,
 }
 impl PreparedBroadcasterState {
+    /// Request cancellation against the exact saved relay; callers still reconcile canonically before releasing inputs.
+    pub fn cancel(
+        &self,
+        relay: &dyn PreparedBroadcaster,
+        submission_id: &str,
+    ) -> Result<RelayStatus> {
+        let config = relay.configuration();
+        if config.endpoint != self.endpoint
+            || config.quote_signer != self.signer
+            || config.fee_recipient != self.fee_recipient
+        {
+            return Err("saved cancellation relay scope mismatch".into());
+        }
+        let accepted_id = self.submission_id.as_deref().ok_or("submission ID unknown; recover the previously attempted submission before cancellation")?;
+        if accepted_id != submission_id {
+            return Err("cancellation submission scope mismatch".into());
+        }
+        let token = self
+            .cancellation_token
+            .as_ref()
+            .ok_or("scheduled cancellation token required")?;
+        if self
+            .quote
+            .quote
+            .schedule
+            .as_ref()
+            .is_none_or(|s| s.cancel_token_hash != token.commitment())
+        {
+            return Err("cancellation commitment mismatch".into());
+        }
+        let status = relay.cancel(submission_id, token)?;
+        if status.id != submission_id {
+            return Err("cancellation status identity mismatch".into());
+        }
+        Ok(status)
+    }
     pub fn provenance_mode(&self) -> Option<()> {
         (self.quote.provenance_required == Some(true)).then_some(())
     }
 }
 pub trait PreparedBroadcaster: Send + Sync {
+    fn cancel(&self, _id: &str, _token: &CancellationToken) -> Result<RelayStatus> {
+        Err("broadcaster cancellation capability required".into())
+    }
+    fn scheduled_fee(
+        &self,
+        token: Address,
+        data: Option<&[u8]>,
+        schedule: Option<&invisi_sdk_rpc::broadcaster::Schedule>,
+    ) -> Result<RelayFee> {
+        if schedule.is_some() {
+            return Err("broadcaster scheduling capability required".into());
+        }
+        self.fee(token, data)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn scheduled_quote(
+        &self,
+        data: &[u8],
+        chain_id: u64,
+        protocol: Address,
+        now: u64,
+        sidecars: &[ProofSidecar],
+        schedule: Option<&invisi_sdk_rpc::broadcaster::Schedule>,
+    ) -> Result<VerifiedQuote> {
+        if schedule.is_some() {
+            return Err("broadcaster scheduling capability required".into());
+        }
+        self.quote(data, chain_id, protocol, now, sidecars)
+    }
+
     fn lookup_status(&self, _id: &str) -> Result<Option<RelayStatus>> {
         Err("broadcaster status lookup capability required".into())
     }
@@ -250,6 +344,32 @@ pub trait PreparedBroadcaster: Send + Sync {
     ) -> Result<RelayStatus>;
 }
 impl<T: RpcTransport + Send + Sync> PreparedBroadcaster for BroadcasterClient<T> {
+    fn cancel(&self, id: &str, token: &CancellationToken) -> Result<RelayStatus> {
+        BroadcasterClient::cancel(self, id, token.0).map_err(|e| e.to_string())
+    }
+    fn scheduled_fee(
+        &self,
+        token: Address,
+        data: Option<&[u8]>,
+        schedule: Option<&invisi_sdk_rpc::broadcaster::Schedule>,
+    ) -> Result<RelayFee> {
+        self.fee_with_schedule(token, data, schedule)
+            .map_err(|e| e.to_string())
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn scheduled_quote(
+        &self,
+        data: &[u8],
+        chain_id: u64,
+        protocol: Address,
+        now: u64,
+        sidecars: &[ProofSidecar],
+        schedule: Option<&invisi_sdk_rpc::broadcaster::Schedule>,
+    ) -> Result<VerifiedQuote> {
+        self.quote_with_schedule(data, chain_id, protocol, now, sidecars, schedule)
+            .map_err(|e| e.to_string())
+    }
+
     fn submit_member(
         &self,
         data: &[u8],
@@ -291,6 +411,7 @@ impl<T: RpcTransport + Send + Sync> PreparedBroadcaster for BroadcasterClient<T>
             .map_err(|e| e.to_string())
     }
 }
+
 pub(crate) fn provenance_factory_for_prover(
     prover: &dyn Prover,
 ) -> Result<Option<ProvenanceFactory>> {
@@ -427,7 +548,26 @@ impl PreparedTransaction {
             provenance: self.provenance.clone(),
             provenance_factory: self.provenance_factory.clone(),
         };
-        let mut fee = relay.fee(self.token, Some(&self.broadcaster_intent()?.data))?;
+        let cancellation_token = options
+            .schedule
+            .as_ref()
+            .map(|_| CancellationToken::generate());
+        let schedule = options
+            .schedule
+            .as_ref()
+            .map(|s| invisi_sdk_rpc::broadcaster::Schedule {
+                publish_after: s.publish_after.to_string(),
+                execute_before: s.execute_before.to_string(),
+                cancel_token_hash: cancellation_token.as_ref().unwrap().commitment(),
+            });
+        if let Some(schedule) = &schedule {
+            schedule.validate().map_err(|e| e.to_string())?;
+        }
+        let mut fee = relay.scheduled_fee(
+            self.token,
+            Some(&self.broadcaster_intent()?.data),
+            schedule.as_ref(),
+        )?;
         let mut final_candidate = None;
         for _round in 0..options.max_attempts {
             let amount = decimal(&json!(fee.fee_amount))?;
@@ -519,7 +659,7 @@ impl PreparedTransaction {
                 candidate = candidate.with_funding_terms(chain.as_ref(), deadline.to::<u64>())?;
             }
             let data = candidate.broadcaster_intent()?.data;
-            let next = relay.fee(self.token, Some(&data))?;
+            let next = relay.scheduled_fee(self.token, Some(&data), schedule.as_ref())?;
             let next_amount = decimal(&json!(next.fee_amount))?;
             if next.fee_recipient != config.fee_recipient
                 || next_amount == U256::ZERO
@@ -549,13 +689,17 @@ impl PreparedTransaction {
         let data = candidate.broadcaster_intent()?.data;
         let sidecars = Vec::new();
         let block = chain.snapshot()?;
-        let quote = relay.quote(
+        let quote = relay.scheduled_quote(
             &data,
             candidate.context.chain_id,
             word_address(candidate.context.protocol_address)?,
             chain.construction_timestamp(&block),
             &sidecars,
+            schedule.as_ref(),
         )?;
+        if quote.signed().quote.schedule.as_ref() != schedule.as_ref() {
+            return Err("broadcaster quote schedule mismatch".into());
+        }
         invisi_sdk_rpc::broadcaster::verify_quote_for_provenance(
             quote.signed(),
             &Trust {
@@ -574,6 +718,7 @@ impl PreparedTransaction {
         }
         candidate.reprice = self.reprice.clone();
         candidate.broadcaster = Some(PreparedBroadcasterState {
+            cancellation_token: cancellation_token.clone(),
             endpoint: config.endpoint,
             signer: config.quote_signer,
             fee_recipient: config.fee_recipient,
@@ -1626,6 +1771,12 @@ mod tests {
             .clone()
             .with_funding_terms(chain.as_ref(), 99)
             .is_err());
+        assert!(quoted
+            .broadcaster_state()
+            .unwrap()
+            .cancel(relay.as_ref(), "invented-id")
+            .unwrap_err()
+            .contains("recover"));
         let mut attempted = quoted.clone();
         let data = attempted.broadcaster_intent().unwrap().data;
         let retained = attempted.broadcaster.as_mut().unwrap();
@@ -1989,6 +2140,7 @@ mod tests {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let i = invisi_sdk_rpc::broadcaster::decode_intent(data).unwrap();
             let q = invisi_sdk_rpc::broadcaster::Quote {
+                schedule: None,
                 execution: invisi_sdk_rpc::broadcaster::Execution::Direct,
                 token: i.token,
                 fee_recipient: i.fee_recipient,

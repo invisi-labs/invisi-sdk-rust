@@ -42,6 +42,8 @@ pub struct OperationRecord {
     pub broadcaster_id: Option<String>,
     #[serde(default)]
     pub broadcaster_submission_id: Option<String>,
+    #[serde(default)]
+    pub broadcaster_cancelled: bool,
     pub resolved_at: Option<CanonicalBlock>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

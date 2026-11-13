@@ -1229,6 +1229,7 @@ fn credit_relay_context_survives_encrypted_restart_and_fences_uncertain_submissi
     let restarted = connect();
     let mut operation = restarted.resume(&id, None).unwrap();
     let relay = Arc::new(SessionCreditRelay {
+        requests: Mutex::new(Vec::new()),
         lookup_mode: std::sync::atomic::AtomicUsize::new(0),
         attempts: std::sync::atomic::AtomicUsize::new(0),
     });
@@ -1262,6 +1263,11 @@ fn credit_relay_context_survives_encrypted_restart_and_fences_uncertain_submissi
     let mut operation = restarted.resume(&id, Some(&Backend)).unwrap();
     assert!(operation.broadcaster_state().is_some());
     assert!(operation
+        .cancel_broadcaster(relay.as_ref())
+        .unwrap_err()
+        .contains("recover"));
+    assert_eq!(relay.attempts.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(operation
         .submit_broadcaster(relay.as_ref())
         .unwrap_err()
         .contains("uncertain"));
@@ -1274,12 +1280,36 @@ fn credit_relay_context_survives_encrypted_restart_and_fences_uncertain_submissi
             .as_deref(),
         Some(id.as_str())
     );
+    assert!(restarted.snapshot().unwrap().operations[&id]
+        .broadcaster_submission_id
+        .is_none());
+    drop(operation);
+    let restarted = connect();
+    let mut operation = restarted.resume(&id, Some(&Backend)).unwrap();
     h.chain
         .height
         .store(200, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
         operation.submit_broadcaster(relay.as_ref()).unwrap().id,
         "server-owned"
+    );
+    assert_eq!(
+        restarted.snapshot().unwrap().operations[&id]
+            .broadcaster_submission_id
+            .as_deref(),
+        Some("server-owned")
+    );
+    assert_eq!(relay.requests.lock().unwrap().len(), 2);
+    drop(operation);
+    let restarted = connect();
+    let mut operation = restarted.resume(&id, Some(&Backend)).unwrap();
+    assert_eq!(
+        operation
+            .broadcaster_state()
+            .unwrap()
+            .submission_id
+            .as_deref(),
+        Some("server-owned")
     );
     relay
         .lookup_mode
@@ -1298,6 +1328,7 @@ fn credit_relay_context_survives_encrypted_restart_and_fences_uncertain_submissi
     assert_eq!(relay.attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
 struct SessionCreditRelay {
+    requests: Mutex<Vec<serde_json::Value>>,
     lookup_mode: std::sync::atomic::AtomicUsize,
     attempts: std::sync::atomic::AtomicUsize,
 }
@@ -1358,6 +1389,7 @@ impl sdk::PreparedBroadcaster for SessionCreditRelay {
             signer: self.configuration().quote_signer,
         };
         let quote = Quote {
+            schedule: None,
             execution: invisi_sdk_rpc::broadcaster::Execution::Direct,
             token: intent.token,
             fee_recipient: intent.fee_recipient,
@@ -1396,6 +1428,15 @@ impl sdk::PreparedBroadcaster for SessionCreditRelay {
         assert!(sidecars.is_empty());
         crate::broadcaster::verify_quote(quote.signed(), quote.trust(), data, 0)
             .map_err(|e| e.to_string())?;
+        let frozen = serde_json::json!({"data":hex::encode(data),"signed":quote.signed(),"sidecars":sidecars});
+        let mut requests = self.requests.lock().unwrap();
+        if let Some(first) = requests.first() {
+            assert_eq!(
+                first, &frozen,
+                "lost-response recovery must replay exact evidence"
+            );
+        }
+        requests.push(frozen);
         let attempt = self
             .attempts
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1432,6 +1473,7 @@ fn funds_relay_retry_reads_known_journal_even_when_inputs_are_spent() {
         })
         .unwrap();
     let relay = Arc::new(SessionCreditRelay {
+        requests: Mutex::new(Vec::new()),
         lookup_mode: std::sync::atomic::AtomicUsize::new(0),
         attempts: std::sync::atomic::AtomicUsize::new(0),
     });
@@ -2725,6 +2767,7 @@ fn signed_direct_quote_rejects_manual_recursive_proving() {
     preparation.automatic_change = true;
     let mut operation = h.session.prepare_transfer(preparation).unwrap();
     let relay = Arc::new(SessionCreditRelay {
+        requests: Mutex::new(Vec::new()),
         lookup_mode: std::sync::atomic::AtomicUsize::new(0),
         attempts: std::sync::atomic::AtomicUsize::new(0),
     });
@@ -2856,6 +2899,7 @@ fn signed_aggregate_defaults_recursive_and_restores_exact_request_without_reprov
     let mut operation = h.session.prepare_transfer(preparation).unwrap();
     let relay = Arc::new(SessionAggregateRelay {
         base: SessionCreditRelay {
+            requests: Mutex::new(Vec::new()),
             lookup_mode: std::sync::atomic::AtomicUsize::new(0),
             attempts: std::sync::atomic::AtomicUsize::new(0),
         },
@@ -3493,6 +3537,7 @@ fn cached_broadcaster_repricing_preserves_offline_preparation_but_new_submission
     h.chain.offline.store(true, Ordering::SeqCst);
     let mut operation = session.prepare_transfer(plan).unwrap();
     let relay = Arc::new(SessionCreditRelay {
+        requests: Mutex::new(Vec::new()),
         lookup_mode: 0.into(),
         attempts: 0.into(),
     });
@@ -3789,4 +3834,39 @@ fn session_preparation_preserves_structured_recipient_and_selection_errors() {
     let error = h.session.prepare_transfer(options).err().unwrap();
     assert_eq!(error.code, sdk::InvisiErrorCode::PreparationFailed);
     assert_eq!(error.details["operation"], "prepare_transfer");
+}
+
+#[test]
+fn confirmed_cancellation_releases_only_after_canonical_unspent_reconciliation() {
+    let h = synced();
+    let mut operation = h
+        .session
+        .prepare_transfer(transfer(&h))
+        .unwrap()
+        .prove(&Backend, false)
+        .unwrap();
+    let id = operation.id().to_owned();
+    operation
+        .calldata(h.session.wallet.owner_address())
+        .unwrap();
+    assert!(h.session.reconcile_cancelled_operation(&id).is_err());
+    let mut state = h.session.snapshot().unwrap();
+    let nullifier = state.notes[&h.commitment].nullifier;
+    state.operations.get_mut(&id).unwrap().broadcaster_cancelled = true;
+    h.session.commit(state).unwrap();
+    // The persisted acknowledgement survives reconstruction without releasing reservations.
+    let encoded = serde_json::to_vec(&h.session.snapshot().unwrap()).unwrap();
+    let restored: WalletState = serde_json::from_slice(&encoded).unwrap();
+    assert!(restored.operations[&id].broadcaster_cancelled);
+    assert!(restored.notes[&h.commitment].reserved_by.is_some());
+    h.chain.spent.lock().unwrap().insert(nullifier);
+    assert!(h.session.reconcile_cancelled_operation(&id).is_err());
+    h.chain.spent.lock().unwrap().clear();
+    h.chain.reorg.store(true, Ordering::SeqCst);
+    assert!(h.session.reconcile_cancelled_operation(&id).is_err());
+    h.chain.reorg.store(false, Ordering::SeqCst);
+    h.session.reconcile_cancelled_operation(&id).unwrap();
+    let state = h.session.snapshot().unwrap();
+    assert_eq!(state.operations[&id].status, OperationStatus::Failed);
+    assert!(state.notes[&h.commitment].reserved_by.is_none());
 }

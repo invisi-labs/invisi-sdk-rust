@@ -150,6 +150,35 @@ pub enum ManagedPrepared {
     Credit(PreparedCredit),
 }
 impl ManagedPrepared {
+    /// Retain the broadcaster's opaque response ID with the frozen local operation.
+    pub fn record_broadcaster_submission_id(&mut self, id: &str, data: &[u8]) -> Result<()> {
+        if id.is_empty() || id.len() > 256 {
+            return Err("invalid broadcaster submission ID".into());
+        }
+        let saved = match self {
+            Self::Funds(v) => v.broadcaster.as_mut(),
+            Self::Credit(v) => v.broadcaster.as_mut(),
+        }
+        .ok_or("saved broadcaster context required")?;
+        if saved
+            .submission_id
+            .as_deref()
+            .is_some_and(|previous| previous != id)
+        {
+            return Err("broadcaster submission ID mismatch".into());
+        }
+        if invisi_sdk_rpc::broadcaster::request_hash(data).map_err(|e| e.to_string())?
+            != saved.intent_hash
+            || !saved.submitted_data.is_empty() && saved.submitted_data != data
+        {
+            return Err("frozen broadcaster submission mismatch".into());
+        }
+        saved.submitted_data = data.to_vec();
+        saved.submission_id = Some(id.to_owned());
+        saved.attempted = true;
+        Ok(())
+    }
+
     pub fn snapshot_funds(value: &PreparedTransaction) -> Self {
         Self::Funds(PreparedTransaction {
             preparation_reads: value.preparation_reads.clone(),

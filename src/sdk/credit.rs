@@ -1823,6 +1823,7 @@ mod lifecycle_tests {
             };
             let policy = self.provenance_mode().unwrap();
             let quote = Quote {
+                schedule: None,
                 execution: invisi_sdk_rpc::broadcaster::Execution::Direct,
                 token: i.token,
                 fee_recipient: i.fee_recipient,

@@ -93,6 +93,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         chain.clone(),
         relay.clone(),
         &sdk::BroadcasterOptions {
+            schedule: env::var("PUBLISH_AFTER")
+                .ok()
+                .map(|after| -> Result<_, Box<dyn std::error::Error>> {
+                    let publish_after: u64 = after.parse()?;
+                    let execute_before = env::var("EXECUTE_BEFORE")
+                        .ok()
+                        .map(|v| v.parse())
+                        .transpose()?
+                        .unwrap_or(
+                            publish_after
+                                .checked_add(300)
+                                .ok_or("schedule timestamp overflow")?,
+                        );
+                    Ok(sdk::BroadcasterSchedule {
+                        publish_after,
+                        execute_before,
+                    })
+                })
+                .transpose()?,
             max_fee_amount: Some(U256::from_str_radix(&env::var("MAX_FEE_AMOUNT")?, 10)?),
             ..Default::default()
         },

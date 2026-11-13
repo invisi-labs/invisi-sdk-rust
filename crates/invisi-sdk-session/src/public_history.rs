@@ -525,6 +525,50 @@ impl PublicHistory {
     pub fn snapshot(&self) -> Result<PublicHistorySnapshot> {
         self.store.snapshot(&self.scope)
     }
+    fn read_headers(
+        &self,
+        from: u64,
+        to: u64,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<CanonicalBlock>> {
+        let count = (to - from + 1) as usize;
+        let workers = count.min(8);
+        // Reuse bounded workers across the page, rather than spawning per block.
+        let batches = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..workers)
+                .map(|worker| {
+                    scope.spawn(move || -> Result<Vec<CanonicalBlock>> {
+                        let mut headers = Vec::new();
+                        for index in (worker..count).step_by(workers) {
+                            cancel.check()?;
+                            let number = from + index as u64;
+                            let header = self.source.block(number)?;
+                            if header.number != number {
+                                return Err("invalid public header height".into());
+                            }
+                            headers.push(header);
+                        }
+                        Ok(headers)
+                    })
+                })
+                .collect();
+            // Join every reader before returning errors or permitting a retry.
+            handles.into_iter().map(|h| h.join()).collect::<Vec<_>>()
+        });
+        let mut headers = Vec::with_capacity(count);
+        for batch in batches {
+            headers.extend(batch.map_err(|_| "public header reader panicked")??);
+        }
+        cancel.check()?;
+        headers.sort_by_key(|h| h.number);
+        if headers
+            .windows(2)
+            .any(|pair| pair[1].parent_hash != pair[0].hash)
+        {
+            return Err("noncontiguous public headers".into());
+        }
+        Ok(headers)
+    }
     pub fn acquire(
         &self,
         from: u64,
@@ -596,9 +640,7 @@ impl PublicHistory {
                 verified_positions: vec![],
                 memberships: vec![],
             };
-            for n in cursor..=end {
-                page.headers.push(self.source.block(n)?)
-            }
+            page.headers = self.read_headers(cursor, end, cancel)?;
             let hashes = self
                 .source
                 .discover(cursor, end)?
@@ -877,5 +919,110 @@ impl PublicHistory {
             },
             state.generation,
         ))
+    }
+}
+
+#[cfg(test)]
+mod parallel_header_tests {
+    use super::*;
+    use crate::note::ProtocolContext;
+    use crate::rpc::{CanonicalTransaction, Membership, MembershipInput};
+    use crate::session::{MemoryAtomicRecords, SessionSource};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Source {
+        active: AtomicUsize,
+        peak: AtomicUsize,
+        broken: bool,
+        failed: bool,
+    }
+    impl SessionSource for Source {
+        fn context(&self) -> ProtocolContext {
+            ProtocolContext {
+                chain_id: 97,
+                protocol_address: crate::sdk::address_word(Address::with_last_byte(1)),
+            }
+        }
+        fn deployment_start(&self) -> u64 {
+            100
+        }
+        fn indexed_head(&self) -> Result<CanonicalBlock> {
+            self.block(115)
+        }
+        fn block(&self, n: u64) -> Result<CanonicalBlock> {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(active, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            if self.failed && n == 108 {
+                return Err("header unavailable".into());
+            }
+            Ok(CanonicalBlock {
+                number: n,
+                hash: B256::with_last_byte(n as u8),
+                parent_hash: B256::with_last_byte(if self.broken && n == 108 {
+                    99
+                } else {
+                    (n - 1) as u8
+                }),
+                timestamp: n,
+            })
+        }
+        fn discover(&self, _: u64, _: u64) -> Result<Vec<B256>> {
+            Ok(vec![])
+        }
+        fn receipt(&self, _: B256) -> Result<Option<CanonicalReceipt>> {
+            unreachable!()
+        }
+        fn transaction(&self, _: B256) -> Result<Option<CanonicalTransaction>> {
+            unreachable!()
+        }
+        fn membership(&self, _: &MembershipInput, _: &CanonicalBlock) -> Result<Membership> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn parallel_headers_are_bounded_ordered_and_never_commit_failed_pages() {
+        for mode in ["ordered", "broken", "failed"] {
+            let source = Arc::new(Source {
+                active: AtomicUsize::new(0),
+                peak: AtomicUsize::new(0),
+                broken: mode == "broken",
+                failed: mode == "failed",
+            });
+            let history = PublicHistory::new(
+                Arc::new(
+                    PublicHistoryStore::new(
+                        Arc::new(MemoryAtomicRecords::default()),
+                        Retention::default(),
+                    )
+                    .unwrap(),
+                ),
+                PublicHistoryScope {
+                    chain_id: 97,
+                    protocol_address: Address::with_last_byte(1),
+                    runtime_code_hash: B256::with_last_byte(42),
+                    deployment_block: 100,
+                },
+                source.clone(),
+            )
+            .unwrap();
+            let result = history.acquire(100, 115, &CancellationToken::default());
+            if mode == "ordered" {
+                let (page, _) = result.unwrap();
+                let peak = source.peak.load(Ordering::SeqCst);
+                assert!((2..=8).contains(&peak), "parallel reads: {peak}");
+                assert_eq!(
+                    page.headers.iter().map(|h| h.number).collect::<Vec<_>>(),
+                    (100..=115).collect::<Vec<_>>()
+                );
+            } else {
+                assert!(result.is_err(), "{mode} page accepted");
+                let state = history.snapshot().unwrap();
+                assert!(state.pages.is_empty() && state.coverage.is_empty());
+            }
+            assert_eq!(source.active.load(Ordering::SeqCst), 0);
+        }
     }
 }

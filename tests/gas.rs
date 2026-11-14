@@ -125,11 +125,11 @@ fn pinned_typescript_assets_are_byte_exact() {
     for (bytes, hash) in [
         (
             &include_bytes!("fixtures/measured-model.json")[..],
-            "c028b0d193e0b7c5a9eb549f0fd3be61fede5b33e2078e51675663049a9789bc",
+            "ead94d1e4ca5038ca50ce2665b915a161c7265b2a5feeded7c2994b493e590cf",
         ),
         (
             &include_bytes!("fixtures/model-validation.json")[..],
-            "82cfc194f1bd5bc0d00c4e3b97d6a350eabb4bb4f05540e7007296cba5d0d28d",
+            "5e7aa65f845829b30321ce8eb90d6ee9b15d906c9e310da1824612af47c14603",
         ),
     ] {
         assert_eq!(hex::encode(Sha256::digest(bytes)), hash);

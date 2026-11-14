@@ -3447,6 +3447,30 @@ mod public_funding_tests {
         bytes
     }
     #[test]
+    fn unsigned_funding_still_requires_canonical_nonce_deadline_and_caller() {
+        let payer = Address::repeat_byte(2);
+        let mut funding = empty_funding();
+        funding.amount = U256::from(7);
+        funding.payer = payer;
+        assert!(validate_submission(&funding, payer, 100, U256::from(200)).is_ok());
+        assert!(
+            validate_submission(&funding, Address::repeat_byte(3), 100, U256::from(200)).is_err()
+        );
+        for nonce in [U256::from(1), U256::MAX] {
+            funding.sigNonce = nonce;
+            assert!(validate_submission(&funding, payer, 100, U256::from(200)).is_err());
+        }
+        funding.sigNonce = U256::ZERO;
+        funding.deadline = U256::from(200);
+        assert!(validate_submission(&funding, payer, 100, U256::from(200)).is_err());
+        funding.signature = vec![1].into();
+        assert!(
+            validate_submission(&funding, Address::repeat_byte(3), 100, U256::from(200)).is_ok()
+        );
+        funding.deadline = U256::from(99);
+        assert!(validate_submission(&funding, payer, 100, U256::from(200)).is_err());
+    }
+    #[test]
     fn shield_public_funding_keeps_payer_wallet_and_gas_caller_separate() {
         let (chain, wallet, note, _) = test_support::note_fixture();
         let payer_key = signing_key(2);
@@ -3643,13 +3667,13 @@ mod local_gas_tests {
         let ordinary = prepare(0);
         assert_eq!(
             ordinary.estimate_gas().unwrap().gas_units(),
-            Some(U256::from(1542345))
+            Some(U256::from(1545536))
         );
         let fee_paying = prepare(1);
         assert_eq!(fee_paying.phase(), Phase::Prepared);
         assert!(fee_paying.proof().is_none());
         let estimate = fee_paying.estimate_gas().unwrap();
-        assert_eq!(estimate.gas_units(), Some(U256::from(1566750)));
+        assert_eq!(estimate.gas_units(), Some(U256::from(1569965)));
     }
     #[test]
     fn prepared_note_estimate_is_local_stable_and_exact() {

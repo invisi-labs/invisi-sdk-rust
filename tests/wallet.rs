@@ -35,6 +35,56 @@ fn current_authorization_vectors() {
     }
 }
 #[test]
+fn authorization_bulk_boundary_matches_standard_abi() {
+    use alloy_primitives::{keccak256, Address, B256, U256};
+    use alloy_sol_types::SolValue;
+
+    let chain = U256::from(31337);
+    let protocol = Address::repeat_byte(1);
+    let domain = keccak256((
+        keccak256(b"EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+        keccak256(b"InvisibleProtocol"),
+        keccak256(b"1"),
+        chain,
+        protocol,
+    ).abi_encode());
+    for length in [3, 18, 45, 127, 128, 129, 585, 815] {
+        let mut words: Vec<U256> = (0..length).map(|i| U256::from(i + 1)).collect();
+        words[0] = chain;
+        words[1] = U256::from_be_slice(protocol.as_slice());
+        let request = json!({
+            "operation": "transact", "capacity": 190,
+            "context": {"chainId": chain.to_string(), "protocolAddress": protocol.to_string()},
+            "words": words.iter().map(ToString::to_string).collect::<Vec<_>>()
+        });
+        let source = request.clone();
+        let abi_words: Vec<B256> = words
+            .iter()
+            .map(|word| B256::from(word.to_be_bytes::<32>()))
+            .collect();
+        let statement_hash = keccak256((U256::from(190), abi_words).abi_encode_params());
+        let structure = keccak256(
+            (
+                keccak256(b"WalletAuthorization(bytes32 operation,bytes32 statementHash)"),
+                keccak256(b"Invisi.Transact.v1"),
+                statement_hash,
+            )
+                .abi_encode(),
+        );
+        let expected =
+            keccak256([&[0x19, 0x01][..], domain.as_slice(), structure.as_slice()].concat());
+        assert_eq!(
+            authorization_digest(&request).unwrap(),
+            expected.0,
+            "{length} words"
+        );
+        assert_eq!(request, source);
+        let mut changed = request;
+        changed["words"][length - 1] = json!("9999");
+        assert_ne!(authorization_digest(&changed).unwrap(), expected.0);
+    }
+}
+#[test]
 fn public_response_never_exports_private_material() {
     let request = json!({"version":1,"id":"public-1","ownerAddress":"0x7e5f4552091a69125d5dfcb7b8c2659029395bdf","method":"wallet.public","params":{}});
     let response = execute(&key(), &request).unwrap();

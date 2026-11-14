@@ -199,3 +199,11 @@ standard EVM send; options require explicit positive gas. The SDK validates call
 submission, exports the exact call durably, sends once and records the hash. EVM keys remain in the
 host. Recover a `TransactionSendError.transaction_hash` by tracking and reconciling that original hash;
 uncertain sends and post-send storage failures retain reservations and never automatically resend.
+
+Collection workflows can use `rpc::TrustedProvider` for explicitly trusted
+Protocol RPC chain reads (no Ethereum endpoint), then authenticate known Note
+openings with `invisi_sdk_session::session::WalletSession::import_notes` and freeze
+an exact selection with `prepare_collection`. `sdk::BroadcasterFeeSource::Payout`
+pays the relay from a pure full-sum withdrawal, subject to a mandatory fee cap,
+positive net payout and owner authorization. See the RPC and session crate READMEs
+for the trust model and public APIs.

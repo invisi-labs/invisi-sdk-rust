@@ -27,7 +27,7 @@ impl<T: RpcTransport> EthereumChain<T> {
         }
     }
 }
-fn quantity(v: &Value) -> Result<u64> {
+pub(super) fn quantity(v: &Value) -> Result<u64> {
     let s = v
         .as_str()
         .and_then(|s| s.strip_prefix("0x"))

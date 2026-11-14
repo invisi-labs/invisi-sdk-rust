@@ -8,7 +8,8 @@ use crate::{
 };
 use std::{collections::BTreeSet, sync::Mutex};
 
-/// Indexed discovery chooses candidates; receipts and membership come from independent canonical reads.
+/// Indexed discovery chooses candidates; receipts and membership follow the configured chain reader.
+/// With `TrustedProvider`, chain facts are trusted service assertions rather than independent reads.
 pub trait SessionSource: Send + Sync {
     fn context(&self) -> ProtocolContext;
     fn deployment_start(&self) -> u64;
@@ -641,7 +642,8 @@ impl PendingWalletRefresh {
                         if previous.input.note != note
                             || previous.input.tree_id != output.leaf.tree_id
                             || previous.input.leaf_index as u32 != output.leaf.leaf_index
-                            || previous.transaction_hash != output.leaf.transaction_hash
+                            || previous.transaction_hash != B256::ZERO
+                                && previous.transaction_hash != output.leaf.transaction_hash
                         {
                             return Err("conflicting canonical Note identity".into());
                         }

@@ -106,3 +106,22 @@ The SDK `BroadcasterClient` owns `quote`, `submit` and `cancel` for Note/Credit 
 managed operations. Managed cancellation persists the relay acknowledgement before independent
 canonical reconciliation and reservation release. Retrying after canonical outages uses that durable
 acknowledgement without requiring relay availability. No second release call is needed.
+
+### Explicit collection
+
+`session.import_notes(&[NoteInput])` authenticates known Note openings, current
+membership and nullifier state without a discovery scan. Imports use the encrypted
+store's revision CAS and preserve existing spent flags, reservations and journals;
+they advance the observation anchor without claiming discovery coverage. Supplied
+input path/root fields are ignored; authenticated current paths are obtained from
+the session source using the opening and tree position.
+Existing `import_note(input, transaction)` remains available for receipt-based imports.
+
+`session.prepare_collection(token, recipient, &commitments, CollectionOptions { deadline })`
+freezes exactly the selected available Notes into a withdrawal of their full sum,
+without public funding, private outputs or automatic change. Zero deadline uses
+construction time plus 300 seconds. Duplicate, spent, reserved, missing and wrong-token selections
+are rejected. To pay a broadcaster from that withdrawal, select
+`sdk::BroadcasterFeeSource::Payout` and set `BroadcasterOptions::max_fee_amount`.
+The frozen gross sum is retained across quote rounds; the final net withdrawal must
+remain positive and still requires owner authorization.

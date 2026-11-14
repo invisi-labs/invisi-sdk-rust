@@ -155,6 +155,7 @@ impl ChainState for Chain {
     }
 }
 struct Source {
+    membership_hook: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     fork: AtomicBool,
     runtime_hash: Mutex<Option<B256>>,
     extra_receipts: Mutex<Vec<CanonicalReceipt>>,
@@ -235,6 +236,9 @@ impl SessionSource for Source {
     fn membership(&self, i: &MembershipInput, b: &CanonicalBlock) -> Result<Membership> {
         self.chain.online()?;
         self.membership_reads.fetch_add(1, Ordering::SeqCst);
+        if let Some(hook) = self.membership_hook.lock().unwrap().take() {
+            hook();
+        }
         let p = self.proofs.lock().unwrap();
         let (tree, index, path, root) = p.get(&i.commitment).ok_or("proof unavailable")?;
         Ok(Membership {
@@ -342,6 +346,7 @@ fn harness() -> Harness {
     let mut proofs = BTreeMap::new();
     proofs.insert(commitment, (1, 0, path, root));
     let source = Arc::new(Source {
+        membership_hook: Mutex::new(None),
         fork: Default::default(),
         runtime_hash: Default::default(),
         extra_receipts: Default::default(),
@@ -4322,4 +4327,169 @@ fn managed_host_send_rejects_independent_worker_of_same_store() {
         .contains("worker"));
     assert!(sender.calls.lock().unwrap().is_empty());
     assert!(!h.session.snapshot().unwrap().operations[operation.id()].externalized);
+}
+
+#[test]
+fn explicit_import_and_collection_preserve_discovery_and_reservations() {
+    let h = harness();
+    let (_, _, path, root) = h.source.proofs.lock().unwrap()[&h.commitment];
+    let input = NoteInput {
+        note: h.note.clone(),
+        tree_id: 1,
+        leaf_index: 0,
+        path,
+        root,
+    };
+    h.session
+        .import_notes(std::slice::from_ref(&input))
+        .unwrap();
+    let imported = h.session.snapshot().unwrap();
+    assert!(imported.discovery_ranges.is_empty());
+    assert!(imported.discovery_through.is_none());
+    assert_eq!(imported.notes.len(), 1);
+    assert_eq!(h.source.discovery_reads.load(Ordering::SeqCst), 0);
+    let options = CollectionOptions {
+        deadline: 2_000_000_100,
+    };
+    assert!(h
+        .session
+        .prepare_collection(
+            sdk::word_address(h.note.token_address).unwrap(),
+            h.session.wallet.owner_address(),
+            &[h.commitment, h.commitment],
+            options
+        )
+        .is_err());
+    let _op = h
+        .session
+        .prepare_collection(
+            sdk::word_address(h.note.token_address).unwrap(),
+            h.session.wallet.owner_address(),
+            &[h.commitment],
+            options,
+        )
+        .unwrap();
+    let reservation = h.session.snapshot().unwrap().notes[&h.commitment]
+        .reserved_by
+        .clone();
+    assert!(reservation.is_some());
+    h.session
+        .import_notes(std::slice::from_ref(&input))
+        .unwrap();
+    assert_eq!(
+        h.session.snapshot().unwrap().notes[&h.commitment].reserved_by,
+        reservation
+    );
+    h.chain
+        .spent
+        .lock()
+        .unwrap()
+        .insert(imported.notes[&h.commitment].nullifier);
+    h.session
+        .import_notes(std::slice::from_ref(&input))
+        .unwrap();
+    h.chain.spent.lock().unwrap().clear();
+    h.session.import_notes(&[input]).unwrap();
+    assert!(h.session.snapshot().unwrap().notes[&h.commitment].spent);
+}
+
+#[test]
+fn explicit_import_rejects_bad_openings_atomically() {
+    let h = harness();
+    let (_, _, path, root) = h.source.proofs.lock().unwrap()[&h.commitment];
+    let mut input = NoteInput {
+        note: h.note.clone(),
+        tree_id: 1,
+        leaf_index: 0,
+        path,
+        root,
+    };
+    input.note.owner_address = U256::from(1);
+    assert!(h.session.import_notes(&[input]).is_err());
+    assert_eq!(h.session.snapshot().unwrap().revision, 0);
+}
+
+#[test]
+fn explicit_import_is_atomic_on_membership_failure_and_revision_race() {
+    let h = harness();
+    let (_, _, path, root) = h.source.proofs.lock().unwrap()[&h.commitment];
+    let input = NoteInput {
+        note: h.note.clone(),
+        tree_id: 1,
+        leaf_index: 0,
+        path,
+        root,
+    };
+    h.source
+        .proofs
+        .lock()
+        .unwrap()
+        .get_mut(&h.commitment)
+        .unwrap()
+        .1 = 1;
+    assert!(h
+        .session
+        .import_notes(std::slice::from_ref(&input))
+        .is_err());
+    assert_eq!(h.session.snapshot().unwrap().revision, 0);
+    h.source
+        .proofs
+        .lock()
+        .unwrap()
+        .get_mut(&h.commitment)
+        .unwrap()
+        .1 = 0;
+    let concurrent = h.session.clone();
+    *h.source.membership_hook.lock().unwrap() = Some(Box::new(move || {
+        concurrent.commit(concurrent.snapshot().unwrap()).unwrap();
+    }));
+    assert!(h.session.import_notes(&[input]).is_err());
+    let state = h.session.snapshot().unwrap();
+    assert_eq!(state.revision, 1);
+    assert!(state.notes.is_empty());
+}
+
+#[test]
+fn collection_default_deadline_is_frozen_from_construction_time() {
+    let h = harness();
+    let (_, _, path, root) = h.source.proofs.lock().unwrap()[&h.commitment];
+    h.session
+        .import_notes(&[NoteInput {
+            note: h.note.clone(),
+            tree_id: 1,
+            leaf_index: 0,
+            path,
+            root,
+        }])
+        .unwrap();
+    h.session
+        .prepare_collection(
+            sdk::word_address(h.note.token_address).unwrap(),
+            h.session.wallet.owner_address(),
+            &[h.commitment],
+            CollectionOptions::default(),
+        )
+        .unwrap();
+    let state = h.session.snapshot().unwrap();
+    assert_eq!(
+        state.operations.values().next().unwrap().deadline,
+        block(10).timestamp + 300
+    );
+}
+
+#[test]
+fn explicit_import_authenticates_fresh_membership_without_supplied_path() {
+    let h = harness();
+    let input = NoteInput {
+        note: h.note.clone(),
+        tree_id: 1,
+        leaf_index: 0,
+        path: [U256::from(999); 16],
+        root: U256::ZERO,
+    };
+    h.session.import_notes(&[input]).unwrap();
+    let (_, _, expected_path, expected_root) = h.source.proofs.lock().unwrap()[&h.commitment];
+    let state = h.session.snapshot().unwrap();
+    assert_eq!(state.notes[&h.commitment].input.path, expected_path);
+    assert_eq!(state.notes[&h.commitment].input.root, expected_root);
 }

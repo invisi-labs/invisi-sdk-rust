@@ -52,3 +52,14 @@ receipt success, and root-history authentication remain trusted RPC assertions.
 A pending result contains no partial evidence and does not prove nonpayment.
 `Latest` is rejected. The existing `ProtocolRpcClient::get_note(commitment,
 &block)` retains independent chain verification and its historic wire format.
+
+### Trusted Protocol RPC reads
+
+`rpc::TrustedProvider::new(transport, deployment)` implements `CanonicalChain`,
+`CanonicalHead`, `ChainReceipts` and `ChainTransactions` using only
+`invisi_readChainState`. Pass it wherever `EthereumChain` is accepted, including
+`ProtocolRpcClient` and `sdk::RpcChainState`. Supply explicit deployment pins;
+every response must match all pins and API/protocol versions v1/1. Header and
+signed transaction hashes are recomputed, and receipts bind to a canonical header.
+This mode trusts the Protocol RPC service for chain facts; it does not independently
+verify consensus or connect to an Ethereum endpoint. It exposes no submission API.

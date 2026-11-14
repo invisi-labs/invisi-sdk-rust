@@ -1,4 +1,5 @@
-//! Versioned indexed RPC and independent Ethereum reads. Indexed records are never proof of ownership.
+//! Versioned indexed RPC with independent Ethereum or explicitly trusted service reads.
+//! Indexed records are never proof of ownership.
 mod broadcaster_discovery;
 mod client;
 mod finality;
@@ -6,6 +7,8 @@ mod note_confirmation;
 pub use finality::*;
 pub use invisi_sdk_protocol::finality::*;
 pub use note_confirmation::*;
+mod trusted_provider;
+pub use trusted_provider::*;
 mod transport;
 mod types;
 pub use client::*;

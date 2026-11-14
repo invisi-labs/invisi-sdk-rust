@@ -150,6 +150,8 @@ impl Default for SourceReplayBudgets {
 pub enum BroadcasterFeeSource {
     PublicFunding,
     PrivateInputs,
+    /// Deduct the relay fee from a pure full-sum withdrawal.
+    Payout,
 }
 #[derive(Clone, Debug)]
 pub struct FundingPermitRequest {
@@ -678,6 +680,29 @@ impl PreparedTransaction {
                         },
                     );
                     match source {
+                        BroadcasterFeeSource::Payout => {
+                            let original_fee = match template {
+                                RepriceTemplate::Transfer(original) => original.fee.amount,
+                                _ => unreachable!(),
+                            };
+                            let (recipient, withdrawal) =
+                                p.withdrawal.ok_or("payout fee requires pure withdrawal")?;
+                            let gross = withdrawal
+                                .checked_add(original_fee)
+                                .ok_or("payout overflow")?;
+                            if p.inputs.is_empty()
+                                || !p.outputs.is_empty()
+                                || has_funding
+                                || recipient == Address::ZERO
+                                || gross != available
+                                || amount >= gross
+                                || amount >= U256::from(1) << 128
+                            {
+                                return Err("payout fee requires pure full-sum withdrawal with positive net".into());
+                            }
+                            p.withdrawal = Some((recipient, gross - amount));
+                            p.automatic_change = false;
+                        }
                         BroadcasterFeeSource::PublicFunding => {
                             if !has_funding {
                                 return Err("public funding fee requires explicit payer".into());
@@ -707,7 +732,10 @@ impl PreparedTransaction {
                 }
                 RepriceTemplate::Shield(p) => {
                     let mut p = p.clone();
-                    if options.fee_source == Some(BroadcasterFeeSource::PrivateInputs) {
+                    if matches!(
+                        options.fee_source,
+                        Some(BroadcasterFeeSource::PrivateInputs | BroadcasterFeeSource::Payout)
+                    ) {
                         return Err("shield fee requires public funding".into());
                     }
                     if p.funding.permit.deadline != U256::ZERO && options.funding_permit.is_none() {
@@ -2638,6 +2666,99 @@ mod tests {
         assert!(quoted.funding().amount > U256::from(20));
         assert_eq!(*calls.lock().unwrap(), vec![quoted.funding().amount]);
         assert_eq!(quoted.outputs()[0].amount(), business);
+    }
+    #[test]
+    fn payout_fee_reprices_frozen_gross_and_requires_positive_net() {
+        let (chain, wallet, mut p, _) = note_fixture();
+        p.outputs.clear();
+        p.withdrawal = Some((
+            wallet.owner_address(),
+            sum(p.inputs.iter().map(|i| i.note.amount)).unwrap(),
+        ));
+        p.fee = Fee::default();
+        p.funding = empty_funding();
+        p.automatic_change = false;
+        let gross = p.withdrawal.unwrap().1;
+        let prepared = Invisi::new(chain.clone())
+            .prepare_transfer(&wallet, p)
+            .unwrap();
+        let relay = Arc::new(SignedRelay {
+            fees: std::sync::atomic::AtomicUsize::new(0),
+            quotes: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let quoted = prepared
+            .quote_for_broadcaster(
+                chain.clone(),
+                relay,
+                &BroadcasterOptions {
+                    fee_source: Some(BroadcasterFeeSource::Payout),
+                    max_fee_amount: Some(U256::from(100)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        match &quoted.plan {
+            Plan::Transfer {
+                params,
+                inputs,
+                outputs,
+                funding,
+                ..
+            } => {
+                assert_eq!(params.withdrawalAmount + params.feeAmount, gross);
+                assert_eq!(params.feeAmount, U256::from(2));
+                assert!(!inputs.is_empty());
+                assert!(outputs.is_empty());
+                assert_eq!(funding.amount, U256::ZERO);
+            }
+            _ => panic!("withdrawal required"),
+        }
+        assert!(quoted.needs_authorization());
+        assert!(prepared.broadcaster_state().is_none());
+    }
+    #[test]
+    fn payout_rejects_funding_change_and_fee_cap() {
+        for shape in ["funding", "change", "cap"] {
+            let (chain, wallet, mut p, _) = note_fixture();
+            let gross = sum(p.inputs.iter().map(|i| i.note.amount)).unwrap();
+            p.outputs.clear();
+            p.fee = Fee::default();
+            p.funding = empty_funding();
+            p.withdrawal = Some((wallet.owner_address(), gross));
+            p.automatic_change = false;
+            if shape == "funding" {
+                p.funding.amount = U256::from(1);
+                p.funding.payer = wallet.owner_address();
+                p.withdrawal = Some((wallet.owner_address(), gross + U256::from(1)));
+            }
+            if shape == "change" {
+                p.withdrawal = Some((wallet.owner_address(), gross - U256::from(1)));
+                p.automatic_change = true;
+            }
+            let prepared = Invisi::new(chain.clone())
+                .prepare_transfer(&wallet, p)
+                .unwrap();
+            let relay = Arc::new(SignedRelay {
+                fees: 0.into(),
+                quotes: 0.into(),
+            });
+            assert!(
+                prepared
+                    .quote_for_broadcaster(
+                        chain,
+                        relay.clone(),
+                        &BroadcasterOptions {
+                            fee_source: Some(BroadcasterFeeSource::Payout),
+                            max_fee_amount: Some(U256::from(if shape == "cap" { 1 } else { 100 })),
+                            ..Default::default()
+                        }
+                    )
+                    .is_err(),
+                "{shape}"
+            );
+            assert!(prepared.broadcaster_state().is_none());
+            assert_eq!(relay.quotes.load(std::sync::atomic::Ordering::SeqCst), 0);
+        }
     }
     include!("preparation_profile.rs");
 }

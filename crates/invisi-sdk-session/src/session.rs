@@ -19,6 +19,8 @@ mod sync;
 pub use sync::*;
 mod journal;
 pub use journal::*;
+mod collection;
+pub use collection::*;
 mod preparation;
 pub use preparation::RetainedPreparation;
 mod transaction;

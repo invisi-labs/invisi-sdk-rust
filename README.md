@@ -6,10 +6,10 @@ The SDK does not select accounts, read Keychain/Keystore, hold a mnemonic, or ap
 
 ## Release validation
 
-The public crates share version **1.2.3**. See [local release validation](RELEASE.md)
+The public crates share version **1.2.4**. See [local release validation](RELEASE.md)
 for packaging checks and the required publication order.
 
-Version 1.2.3 exposes six common modules plus the separate native FFI adapter.
+Version 1.2.4 exposes six common modules plus the separate native FFI adapter.
 Replace `invisi-sdk-core` dependencies/imports with `invisi-sdk-primitives`.
 Use `invisi_sdk::sdk` for stateless operations and `invisi_sdk_session::session`
 for managed wallets; enable `sqlite` on `invisi-sdk-session` when needed.

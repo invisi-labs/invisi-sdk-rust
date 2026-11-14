@@ -8,8 +8,8 @@ publish = false
 path = "support/discovery.rs"
 
 [dependencies]
-invisi-sdk-session = { path = "../crates/invisi-sdk-session", version = "=1.2.3" }
-invisi-sdk = { path = "..", version = "=1.2.3" }
+invisi-sdk-session = { path = "../crates/invisi-sdk-session", version = "=1.2.4" }
+invisi-sdk = { path = "..", version = "=1.2.4" }
 alloy-primitives = { version = "0.8", features = ["serde"] }
 alloy-sol-types = "0.8"
 serde_json = "1"

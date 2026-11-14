@@ -33,7 +33,7 @@ class ReleaseTests(unittest.TestCase):
             buffer = io.BytesIO()
             with tarfile.open(fileobj=buffer, mode='w') as output:
                 for path, data in files.items():
-                    member = tarfile.TarInfo('crate-1.2.3/' + path)
+                    member = tarfile.TarInfo('crate-1.2.4/' + path)
                     member.size = len(data)
                     output.addfile(member, io.BytesIO(data))
             buffer.seek(0)

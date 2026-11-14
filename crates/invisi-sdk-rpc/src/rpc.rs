@@ -2,8 +2,10 @@
 mod broadcaster_discovery;
 mod client;
 mod finality;
+mod note_confirmation;
 pub use finality::*;
 pub use invisi_sdk_protocol::finality::*;
+pub use note_confirmation::*;
 mod transport;
 mod types;
 pub use client::*;

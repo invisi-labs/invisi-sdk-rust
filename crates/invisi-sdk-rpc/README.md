@@ -42,3 +42,13 @@ Cancellation acknowledges relay custody and does not revoke protocol signatures.
 Uncertain cancellation responses retain reservations.
 `scheduled`, `preparing`, and `cancelled` statuses coexist with existing native
 confirmation metadata. Scheduling does not change provenance statements.
+
+`TrustedProtocolRpcClient::new(transport, deployment)?.get_note(commitment,
+FinalityTag::Finalized)` (or `Safe`) uses the `invisi_getNote` confirmation
+selector without a `CanonicalChain`. Its distinct `TrustedNoteLookup` result
+checks deployment/version pins, complete pending/confirmed envelopes, finality
+and block bindings, and the Poseidon membership proof locally. Canonical chain,
+receipt success, and root-history authentication remain trusted RPC assertions.
+A pending result contains no partial evidence and does not prove nonpayment.
+`Latest` is rejected. The existing `ProtocolRpcClient::get_note(commitment,
+&block)` retains independent chain verification and its historic wire format.

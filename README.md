@@ -207,3 +207,7 @@ an exact selection with `prepare_collection`. `sdk::BroadcasterFeeSource::Payout
 pays the relay from a pure full-sum withdrawal, subject to a mandatory fee cap,
 positive net payout and owner authorization. See the RPC and session crate READMEs
 for the trust model and public APIs.
+
+## Contributing
+
+Open a focused GitHub issue or pull request describing the problem, scope, and validation. Run `cargo fmt --all --check`, `cargo test --workspace --all-features`, and `python3 scripts/check-release.py` for your change. Never include private keys, credentials, or private witnesses in issues, pull requests, logs, or fixtures.

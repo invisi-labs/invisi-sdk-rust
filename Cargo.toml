@@ -10,7 +10,7 @@ readme = "README.md"
 keywords = ["zk", "poseidon2", "bn254", "privacy", "noir"]
 categories = ["cryptography"]
 
-include = ["Cargo.toml", "README.md", "LICENSE", "CHANGELOG.md", "RELEASE.md", "src/**", "tests/**", "assets/**", "provenance/**", "testdata/**"]
+include = ["Cargo.toml", "README.md", "LICENSE", "NOTICE", "CHANGELOG.md", "RELEASE.md", "src/**", "tests/**", "assets/**", "provenance/**", "testdata/**"]
 
 [lib]
 name = "invisi_sdk"

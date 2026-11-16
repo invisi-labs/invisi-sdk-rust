@@ -63,3 +63,7 @@ every response must match all pins and API/protocol versions v1/1. Header and
 signed transaction hashes are recomputed, and receipts bind to a canonical header.
 This mode trusts the Protocol RPC service for chain facts; it does not independently
 verify consensus or connect to an Ethereum endpoint. It exposes no submission API.
+
+## Contributing
+
+See the [contribution guidelines](../../README.md#contributing) for issues, pull requests, validation, and handling sensitive material.

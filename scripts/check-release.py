@@ -22,6 +22,11 @@ def run(args, **kwargs):
 
 
 def check_archive_artifacts(contents, name):
+    license_text = (ROOT / 'LICENSE').read_bytes()
+    assert b'END OF TERMS AND CONDITIONS' in license_text and len(license_text) > 10000
+    prefix = f'{name}-1.2.4/'
+    assert contents.extractfile(prefix + 'LICENSE').read() == license_text, f'{name}: incomplete packaged LICENSE'
+    assert contents.extractfile(prefix + 'NOTICE').read() == (ROOT / 'NOTICE').read_bytes(), f'{name}: missing attribution'
     allowed = {}
     if name == 'invisi-sdk-prover':
         manifest_member = next(member for member in contents.getmembers() if member.name.endswith('/provenance/manifest.json'))

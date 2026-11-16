@@ -125,3 +125,7 @@ are rejected. To pay a broadcaster from that withdrawal, select
 `sdk::BroadcasterFeeSource::Payout` and set `BroadcasterOptions::max_fee_amount`.
 The frozen gross sum is retained across quote rounds; the final net withdrawal must
 remain positive and still requires owner authorization.
+
+## Contributing
+
+See the [contribution guidelines](../../README.md#contributing) for issues, pull requests, validation, and handling sensitive material.

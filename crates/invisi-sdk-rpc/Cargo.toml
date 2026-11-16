@@ -7,7 +7,7 @@ description = "Invisi SDK rpc capabilities"
 
 readme = "README.md"
 repository = "https://github.com/invisi-lab/invisi-sdk-rust"
-include = ["Cargo.toml", "README.md", "LICENSE", "src/**", "assets/**", "provenance/**", "testdata/**", "tests/**", "include/**"]
+include = ["Cargo.toml", "README.md", "LICENSE", "NOTICE", "src/**", "assets/**", "provenance/**", "testdata/**", "tests/**", "include/**"]
 
 [dependencies]
 invisi-sdk-primitives = { path = "../invisi-sdk-primitives", version = "=1.2.4" }

@@ -208,3 +208,7 @@ Cancellation persists the acknowledgement and independently checks canonical con
 before returning and releasing reservations. Retry cancellation after canonical outages;
 the saved acknowledgement permits recovery even while the relay is offline.
 Keep operation journals encrypted.
+
+## Contributing
+
+See the [contribution guidelines](../README.md#contributing) for issues, pull requests, validation, and handling sensitive material.

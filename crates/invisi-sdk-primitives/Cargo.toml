@@ -8,7 +8,7 @@ license = "Apache-2.0"
 description = "Pure field, key, commitment, wallet and delivery primitives"
 
 readme = "README.md"
-include = ["Cargo.toml", "README.md", "LICENSE", "src/**", "assets/**", "provenance/**", "testdata/**", "tests/**", "include/**"]
+include = ["Cargo.toml", "README.md", "LICENSE", "NOTICE", "src/**", "assets/**", "provenance/**", "testdata/**", "tests/**", "include/**"]
 
 [dependencies]
 alloy-primitives = { version = "0.8", features = ["serde"] }

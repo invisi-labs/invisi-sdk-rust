@@ -2,6 +2,8 @@
 
 ## 1.2.5
 
+- Restore required non-semantic compiler metadata for official Noir CLI execution of stripped resources without changing pinned artifact or verification-key identities.
+
 - Align the eight-crate cohort with independent IPP support and Invisi Core interfaces.
 - Load pinned public proving resources lazily with verified, shared disk caches; retain local directory and offline circuit support.
 

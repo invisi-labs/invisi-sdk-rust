@@ -655,30 +655,36 @@ pub struct NoirCli {
     pub binary: PathBuf,
     pub timeout: Duration,
 }
+fn executable_artifact(artifact: &[u8]) -> Result<Vec<u8>> {
+    let mut executable: Value = serde_json::from_slice(artifact).map_err(|_| "invalid artifact")?;
+    if executable["noir_version"] != "1.0.0+275d3ab1a5c916c6ea73e8d6b943f685f574500c" {
+        return Err("unsupported Noir artifact version".into());
+    }
+    // Release metadata omits debug data; this raw DEFLATE blob encodes {"debug_infos":[]}.
+    executable
+        .as_object_mut()
+        .ok_or("invalid artifact")?
+        .entry("debug_symbols")
+        .or_insert(json!("q1ZKSU0qTY/PzEvLL1ayio6tBQA="));
+    executable
+        .as_object_mut()
+        .unwrap()
+        .entry("file_map")
+        .or_insert(json!({}));
+    executable
+        .as_object_mut()
+        .unwrap()
+        .entry("hash")
+        .or_insert(json!(0));
+    serde_json::to_vec(&executable).map_err(|_| "invalid artifact".into())
+}
+
 impl WitnessExecutor for NoirCli {
     fn execute(&self, artifact: &[u8], inputs: &LocalWitness) -> Result<Zeroizing<Vec<u8>>> {
         version(&self.binary, &["--version"], "1.0.0", self.timeout)?;
-        let mut executable: Value =
-            serde_json::from_slice(artifact).map_err(|_| "invalid artifact")?;
-        if executable["noir_version"] != "1.0.0+275d3ab1a5c916c6ea73e8d6b943f685f574500c" {
-            return Err("unsupported Noir artifact version".into());
-        }
-        // Release metadata omits debug data; this raw DEFLATE blob encodes {"debug_infos":[]}.
-        executable
-            .as_object_mut()
-            .ok_or("invalid artifact")?
-            .entry("debug_symbols")
-            .or_insert(json!("q1ZKSU0qTY/PzEvLL1ayio6tBQA="));
-        executable
-            .as_object_mut()
-            .unwrap()
-            .entry("file_map")
-            .or_insert(json!({}));
+        let executable = executable_artifact(artifact)?;
         let dir = PrivateDir::new()?;
-        write_private(
-            &dir.path("circuit.json"),
-            &serde_json::to_vec(&executable).map_err(|_| "invalid artifact")?,
-        )?;
+        write_private(&dir.path("circuit.json"), &executable)?;
         write_private(&dir.path("inputs.json"), &inputs.encoded)?;
         run_local(
             Command::new(&self.binary)
@@ -1385,5 +1391,31 @@ mod resource_tests {
     #[test]
     fn default_release_source_uses_shared_assets_domain_and_pinned_set() {
         assert_eq!(resource_release_source("ca3ee827c620b1e25d87d1b880549f8cec4be4970f26ea0ab5993dc2db4c827c"), "https://assets.invisipay.fi/prover/sets/ca3ee827c620b1e25d87d1b880549f8cec4be4970f26ea0ab5993dc2db4c827c/");
+    }
+}
+
+#[cfg(test)]
+mod executable_artifact_tests {
+    use super::*;
+    #[test]
+    fn official_executor_metadata_preserves_published_fields() {
+        let original = json!({"noir_version":"1.0.0+275d3ab1a5c916c6ea73e8d6b943f685f574500c","abi":{"parameters":[]},"bytecode":"test-only"});
+        let output: Value = serde_json::from_slice(
+            &executable_artifact(&serde_json::to_vec(&original).unwrap()).unwrap(),
+        )
+        .unwrap();
+        for (key, value) in original.as_object().unwrap() {
+            assert_eq!(&output[key], value);
+        }
+        assert_eq!(output["hash"], json!(0));
+        assert!(output["debug_symbols"].is_string());
+        assert_eq!(output["file_map"], json!({}));
+        let mut existing = original;
+        existing["hash"] = json!(123);
+        let output: Value = serde_json::from_slice(
+            &executable_artifact(&serde_json::to_vec(&existing).unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(output["hash"], json!(123));
     }
 }

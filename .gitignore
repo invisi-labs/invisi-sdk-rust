@@ -17,3 +17,6 @@ examples/local/
 
 # Authenticated local provenance artifacts (independent of main circuit assets)
 .cache/provenance/
+
+# Public circuit resource cache; never distribute downloaded artifacts.
+.cache/prover-assets/

@@ -29,7 +29,14 @@ between checks. Only the vendored dependency sources are reused.
 Each archive includes a README, the existing Apache-2.0 license, source, and the
 explicitly allowlisted runtime assets and fixtures. Protocol ABIs, gas references,
 provenance manifests, and compile-time test fixtures remain available outside the
-workspace. Public recursive verification data and the test verification key are
+workspace. Heavy main and Provenance circuit artifacts/VKs are external Core resources;
+archive checks reject bundled Provenance circuit trees. The prover's generated
+`assets/prover/resource-release.json` pins the resource index. Seed an offline cache
+with `python3 scripts/sync-prover-assets.py /path/to/core-release --cache /path/to/cache`;
+`--update-pin` deliberately accepts a reviewed new release. To validate the pinned Core
+release against existing Rust circuit/Source identities and offline cache replay, run
+`INVISI_TEST_RESOURCE_SOURCE=/path/to/core-release cargo test -p invisi-sdk-prover resource_tests --lib -- --include-ignored`.
+Public recursive verification data and the test verification key are
 required by the prover source and are included; private proving keys, local proof
 outputs, caches, wallet databases, target directories, and vendored dependencies are
 excluded. Fixture copies used across package boundaries must be refreshed alongside

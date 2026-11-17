@@ -27,28 +27,17 @@ def check_archive_artifacts(contents, name):
     prefix = f'{name}-1.2.4/'
     assert contents.extractfile(prefix + 'LICENSE').read() == license_text, f'{name}: incomplete packaged LICENSE'
     assert contents.extractfile(prefix + 'NOTICE').read() == (ROOT / 'NOTICE').read_bytes(), f'{name}: missing attribution'
-    allowed = {}
-    if name == 'invisi-sdk-prover':
-        manifest_member = next(member for member in contents.getmembers() if member.name.endswith('/provenance/manifest.json'))
-        manifest = json.load(contents.extractfile(manifest_member))
-        for circuit in manifest['circuits']:
-            for key in ('artifact', 'vk'):
-                allowed['provenance/' + circuit[key]] = circuit[key + 'Sha256']
-    seen = set()
     for member in contents.getmembers():
         parts = Path(member.name).parts[1:]
         relative = '/'.join(parts)
         forbidden = any(part in {'target', 'vendor', '.git', '.cache', '.local'} for part in parts)
-        if forbidden and relative not in allowed:
+        if relative.startswith(('provenance/circuits/', 'circuits/', 'assets/circuits/', 'assets/prover/circuits/')):
+            raise RuntimeError(f'Heavy runtime asset must remain external: {member.name}')
+        if forbidden:
             raise RuntimeError(f'Forbidden package artifact: {member.name}')
         if member.name.endswith(('.sqlite', '.pk', '.proof', '.env')) or not member.isfile():
             raise RuntimeError(f'Private/generated artifact: {member.name}')
-        if relative in allowed:
-            if hashlib.sha256(contents.extractfile(member).read()).hexdigest() != allowed[relative]:
-                raise RuntimeError(f'Runtime artifact digest mismatch: {member.name}')
-            seen.add(relative)
-    if seen != allowed.keys():
-        raise RuntimeError('Missing authenticated public runtime artifacts')
+
 
 
 def main():

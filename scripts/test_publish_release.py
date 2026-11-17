@@ -21,7 +21,7 @@ spec.loader.exec_module(archive_check)
 
 
 class ReleaseTests(unittest.TestCase):
-    def test_only_authenticated_public_runtime_target_assets_are_allowed(self):
+    def test_heavy_runtime_assets_are_external_even_when_authenticated(self):
         import hashlib
         artifact = 'circuits/provenance/k10/target/provenance_k10.json'
         vk = 'circuits/provenance/k10/target/evm/vk'
@@ -39,8 +39,8 @@ class ReleaseTests(unittest.TestCase):
             buffer.seek(0)
             with tarfile.open(fileobj=buffer) as contents:
                 archive_check.check_archive_artifacts(contents, name)
-        verify(base)
-        for files in [dict(base, **{'target/cache': payload}), dict(base, **{'provenance/' + artifact: b'tampered'}), {path: data for path, data in base.items() if path != 'provenance/' + vk}]:
+        verify({'provenance/manifest.json': json.dumps(manifest).encode()})
+        for files in [base, dict(base, **{'target/cache': payload}), dict(base, **{'provenance/' + artifact: b'tampered'}), {path: data for path, data in base.items() if path != 'provenance/' + vk}]:
             with self.assertRaises(RuntimeError):
                 verify(files)
         with self.assertRaises(RuntimeError):

@@ -470,3 +470,14 @@ impl invisi_sdk_session::session::TransactionSender for AppTransactionSender {
         Ok(hash)
     }
 }
+
+/// Keep explicit legacy directories available; otherwise fetch public circuits lazily.
+pub fn prover_assets() -> std::sync::Arc<dyn invisi_sdk::prover::Assets> {
+    if let Some(directory) = std::env::var_os("PROVER_ASSETS") {
+        std::sync::Arc::new(invisi_sdk::prover::DirectoryAssets {
+            directory: directory.into(),
+        })
+    } else {
+        std::sync::Arc::new(invisi_sdk::prover::ResourceProvider::default())
+    }
+}

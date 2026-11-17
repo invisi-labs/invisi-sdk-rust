@@ -79,7 +79,10 @@ Proving scenarios require real matching tools and pinned release assets:
 ```sh
 export BB_BINARY='/path/to/bb-6.0.0'
 export NOIR_EXECUTOR='/path/to/noir-1.0.0-compatible-executor'
-export PROVER_ASSETS='/path/to/authenticated/circuits'
+# Optional: use a pre-existing local circuit directory instead of lazy resources.
+# export PROVER_ASSETS='/path/to/authenticated/circuits'
+# export INVISI_PROVER_CACHE_DIR='/path/to/public-resource-cache'
+# export INVISI_PROVER_OFFLINE=1
 ```
 
 The executor implements the documented `NoirCli` interface (`--artifact-path`, `--prover-file`, `--output-dir`, `--witness-name`). Circuit files are named `<circuit>.json`; verification keys are `<circuit>.evm.vk` and, for aggregation members, `<circuit>.noir-recursive.vk`. The SDK checks their authenticated release identities and independently verifies generated proofs.
@@ -162,7 +165,7 @@ Run the other binaries without `--execute` to inspect their guard behavior witho
 
 See `07-broadcaster` for fee-frozen quotation and submission. Example 02 is a normal managed payment: synchronize/decrypt inventory, prepare, authorize, prove, submit Source precheck, then call `session.send_transaction` with a host signer and an explicit `GAS_LIMIT`. It prints the saved operation ID, Source digest/tracking, and sent hash, waits for independent native finality, reconciles inventory, and waits for Source recognition. Example 03 reopens the encrypted session by `OPERATION_ID`, records `HOST_TRANSACTION_HASH` only when a crash prevented the original hash from being journaled, reconciles canonical state, generates Source evidence from retained openings, submits it and waits for recognition. Already completed payments use their retained journal directly. Both examples require `--features sqlite` and run directly without scenario flags. The native `AppDecryptor` remains a host integration placeholder.
 
-These flows use `DEPLOYMENT_JSON`, `ETH_RPC_URL`, `PROTOCOL_RPC_URL`, `WALLET_ADDRESS`, `WALLET_DB`, `WALLET_STORE_KEY_FILE`, `BB_BINARY`, `NOIR_EXECUTOR` and `PROVER_ASSETS`. Example 02 also uses `TOKEN_ADDRESS`, `RECIPIENT_ADDRESS`, `AMOUNT`, `DEADLINE`, `CALLER_ADDRESS`, positive `GAS_LIMIT`, and `OWNER_PRIVATE_KEY` for the example application signer. The same host signer signs EIP-712 authorizations and standard EIP-155 Ethereum transactions; the SDK never receives the EVM private key. Production hosts can inject a hardware wallet or external signer. SQLite stores the encrypted operation journal; the examples do not export extra JSON records. Optional `CONFIRMATION_TIMEOUT_SECONDS` defaults to 180.
+These flows use `DEPLOYMENT_JSON`, `ETH_RPC_URL`, `PROTOCOL_RPC_URL`, `WALLET_ADDRESS`, `WALLET_DB`, `WALLET_STORE_KEY_FILE`, `BB_BINARY`, `NOIR_EXECUTOR` (optional `PROVER_ASSETS` selects existing local circuits). Example 02 also uses `TOKEN_ADDRESS`, `RECIPIENT_ADDRESS`, `AMOUNT`, `DEADLINE`, `CALLER_ADDRESS`, positive `GAS_LIMIT`, and `OWNER_PRIVATE_KEY` for the example application signer. The same host signer signs EIP-712 authorizations and standard EIP-155 Ethereum transactions; the SDK never receives the EVM private key. Production hosts can inject a hardware wallet or external signer. SQLite stores the encrypted operation journal; the examples do not export extra JSON records. Optional `CONFIRMATION_TIMEOUT_SECONDS` defaults to 180.
 
 Example 01 uses `BROADCASTER_ENDPOINT`, `BROADCASTER_QUOTE_SIGNER`, `BROADCASTER_FEE_RECIPIENT` and positive `MAX_FEE_AMOUNT`. Registering the native prover enables the official Source configuration automatically. Private Source overrides use `SOURCE_CHAIN_ID`, `SOURCE_PROTOCOL_ADDRESS`, `SOURCE_GENERATION`, `SOURCE_PROVIDER_ID`, `SOURCE_SIGNING_KEY_ID`, `SOURCE_SIGNING_PUBLIC_KEY` and optional `SOURCE_ENDPOINT`; local override proving additionally needs `SOURCE_ASSET_ROOT`. Ordinary examples 01–06 have no optional Broadcaster mode or Source availability requirement.
 

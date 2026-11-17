@@ -173,8 +173,289 @@ pub trait Prover: Send + Sync {
 }
 // Asset paths are explicit host configuration; integrity comes from the bundled release manifest.
 pub trait Assets: Send + Sync {
+    fn load_provenance_resource(&self, path: &str) -> Result<Vec<u8>> {
+        ResourceProvider::default().load_resource(&format!("provenance/{path}"))
+    }
     fn load(&self, statement: &ProofStatement) -> Result<(Vec<u8>, Vec<u8>)>;
 }
+/// Configuration for public circuit resources. Witnesses never enter this transport.
+#[derive(Clone, Debug)]
+pub struct ResourceOptions {
+    /// HTTPS base URL or directory containing index.json and content-addressed objects.
+    pub source: String,
+    pub cache: PathBuf,
+    /// Optional published object directory; logical layouts remain supported.
+    pub directory: Option<PathBuf>,
+    pub offline: bool,
+    pub timeout: Duration,
+    /// Trust anchor, configured independently from the download source.
+    pub index_sha256: String,
+}
+fn resource_release_source(pin: &str) -> String {
+    format!("https://assets.invisipay.fi/prover/sets/{pin}/")
+}
+impl Default for ResourceOptions {
+    fn default() -> Self {
+        let release: Value =
+            serde_json::from_str(include_str!("../assets/prover/resource-release.json"))
+                .expect("generated resource pin");
+        let pin = release["indexSha256"].as_str().unwrap().to_owned();
+        let cache = std::env::var_os("INVISI_PROVER_CACHE_DIR")
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                let home = || std::env::var_os("HOME").map(PathBuf::from);
+                let base = if cfg!(target_os = "macos") {
+                    home().map(|p| p.join("Library/Caches"))
+                } else if cfg!(target_os = "windows") {
+                    std::env::var_os("LOCALAPPDATA")
+                        .filter(|p| !p.is_empty())
+                        .map(PathBuf::from)
+                } else {
+                    std::env::var_os("XDG_CACHE_HOME")
+                        .filter(|p| !p.is_empty())
+                        .map(PathBuf::from)
+                        .or_else(|| home().map(|p| p.join(".cache")))
+                };
+                base.unwrap_or_else(std::env::temp_dir)
+                    .join("invisi/prover-assets")
+            });
+        Self {
+            source: std::env::var("INVISI_PROVER_SOURCE")
+                .unwrap_or_else(|_| resource_release_source(&pin)),
+            cache,
+            directory: std::env::var_os("INVISI_PROVER_ASSETS").map(PathBuf::from),
+            offline: std::env::var("INVISI_PROVER_OFFLINE").is_ok_and(|v| v == "1" || v == "true"),
+            timeout: Duration::from_secs(120),
+            index_sha256: pin,
+        }
+    }
+}
+#[derive(Clone, Debug, Default)]
+pub struct ResourceProvider {
+    pub options: ResourceOptions,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ResourceIndex {
+    format: String,
+    noir_version: String,
+    bb_version: String,
+    files: BTreeMap<String, ResourceEntry>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResourceEntry {
+    sha256: String,
+    size: u64,
+}
+// Serializes cache misses across provider instances; successful followers re-read and verify disk.
+static RESOURCE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+fn resource_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+fn resource_path(value: &str) -> bool {
+    !value.is_empty()
+        && !value.contains('\\')
+        && value
+            .split('/')
+            .all(|p| !p.is_empty() && p != "." && p != "..")
+        && !Path::new(value).is_absolute()
+}
+fn bounded_read(path: &Path, limit: u64) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let file = fs::File::open(path).map_err(|_| "resource unavailable")?;
+    let mut bytes = Vec::new();
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "resource read failed")?;
+    if bytes.len() as u64 > limit {
+        return Err("resource size exceeds bound".into());
+    }
+    Ok(bytes)
+}
+impl ResourceProvider {
+    pub fn new(options: ResourceOptions) -> Self {
+        Self { options }
+    }
+    fn object_path(&self, digest: &str, extension: &str) -> PathBuf {
+        self.options.cache.join(format!("{digest}.{extension}"))
+    }
+    fn fetch(&self, filename: &str, limit: u64) -> Result<Vec<u8>> {
+        if self.options.offline {
+            return Err("resource unavailable in offline cache".into());
+        }
+        if self.options.timeout.is_zero() {
+            return Err("resource timeout must be positive".into());
+        }
+        if !self.options.source.starts_with("https://")
+            && !self.options.source.starts_with("http://")
+        {
+            return bounded_read(&PathBuf::from(&self.options.source).join(filename), limit);
+        }
+        let url = format!("{}/{}", self.options.source.trim_end_matches('/'), filename);
+        let timeout = self.options.timeout;
+        // Build, use and drop the blocking client off any caller's async runtime.
+        std::thread::spawn(move || -> Result<Vec<u8>> {
+            use std::io::Read;
+            let url = reqwest::Url::parse(&url).map_err(|_| "invalid resource source")?;
+            if url.scheme() != "https"
+                && !(url.scheme() == "http"
+                    && matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "::1")))
+            {
+                return Err("resource transport requires HTTPS".into());
+            }
+            let client = reqwest::blocking::Client::builder()
+                .timeout(timeout)
+                .redirect(reqwest::redirect::Policy::limited(10))
+                .build()
+                .map_err(|_| "resource transport unavailable")?;
+            let response = client
+                .get(url)
+                .send()
+                .and_then(|r| r.error_for_status())
+                .map_err(|_| "resource download failed")?;
+            if response.url().scheme() != "https"
+                && !matches!(
+                    response.url().host_str(),
+                    Some("127.0.0.1" | "localhost" | "::1")
+                )
+            {
+                return Err("insecure resource redirect".into());
+            }
+            if response.content_length().is_some_and(|s| s > limit) {
+                return Err("resource size exceeds bound".into());
+            }
+            let mut bytes = Vec::new();
+            response
+                .take(limit + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|_| "resource download failed")?;
+            if bytes.len() as u64 > limit {
+                return Err("resource size exceeds bound".into());
+            }
+            Ok(bytes)
+        })
+        .join()
+        .map_err(|_| "resource transport worker failed")?
+    }
+    fn cache_write(&self, path: &Path, bytes: &[u8]) -> Result<()> {
+        fs::create_dir_all(&self.options.cache).map_err(|_| "resource cache unavailable")?;
+        let temporary = self
+            .options
+            .cache
+            .join(format!(".{}.tmp", uuid::Uuid::new_v4()));
+        let result = (|| {
+            use std::io::Write;
+            let mut file = fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&temporary)
+                .map_err(|_| "resource cache unavailable")?;
+            file.write_all(bytes)
+                .and_then(|_| file.sync_all())
+                .map_err(|_| "resource cache write failed")?;
+            fs::rename(&temporary, path).map_err(|_| "resource cache publish failed")
+        })();
+        let _ = fs::remove_file(temporary);
+        Ok(result?)
+    }
+    pub fn load_resource(&self, logical: &str) -> Result<Vec<u8>> {
+        if !resource_path(logical) || !resource_digest(&self.options.index_sha256) {
+            return Err("invalid resource identity".into());
+        }
+        let _lock = RESOURCE_LOCK
+            .lock()
+            .map_err(|_| "resource cache lock failed")?;
+        let index_path = self.object_path(&self.options.index_sha256, "index.json");
+        let index_bytes = match bounded_read(&index_path, 1024 * 1024) {
+            Ok(bytes) if sha256(&bytes) == self.options.index_sha256 => bytes,
+            _ => {
+                let bytes = if let Some(directory) = &self.options.directory {
+                    bounded_read(&directory.join("index.json"), 1024 * 1024)?
+                } else {
+                    self.fetch("index.json", 1024 * 1024)?
+                };
+                if sha256(&bytes) != self.options.index_sha256 {
+                    return Err("resource index digest mismatch".into());
+                }
+                self.cache_write(&index_path, &bytes)?;
+                bytes
+            }
+        };
+        let index: ResourceIndex =
+            serde_json::from_slice(&index_bytes).map_err(|_| "invalid resource index")?;
+        if index.format != "invisi.prover-assets.v1"
+            || index.noir_version != "1.0.0"
+            || index.bb_version != "6.0.0"
+            || index.files.iter().any(|(path, entry)| {
+                !resource_path(path)
+                    || !resource_digest(&entry.sha256)
+                    || entry.size == 0
+                    || entry.size > 512 * 1024 * 1024
+            })
+        {
+            return Err("unsupported resource index".into());
+        }
+        let entry = index
+            .files
+            .get(logical)
+            .ok_or("resource absent from pinned index")?;
+        let extension = if logical.ends_with(".json") {
+            "json"
+        } else if logical.ends_with(".vk") || logical.ends_with("/vk") {
+            "vk"
+        } else {
+            return Err("unsupported resource object".into());
+        };
+        let valid =
+            |bytes: &[u8]| bytes.len() as u64 == entry.size && sha256(bytes) == entry.sha256;
+        if let Some(directory) = &self.options.directory {
+            let logical_path = directory.join(logical);
+            let resource_path = if logical_path.exists() {
+                logical_path
+            } else {
+                directory.join(format!("{}.{}", entry.sha256, extension))
+            };
+            let bytes = bounded_read(&resource_path, entry.size)?;
+            return if valid(&bytes) {
+                Ok(bytes)
+            } else {
+                Err("local resource digest mismatch".into())
+            };
+        }
+        let path = self.object_path(&entry.sha256, extension);
+        if let Ok(bytes) = bounded_read(&path, entry.size) {
+            if valid(&bytes) {
+                return Ok(bytes);
+            }
+        }
+        let bytes = self.fetch(&format!("{}.{}", entry.sha256, extension), entry.size)?;
+        if !valid(&bytes) {
+            return Err("resource digest or size mismatch".into());
+        }
+        self.cache_write(&path, &bytes)?;
+        Ok(bytes)
+    }
+}
+impl Assets for ResourceProvider {
+    fn load(&self, s: &ProofStatement) -> Result<(Vec<u8>, Vec<u8>)> {
+        if statement(&s.circuit_name, &s.target, s.expected_public_inputs.clone())? != *s {
+            return Err("untrusted circuit metadata".into());
+        }
+        let artifact = self.load_resource(&format!("circuits/{}.json", s.circuit_name))?;
+        let key = self.load_resource(&format!("circuits/{}.{}.vk", s.circuit_name, s.target))?;
+        validate_assets(s, &artifact, &key)?;
+        Ok((artifact, key))
+    }
+    fn load_provenance_resource(&self, path: &str) -> Result<Vec<u8>> {
+        self.load_resource(&format!("provenance/{path}"))
+    }
+}
+
 pub struct DirectoryAssets {
     pub directory: PathBuf,
 }
@@ -439,6 +720,16 @@ fn word(value: &Value) -> Result<B256> {
     Ok(B256::from(n.to_be_bytes::<32>()))
 }
 impl NativeProver {
+    /// Construct the native prover with lazy, authenticated public resources.
+    pub fn new(bb_binary: PathBuf, witness_executor: Arc<dyn WitnessExecutor>) -> Self {
+        Self {
+            bb_binary,
+            timeout: Duration::from_secs(120),
+            threads: 1,
+            assets: Arc::new(ResourceProvider::default()),
+            witness_executor,
+        }
+    }
     fn command(&self) -> Result<Command> {
         if self.threads == 0 || self.timeout.is_zero() {
             return Err("invalid local prover options".into());
@@ -845,3 +1136,254 @@ mod timeout_tests {
 
 mod source_native;
 pub use source_native::{NativeSourceProver, ProvenanceCapability};
+
+#[cfg(test)]
+mod resource_tests {
+    use super::*;
+    fn fixture() -> (PrivateDir, ResourceProvider) {
+        let dir = PrivateDir::new().unwrap();
+        let source = dir.path("source");
+        fs::create_dir(&source).unwrap();
+        let bytes = b"public resource";
+        let digest = sha256(bytes);
+        fs::write(source.join(format!("{digest}.json")), bytes).unwrap();
+        let index = serde_json::to_vec(&json!({"format":"invisi.prover-assets.v1","noirVersion":"1.0.0","bbVersion":"6.0.0","files":{"circuits/example.json":{"sha256":digest,"size":bytes.len()}}})).unwrap();
+        fs::write(source.join("index.json"), &index).unwrap();
+        let provider = ResourceProvider::new(ResourceOptions {
+            source: source.to_string_lossy().into_owned(),
+            cache: dir.path("cache"),
+            directory: None,
+            offline: false,
+            timeout: Duration::from_secs(3),
+            index_sha256: sha256(&index),
+        });
+        (dir, provider)
+    }
+    #[test]
+    fn resource_cache_is_authenticated_and_offline() {
+        let (dir, provider) = fixture();
+        assert_eq!(
+            provider.load_resource("circuits/example.json").unwrap(),
+            b"public resource"
+        );
+        fs::remove_dir_all(dir.path("source")).unwrap();
+        let mut options = provider.options.clone();
+        options.offline = true;
+        let offline = ResourceProvider::new(options);
+        assert!(offline.load_resource("circuits/example.json").is_ok());
+        fs::write(
+            offline.object_path(&sha256(b"public resource"), "json"),
+            b"corrupted",
+        )
+        .unwrap();
+        assert!(offline.load_resource("circuits/example.json").is_err());
+    }
+    #[test]
+    fn resource_rejects_tampered_index_and_object() {
+        let (dir, provider) = fixture();
+        fs::write(dir.path("source/index.json"), b"{}").unwrap();
+        assert!(provider.load_resource("circuits/example.json").is_err());
+        let (dir, provider) = fixture();
+        fs::write(
+            dir.path(&format!("source/{}.json", sha256(b"public resource"))),
+            b"wrong",
+        )
+        .unwrap();
+        assert!(provider.load_resource("circuits/example.json").is_err());
+        assert!(!provider
+            .object_path(&sha256(b"public resource"), "json")
+            .exists());
+    }
+    #[test]
+    fn concurrent_resources_share_verified_atomic_cache() {
+        let (_dir, provider) = fixture();
+        let provider = Arc::new(provider);
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let p = provider.clone();
+                std::thread::spawn(move || p.load_resource("circuits/example.json").unwrap())
+            })
+            .collect();
+        for thread in threads {
+            assert_eq!(thread.join().unwrap(), b"public resource");
+        }
+        assert!(provider.load_resource("../example.json").is_err());
+    }
+    #[test]
+    #[ignore = "requires Core release directory via INVISI_TEST_RESOURCE_SOURCE"]
+    fn real_core_index_preserves_statement_and_provenance_identity() {
+        let directory =
+            std::env::var("INVISI_TEST_RESOURCE_SOURCE").expect("Core release directory required");
+        let dir = PrivateDir::new().unwrap();
+        let provider = ResourceProvider::new(ResourceOptions {
+            source: directory,
+            cache: dir.path("cache"),
+            ..ResourceOptions::default()
+        });
+        let statement = statement("transact_user_slots1", "evm", vec![B256::ZERO; 20]).unwrap();
+        let (artifact, key) = provider.load(&statement).unwrap();
+        validate_assets(&statement, &artifact, &key).unwrap();
+        let manifest = provider.load_resource("provenance/manifest.json").unwrap();
+        let identity = crate::provenance::authenticate_manifest(
+            &manifest,
+            "6107789c5c0d24c4130bff05da6d389336feb5ccb247c4030eae5198ab05d762",
+        )
+        .unwrap();
+        let raw: Value = serde_json::from_slice(&manifest).unwrap();
+        let entry = &identity.manifest.circuits[0];
+        let artifact = provider
+            .load_resource(&format!(
+                "provenance/{}",
+                raw["circuits"][0]["artifact"].as_str().unwrap()
+            ))
+            .unwrap();
+        let key = provider
+            .load_resource(&format!(
+                "provenance/{}",
+                raw["circuits"][0]["vk"].as_str().unwrap()
+            ))
+            .unwrap();
+        assert_eq!(sha256(&artifact), entry.artifact_sha256);
+        assert_eq!(sha256(&key), entry.vk_sha256);
+        let offline = ResourceProvider::new(ResourceOptions {
+            source: "/missing".into(),
+            offline: true,
+            ..provider.options.clone()
+        });
+        assert!(offline.load(&statement).is_ok());
+        assert_eq!(
+            offline.load_resource("provenance/manifest.json").unwrap(),
+            manifest
+        );
+    }
+    #[test]
+    fn http_misses_coalesce_and_corrupt_cache_is_repaired() {
+        use std::io::{Read, Write};
+        let (dir, mut provider) = fixture();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        provider.options.source = format!("http://{}", listener.local_addr().unwrap());
+        let source = dir.path("source");
+        let server = std::thread::spawn(move || {
+            // Exactly index + object + repaired object. More requests cannot complete.
+            for stream in listener.incoming().take(3) {
+                let mut stream = stream.unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut request = [0; 4096];
+                let n = stream.read(&mut request).unwrap();
+                let request = std::str::from_utf8(&request[..n]).unwrap();
+                assert!(request.starts_with("GET /"));
+                let filename = request
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap()
+                    .trim_start_matches('/');
+                let bytes = fs::read(source.join(filename)).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    bytes.len()
+                )
+                .unwrap();
+                stream.write_all(&bytes).unwrap();
+            }
+        });
+        let provider = Arc::new(provider);
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let p = provider.clone();
+                std::thread::spawn(move || p.load_resource("circuits/example.json").unwrap())
+            })
+            .collect();
+        for thread in threads {
+            assert_eq!(thread.join().unwrap(), b"public resource");
+        }
+        fs::write(
+            provider.object_path(&sha256(b"public resource"), "json"),
+            b"bad",
+        )
+        .unwrap();
+        assert_eq!(
+            provider.load_resource("circuits/example.json").unwrap(),
+            b"public resource"
+        );
+        server.join().unwrap();
+    }
+    #[test]
+    fn cold_offline_does_not_read_source_and_invalid_indices_fail_closed() {
+        let (_dir, mut provider) = fixture();
+        provider.options.offline = true;
+        assert!(provider.load_resource("circuits/example.json").is_err());
+        for changed in [
+            json!({"noirVersion":"2.0.0"}),
+            json!({"bbVersion":"7.0.0"}),
+            json!({"format":"other"}),
+            json!({"files":{"../bad.json":{"size":1,"sha256":"a".repeat(64)}}}),
+            json!({"files":{"circuits/example.json":{"size":536870913_u64,"sha256":"a".repeat(64)}}}),
+            json!({"files":{"circuits/example.json":{"size":-1,"sha256":"a".repeat(64)}}}),
+        ] {
+            let (dir, mut provider) = fixture();
+            let mut index: Value =
+                serde_json::from_slice(&fs::read(dir.path("source/index.json")).unwrap()).unwrap();
+            for (key, value) in changed.as_object().unwrap() {
+                index[key] = value.clone();
+            }
+            let bytes = serde_json::to_vec(&index).unwrap();
+            fs::write(dir.path("source/index.json"), &bytes).unwrap();
+            provider.options.index_sha256 = sha256(&bytes);
+            assert!(provider.load_resource("circuits/example.json").is_err());
+        }
+    }
+    #[test]
+    fn explicit_logical_directory_supports_offline_without_downloads() {
+        let (dir, mut provider) = fixture();
+        let logical = dir.path("logical");
+        fs::create_dir_all(logical.join("circuits")).unwrap();
+        fs::copy(dir.path("source/index.json"), logical.join("index.json")).unwrap();
+        fs::write(logical.join("circuits/example.json"), b"public resource").unwrap();
+        provider.options.directory = Some(logical.clone());
+        provider.options.offline = true;
+        assert_eq!(
+            provider.load_resource("circuits/example.json").unwrap(),
+            b"public resource"
+        );
+        fs::write(logical.join("circuits/example.json"), b"tampered").unwrap();
+        assert!(provider.load_resource("circuits/example.json").is_err());
+    }
+    #[test]
+    fn explicit_published_directory_supports_offline_without_downloads() {
+        let (dir, mut provider) = fixture();
+        provider.options.directory = Some(dir.path("source"));
+        provider.options.offline = true;
+        assert_eq!(
+            provider.load_resource("circuits/example.json").unwrap(),
+            b"public resource"
+        );
+        let object = dir
+            .path("source")
+            .join(format!("{}.json", sha256(b"public resource")));
+        fs::write(object, b"tampered").unwrap();
+        assert!(provider.load_resource("circuits/example.json").is_err());
+    }
+    #[test]
+    fn shared_platform_cache_location() {
+        let expected = if cfg!(target_os = "macos") {
+            PathBuf::from(std::env::var_os("HOME").unwrap())
+                .join("Library/Caches/invisi/prover-assets")
+        } else if cfg!(target_os = "windows") {
+            PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap()).join("invisi/prover-assets")
+        } else {
+            std::env::var_os("XDG_CACHE_HOME")
+                .filter(|p| !p.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache"))
+                .join("invisi/prover-assets")
+        };
+        assert_eq!(ResourceOptions::default().cache, expected);
+    }
+    #[test]
+    fn default_release_source_uses_shared_assets_domain_and_pinned_set() {
+        assert_eq!(resource_release_source("ca3ee827c620b1e25d87d1b880549f8cec4be4970f26ea0ab5993dc2db4c827c"), "https://assets.invisipay.fi/prover/sets/ca3ee827c620b1e25d87d1b880549f8cec4be4970f26ea0ab5993dc2db4c827c/");
+    }
+}

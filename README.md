@@ -51,7 +51,7 @@ cover increased funding. Source replay defaults are ten root pages and 100,000 l
 
 Register a configured local backend with `Invisi::with_prover(Arc<dyn Prover>)`
 before preparing a Provenance broadcaster transaction. Native backends expose the
-bundled, authenticated Source circuits and inherit the main witness executor and
+authenticated Source resources on demand and inherit the main witness executor and
 BB configuration. Official scoped trust bootstraps lazily when Source service
 access is needed, without network access during local preparation. Explicit
 `with_provenance` private-service trust takes precedence.
@@ -116,9 +116,21 @@ not journaled. Submitted call/hash and public signatures can be retained for rec
 ## Proving and native integration
 
 Noir 1.0.0 / BB 6.0.0 release metadata and VK hashes are bundled with the prover crate.
-Circuit files and tool binaries are explicit authenticated host assets, not silent remote
-services. `NativeProver` accepts a host `WitnessExecutor`, including the external Noir CLI
-adapter; a mobile host can use its embedded native ACVM. Blocking RPC/proving work belongs
+`NativeProver::new(bb_binary, witness_executor)` loads public circuit artifacts and verification
+keys on the first prove/verify call. `ResourceProvider::default()` also works in existing
+`NativeProver` struct literals. The default source is `https://assets.invisipay.fi/prover/sets/<index-sha256>/`.
+The SDK pins the SHA-256 of the Core resource index,
+Noir/BB versions, original circuit statements, and independent Source manifest. Each
+cached read verifies the exact indexed size and SHA-256; downloads publish atomically.
+Only public resource GET requests leave the host. Witness execution and proofs remain local.
+
+Set `INVISI_PROVER_CACHE_DIR` to choose the disk cache, `INVISI_PROVER_SOURCE` for an HTTPS
+mirror or a directory of Core release objects, and `INVISI_PROVER_OFFLINE=1` to require
+cached resources. `INVISI_PROVER_ASSETS` selects a logical resource directory containing
+`index.json`, `circuits/` and `provenance/`. `ResourceOptions` configures these explicitly.
+`DirectoryAssets` retains its existing explicit local circuit-directory behavior.
+`NativeProver` accepts a host `WitnessExecutor`, including the external Noir CLI adapter;
+a mobile host can use its embedded native ACVM. Blocking RPC/proving work belongs
 off the UI thread.
 
 `crates/invisi-sdk-ffi/include/invisi_wallet.h` provides length-delimited borrowed inputs

@@ -72,9 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         bb_binary: env::var("BB_BINARY")?.into(),
         timeout: std::time::Duration::from_secs(600),
         threads: 4,
-        assets: Arc::new(invisi_sdk::prover::DirectoryAssets {
-            directory: env::var("PROVER_ASSETS")?.into(),
-        }),
+        assets: invisi_sdk_examples::prover_assets(),
         witness_executor: Arc::new(invisi_sdk::prover::NoirCli {
             binary: env::var("NOIR_EXECUTOR")?.into(),
             timeout: std::time::Duration::from_secs(120),

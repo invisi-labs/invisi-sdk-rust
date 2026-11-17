@@ -7,7 +7,7 @@ description = "Invisi SDK prover capabilities"
 
 readme = "README.md"
 repository = "https://github.com/invisi-lab/invisi-sdk-rust"
-include = ["Cargo.toml", "README.md", "LICENSE", "NOTICE", "src/**", "assets/**", "provenance/**", "testdata/**", "tests/**", "include/**"]
+include = ["Cargo.toml", "README.md", "LICENSE", "NOTICE", "src/**", "assets/**", "provenance/manifest.json", "testdata/**", "tests/**", "include/**"]
 
 [dependencies]
 invisi-sdk-protocol = { path = "../invisi-sdk-protocol", version = "=1.2.4" }
@@ -21,3 +21,4 @@ rand = "0.8"
 sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
 zeroize = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }

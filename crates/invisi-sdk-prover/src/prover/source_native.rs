@@ -214,57 +214,18 @@ mod tests {
     }
 }
 
-/// Local resources inherited from the configured main prover; contains no remote transport.
+/// Public resources inherited from the main prover; witness execution remains local.
 #[derive(Clone)]
 pub struct ProvenanceCapability {
     pub manifest: crate::provenance::ManifestIdentity,
     pub prover: Arc<dyn OfflineProver + Send + Sync>,
 }
 struct BundledSourceProver {
+    assets: Arc<dyn Assets>,
     bb_binary: PathBuf,
     timeout: Duration,
     threads: usize,
     witness_executor: Arc<dyn WitnessExecutor>,
-}
-fn bundled_assets(capacity: usize) -> Result<(&'static [u8], &'static [u8])> {
-    Ok(match capacity {
-        10 => (
-            include_bytes!("../../provenance/circuits/provenance/k10/target/provenance_k10.json")
-                .as_slice(),
-            include_bytes!("../../provenance/circuits/provenance/k10/target/evm/vk").as_slice(),
-        ),
-        20 => (
-            include_bytes!("../../provenance/circuits/provenance/k20/target/provenance_k20.json")
-                .as_slice(),
-            include_bytes!("../../provenance/circuits/provenance/k20/target/evm/vk").as_slice(),
-        ),
-        40 => (
-            include_bytes!("../../provenance/circuits/provenance/k40/target/provenance_k40.json")
-                .as_slice(),
-            include_bytes!("../../provenance/circuits/provenance/k40/target/evm/vk").as_slice(),
-        ),
-        80 => (
-            include_bytes!("../../provenance/circuits/provenance/k80/target/provenance_k80.json")
-                .as_slice(),
-            include_bytes!("../../provenance/circuits/provenance/k80/target/evm/vk").as_slice(),
-        ),
-        120 => (
-            include_bytes!("../../provenance/circuits/provenance/k120/target/provenance_k120.json")
-                .as_slice(),
-            include_bytes!("../../provenance/circuits/provenance/k120/target/evm/vk").as_slice(),
-        ),
-        160 => (
-            include_bytes!("../../provenance/circuits/provenance/k160/target/provenance_k160.json")
-                .as_slice(),
-            include_bytes!("../../provenance/circuits/provenance/k160/target/evm/vk").as_slice(),
-        ),
-        190 => (
-            include_bytes!("../../provenance/circuits/provenance/k190/target/provenance_k190.json")
-                .as_slice(),
-            include_bytes!("../../provenance/circuits/provenance/k190/target/evm/vk").as_slice(),
-        ),
-        _ => return Err("source capacity unavailable".into()),
-    })
 }
 impl OfflineProver for BundledSourceProver {
     fn prove(
@@ -283,10 +244,6 @@ impl OfflineProver for BundledSourceProver {
                 .iter()
                 .find(|c| c.capacity == capacity)
                 .ok_or("source capacity unavailable")?;
-            let (artifact, vk) = bundled_assets(capacity)?;
-            if sha256(artifact) != entry.artifact_sha256 || sha256(vk) != entry.vk_sha256 {
-                return Err("bundled source asset digest mismatch".into());
-            }
             let raw: Value =
                 serde_json::from_slice(manifest).map_err(|_| "invalid bundled manifest")?;
             let paths = raw["circuits"]
@@ -295,9 +252,20 @@ impl OfflineProver for BundledSourceProver {
                 .iter()
                 .find(|c| c["capacity"] == capacity)
                 .unwrap();
+            let artifact = self.assets.load_provenance_resource(
+                paths["artifact"]
+                    .as_str()
+                    .ok_or("invalid source asset path")?,
+            )?;
+            let vk = self
+                .assets
+                .load_provenance_resource(paths["vk"].as_str().ok_or("invalid source key path")?)?;
+            if sha256(&artifact) != entry.artifact_sha256 || sha256(&vk) != entry.vk_sha256 {
+                return Err("source asset digest mismatch".into());
+            }
             let dir = PrivateDir::new()?;
             write_private(&dir.path("manifest.json"), manifest)?;
-            for (key, bytes) in [("artifact", artifact), ("vk", vk)] {
+            for (key, bytes) in [("artifact", artifact.as_slice()), ("vk", vk.as_slice())] {
                 let relative = Path::new(paths[key].as_str().ok_or("invalid bundled asset path")?);
                 if relative.is_absolute()
                     || relative
@@ -332,15 +300,10 @@ impl NativeProver {
         let bytes = include_bytes!("../../provenance/manifest.json");
         let pin = "6107789c5c0d24c4130bff05da6d389336feb5ccb247c4030eae5198ab05d762";
         let manifest = authenticate_manifest(bytes, pin).map_err(|e| e.to_string())?;
-        for entry in &manifest.manifest.circuits {
-            let (artifact, vk) = bundled_assets(entry.capacity)?;
-            if sha256(artifact) != entry.artifact_sha256 || sha256(vk) != entry.vk_sha256 {
-                return Err("bundled source asset digest mismatch".into());
-            }
-        }
         Ok(ProvenanceCapability {
             manifest,
             prover: Arc::new(BundledSourceProver {
+                assets: self.assets.clone(),
                 bb_binary: self.bb_binary.clone(),
                 timeout: self.timeout,
                 threads: self.threads,
@@ -355,6 +318,9 @@ mod bundled_tests {
     use super::*;
     struct NoIo;
     impl Assets for NoIo {
+        fn load_provenance_resource(&self, _: &str) -> Result<Vec<u8>> {
+            panic!("capability discovery must not load Source resources")
+        }
         fn load(&self, _: &ProofStatement) -> Result<(Vec<u8>, Vec<u8>)> {
             panic!("capability discovery must not load main circuit assets")
         }
@@ -365,7 +331,7 @@ mod bundled_tests {
         }
     }
     #[test]
-    fn native_capability_authenticates_all_bundled_assets_without_executables() {
+    fn native_capability_authenticates_manifest_without_loading_resources() {
         let prover = NativeProver {
             bb_binary: "/nonexistent/bb".into(),
             timeout: Duration::from_secs(10),

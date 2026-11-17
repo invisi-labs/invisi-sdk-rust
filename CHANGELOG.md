@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.5
+
+- Align the eight-crate cohort with independent IPP support and Invisi Core interfaces.
+- Load pinned public proving resources lazily with verified, shared disk caches; retain local directory and offline circuit support.
+
+
 ## 1.2.3
 
 - Align transaction preparation, public history and Provenance interfaces with the current protocol contracts.

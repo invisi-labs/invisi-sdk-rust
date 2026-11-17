@@ -20,3 +20,7 @@ examples/local/
 
 # Public circuit resource cache; never distribute downloaded artifacts.
 .cache/prover-assets/
+
+# Local Python bytecode
+__pycache__/
+*.pyc

@@ -1,6 +1,6 @@
 [package]
 name = "invisi-sdk"
-version = "1.2.4"
+version = "1.2.5"
 edition = "2021"
 authors = ["InvisiPay team"]
 license = "Apache-2.0"
@@ -16,10 +16,10 @@ include = ["Cargo.toml", "README.md", "LICENSE", "NOTICE", "CHANGELOG.md", "RELE
 name = "invisi_sdk"
 
 [dependencies]
-invisi-sdk-primitives = { path = "crates/invisi-sdk-primitives", version = "=1.2.4" }
-invisi-sdk-protocol = { path = "crates/invisi-sdk-protocol", version = "=1.2.4" }
-invisi-sdk-prover = { path = "crates/invisi-sdk-prover", version = "=1.2.4" }
-invisi-sdk-rpc = { path = "crates/invisi-sdk-rpc", version = "=1.2.4" }
+invisi-sdk-primitives = { path = "crates/invisi-sdk-primitives", version = "=1.2.5" }
+invisi-sdk-protocol = { path = "crates/invisi-sdk-protocol", version = "=1.2.5" }
+invisi-sdk-prover = { path = "crates/invisi-sdk-prover", version = "=1.2.5" }
+invisi-sdk-rpc = { path = "crates/invisi-sdk-rpc", version = "=1.2.5" }
 
 alloy-primitives = { version = "0.8", features = ["serde"] }
 alloy-sol-types = { version = "0.8", features = ["json"] }

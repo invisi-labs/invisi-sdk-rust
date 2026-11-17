@@ -5,13 +5,13 @@ use alloy_sol_types::{sol, SolCall, SolEvent, SolInterface};
 
 sol!(
     #[sol(all_derives)]
-    InvisiProtocol,
-    "src/protocol/abi/InvisiProtocol.abi.json"
+    InvisiCore,
+    "src/protocol/abi/InvisiCore.abi.json"
 );
 sol!(
     #[sol(all_derives)]
-    InvisiFactory,
-    "src/protocol/abi/InvisiFactory.abi.json"
+    InvisiCoreFactory,
+    "src/protocol/abi/InvisiCoreFactory.abi.json"
 );
 sol!(
     #[sol(all_derives)]
@@ -62,9 +62,8 @@ impl ProtocolContract {
             value: U256::ZERO,
         }
     }
-    pub fn decode_call(data: &[u8]) -> Result<InvisiProtocol::InvisiProtocolCalls, String> {
-        InvisiProtocol::InvisiProtocolCalls::abi_decode(data, true)
-            .map_err(|error| error.to_string())
+    pub fn decode_call(data: &[u8]) -> Result<InvisiCore::InvisiCoreCalls, String> {
+        InvisiCore::InvisiCoreCalls::abi_decode(data, true).map_err(|error| error.to_string())
     }
     pub fn decode_return<C: SolCall>(data: &[u8]) -> Result<C::Return, String> {
         C::abi_decode_returns(data, true).map_err(|error| error.to_string())

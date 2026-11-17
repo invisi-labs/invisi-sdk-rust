@@ -244,7 +244,7 @@ fn broadcaster_aggregate_confirmation_matches_business_member_exactly_once() {
     use alloy_sol_types::SolCall;
     use invisi_sdk_rpc::{
         broadcaster::{matches_execution_transaction, Execution},
-        protocol::InvisiProtocol as P,
+        protocol::InvisiCore as P,
     };
     let rows: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/broadcaster-vectors.json")).unwrap();
@@ -300,7 +300,7 @@ fn aggregate_rpc_sends_the_public_member_and_checks_nested_capability() {
         broadcaster::{
             BroadcasterClient, Configuration, Execution, MemberProof, Quote, VerifiedQuote,
         },
-        protocol::InvisiProtocol as P,
+        protocol::InvisiCore as P,
         rpc::{Result, RpcTransport},
     };
     use serde_json::{json, Value};

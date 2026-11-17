@@ -1220,7 +1220,7 @@ impl WalletSession {
         let success = receipt.success;
         use alloy_sol_types::SolCall;
         let aggregate = call.data.get(..4)
-            == Some(crate::protocol::InvisiProtocol::transact_1Call::SELECTOR.as_slice());
+            == Some(crate::protocol::InvisiCore::transact_1Call::SELECTOR.as_slice());
         let completions = if aggregate {
             base.operations
                 .values()
@@ -1342,7 +1342,7 @@ impl WalletSession {
             let call = record.call.as_ref().ok_or("aggregate calldata missing")?;
             use alloy_sol_types::SolCall;
             if call.data.get(..4)
-                != Some(crate::protocol::InvisiProtocol::transact_1Call::SELECTOR.as_slice())
+                != Some(crate::protocol::InvisiCore::transact_1Call::SELECTOR.as_slice())
             {
                 return Err("member does not reference an aggregate call".into());
             }

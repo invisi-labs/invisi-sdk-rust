@@ -1,5 +1,5 @@
 //! Financial delivery records authenticated against complete canonical receipt insertions.
-use super::{IInvisiProtocol::Delivery, InvisiProtocol as P};
+use super::{IInvisiCore::Delivery, InvisiCore as P};
 use crate::interfaces::{
     field, CanonicalReceipt, IndexedCreditState, IndexedDelivery, LeafMetadata, NoteOutput,
 };
@@ -21,7 +21,7 @@ pub struct ReceiptOutputs {
     pub credit_nullifiers: Vec<B256>,
     pub insertions: Vec<Insertion>,
     pub created_trees: Vec<u64>,
-    pub events: Vec<(u32, P::InvisiProtocolEvents)>,
+    pub events: Vec<(u32, P::InvisiCoreEvents)>,
 }
 fn tree(value: U256) -> Result<u64, String> {
     let tree = u64::try_from(value).map_err(|_| "tree id exceeds uint64")?;
@@ -122,24 +122,22 @@ pub fn decode_receipt_outputs(
         {
             continue;
         }
-        let event = P::InvisiProtocolEvents::decode_raw_log(&log.topics, &log.data, true)
+        let event = P::InvisiCoreEvents::decode_raw_log(&log.topics, &log.data, true)
             .map_err(|e| e.to_string())?;
         match &event {
-            P::InvisiProtocolEvents::CommitmentsInserted(value) => {
-                output.insertions.push(Insertion {
-                    tree_id: tree(value.treeId)?,
-                    start_leaf_index: value.startLeafIndex,
-                    commitments: value.commitments.clone(),
-                    log_index: log.log_index,
-                })
-            }
-            P::InvisiProtocolEvents::BatchOutputs(value) => output.insertions.push(Insertion {
+            P::InvisiCoreEvents::CommitmentsInserted(value) => output.insertions.push(Insertion {
+                tree_id: tree(value.treeId)?,
+                start_leaf_index: value.startLeafIndex,
+                commitments: value.commitments.clone(),
+                log_index: log.log_index,
+            }),
+            P::InvisiCoreEvents::BatchOutputs(value) => output.insertions.push(Insertion {
                 tree_id: tree(value.treeId)?,
                 start_leaf_index: value.startLeafIndex,
                 commitments: value.noteCommitments.clone(),
                 log_index: log.log_index,
             }),
-            P::InvisiProtocolEvents::TreeCreated(value) => {
+            P::InvisiCoreEvents::TreeCreated(value) => {
                 output.created_trees.push(tree(value.treeId)?)
             }
             _ => {}
@@ -202,7 +200,7 @@ pub fn decode_receipt_outputs(
             })
         };
         match event {
-            P::InvisiProtocolEvents::BatchOutputs(value) => {
+            P::InvisiCoreEvents::BatchOutputs(value) => {
                 let id = tree(value.treeId)?;
                 if value.tokens.len() != value.noteCommitments.len() {
                     return Err("batch token dimensions differ".into());
@@ -247,7 +245,7 @@ pub fn decode_receipt_outputs(
                     return Err("trailing packed delivery data".into());
                 }
             }
-            P::InvisiProtocolEvents::Shield(value) => {
+            P::InvisiCoreEvents::Shield(value) => {
                 let id = tree(value.treeId)?;
                 if lengths.get(&(id, value.startLeafIndex)) != Some(&value.deliveries.len()) {
                     return Err("Shield deliveries do not match insertion length".into());
@@ -267,7 +265,7 @@ pub fn decode_receipt_outputs(
                     )?);
                 }
             }
-            P::InvisiProtocolEvents::Transact(value) => {
+            P::InvisiCoreEvents::Transact(value) => {
                 output.nullifiers.extend_from_slice(&value.nullifiers);
                 if value.noteCommitments.len() != value.leafIndices.len()
                     || value.noteCommitments.len() != value.deliveries.len()
@@ -285,7 +283,7 @@ pub fn decode_receipt_outputs(
                     )?);
                 }
             }
-            P::InvisiProtocolEvents::CrossTreeTransact(value) => {
+            P::InvisiCoreEvents::CrossTreeTransact(value) => {
                 output.nullifiers.extend_from_slice(&value.nullifiers);
                 if value.noteCommitments.len() != value.leafIndices.len()
                     || value.noteCommitments.len() != value.deliveries.len()
@@ -303,10 +301,10 @@ pub fn decode_receipt_outputs(
                     )?);
                 }
             }
-            P::InvisiProtocolEvents::BatchRequest(value) => {
+            P::InvisiCoreEvents::BatchRequest(value) => {
                 output.nullifiers.extend_from_slice(&value.nullifiers)
             }
-            P::InvisiProtocolEvents::CreditCreated(value) => output.credits.push(credit(
+            P::InvisiCoreEvents::CreditCreated(value) => output.credits.push(credit(
                 tree(value.outputTreeId)?,
                 value.leafIndex,
                 value.creditCommitment,
@@ -314,7 +312,7 @@ pub fn decode_receipt_outputs(
                 &value.deliveries,
                 "CreditCreated",
             )?),
-            P::InvisiProtocolEvents::CreditUpdated(value) => {
+            P::InvisiCoreEvents::CreditUpdated(value) => {
                 output.credit_nullifiers.push(value.params.nullifier);
                 output.credits.push(credit(
                     tree(value.outputTreeId)?,
@@ -325,7 +323,7 @@ pub fn decode_receipt_outputs(
                     "CreditUpdated",
                 )?);
             }
-            P::InvisiProtocolEvents::CreditDraw(value) => {
+            P::InvisiCoreEvents::CreditDraw(value) => {
                 let p = &value.params;
                 let n = p.creditCommitments.len();
                 if n == 0

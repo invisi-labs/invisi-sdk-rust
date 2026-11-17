@@ -146,7 +146,7 @@ impl PaymentNote {
         if rpc
             .contract_read(
                 rpc.deployment().protocol.address,
-                &InvisiProtocol::isNullifierSpentCall {
+                &InvisiCore::isNullifierSpentCall {
                     nullifier: field_word(model(self.note.nullifier())?),
                 },
                 &current,
@@ -159,7 +159,7 @@ impl PaymentNote {
         let known = rpc
             .contract_read(
                 rpc.deployment().protocol.address,
-                &InvisiProtocol::rootHistoryCall {
+                &InvisiCore::rootHistoryCall {
                     _0: U256::from(verified.membership.tree_id),
                     _1: verified.membership.root,
                 },

@@ -4,6 +4,10 @@ A Rust SDK for ordinary private Notes and deferred Credit grants, aligned with t
 shared TypeScript and Go protocol behavior. Source, comments and documentation use English.
 The SDK does not select accounts, read Keychain/Keystore, hold a mnemonic, or approve requests.
 
+## Core contract bindings
+
+Contract bindings follow the current `invisi-core` compiler artifacts: `InvisiCore` / `IInvisiCore` and `InvisiCoreFactory` / `IInvisiCoreFactory`. Update direct binding imports and generated tuple type names accordingly. Generic Protocol objects, package names, `protocolAddress` / `protocol_address`, deployment catalog records, EIP-712 domains and wire encodings retain their existing meanings. Regenerate compiler ABIs with `python3 scripts/sync-core-abis.py ../invisi-core`.
+
 ## Release validation
 
 The public crates share version **1.2.4**. See [local release validation](RELEASE.md)

@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    protocol::{self, InvisiProtocol as P},
+    protocol::{self, InvisiCore as P},
     rpc::{
         self, CanonicalHead, CanonicalReceipt, CanonicalTransaction, ChainReceipts,
         ChainTransactions, Membership, MembershipInput, ProtocolRpcClient, RpcTransport,
@@ -703,7 +703,7 @@ impl PendingWalletRefresh {
                 receipt,
             )?;
             for (_, event) in records.events {
-                if let P::InvisiProtocolEvents::CreditDraw(event) = event {
+                if let P::InvisiCoreEvents::CreditDraw(event) = event {
                     for (i, nullifier) in event.params.nullifiers.iter().enumerate() {
                         let predecessors = next
                             .credits

@@ -1,5 +1,5 @@
 use super::*;
-use crate::protocol::InvisiProtocol;
+use crate::protocol::InvisiCore;
 use alloy_primitives::{keccak256, Address, B256, U256};
 use alloy_sol_types::SolCall;
 use serde_json::{json, Value};
@@ -272,7 +272,7 @@ impl<T: RpcTransport, C: CanonicalChain> ProtocolRpcClient<T, C> {
             self.canonical(&root.block)?;
             let known = self.contract_read(
                 self.deployment.protocol.address,
-                &InvisiProtocol::rootHistoryCall {
+                &InvisiCore::rootHistoryCall {
                     _0: U256::from(input.tree_id),
                     _1: root.root,
                 },

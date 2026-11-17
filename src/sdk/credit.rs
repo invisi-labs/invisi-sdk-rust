@@ -957,7 +957,7 @@ impl PreparedCredit {
                     return Err("Credit create deadline or allocation changed".into());
                 }
                 fee_balance(chain, p.owner, p.token, p.feeAmount, &block)?;
-                Ok(contract.call(&InvisiProtocol::createCreditCall {
+                Ok(contract.call(&InvisiCore::createCreditCall {
                     _0: proof,
                     p: p.clone(),
                     _2: self.deliveries.clone(),
@@ -968,7 +968,7 @@ impl PreparedCredit {
                     return Err("Credit update expired".into());
                 }
                 fee_balance(chain, p.owner, p.token, p.feeAmount, &block)?;
-                Ok(contract.call(&InvisiProtocol::updateCreditCall {
+                Ok(contract.call(&InvisiCore::updateCreditCall {
                     _0: proof,
                     p: p.clone(),
                     _2: self.deliveries.clone(),
@@ -988,7 +988,7 @@ impl PreparedCredit {
                     let payer = &p.payers[i];
                     fee_balance(chain, payer.payer, p.token, payer.amount, &block)
                 })?;
-                Ok(contract.call(&InvisiProtocol::creditDrawCall {
+                Ok(contract.call(&InvisiCore::creditDrawCall {
                     _0: proof,
                     p: p.clone(),
                     _2: self.deliveries.clone(),
@@ -1023,7 +1023,7 @@ impl PreparedCredit {
                     return Err("public revocation signature is no longer valid".into());
                 }
                 fee_balance(chain, *owner, *token, fee.amount, &block)?;
-                Ok(contract.call(&InvisiProtocol::revokeCreditCall {
+                Ok(contract.call(&InvisiCore::revokeCreditCall {
                     token: *token,
                     owner: *owner,
                     shard: *shard,

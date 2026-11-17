@@ -1,7 +1,7 @@
 //! Bind public recovery packets to canonical calldata and the complete native statement before Source submission.
 use crate::{
     broadcaster,
-    protocol::{InvisiProtocol, ProtocolContract},
+    protocol::{InvisiCore, ProtocolContract},
     provenance_client::ProvenanceClient,
 };
 use alloy_primitives::{keccak256, Address, B256, U256};
@@ -35,8 +35,7 @@ pub fn validate_provenance_proof(packet: &ProvenanceProof, trust: &TrustContext)
     )
     .map_err(|e| e.to_string())?;
     broadcaster::decode_intent(&data).map_err(|e| e.to_string())?;
-    let InvisiProtocol::InvisiProtocolCalls::transact_0(call) =
-        ProtocolContract::decode_call(&data)?
+    let InvisiCore::InvisiCoreCalls::transact_0(call) = ProtocolContract::decode_call(&data)?
     else {
         return Err("private transact calldata required".into());
     };
@@ -201,10 +200,10 @@ mod tests {
             signing_key_validity: BTreeMap::new(),
             manifest_sha256: "a".repeat(64),
         };
-        let request = crate::protocol::IInvisiProtocol::TransactRequest {
-            params: crate::protocol::IInvisiProtocol::CrossTreeTransactParams {
+        let request = crate::protocol::IInvisiCore::TransactRequest {
+            params: crate::protocol::IInvisiCore::CrossTreeTransactParams {
                 token: Address::from_slice(&U256::from(2).to_be_bytes::<32>()[12..]),
-                sources: vec![crate::protocol::IInvisiProtocol::InputSource {
+                sources: vec![crate::protocol::IInvisiCore::InputSource {
                     treeId: U256::from(1),
                     merkleRoot: B256::from(U256::from(11).to_be_bytes::<32>()),
                 }],
@@ -217,7 +216,7 @@ mod tests {
                 feeAmount: U256::ZERO,
             },
             deliveries: vec![],
-            funding: crate::protocol::IInvisiProtocol::FundingParams {
+            funding: crate::protocol::IInvisiCore::FundingParams {
                 amount: U256::ZERO,
                 payer: Address::ZERO,
                 sigNonce: U256::ZERO,
@@ -286,7 +285,7 @@ mod tests {
             data: format!(
                 "0x{}",
                 hex::encode(
-                    InvisiProtocol::transact_0Call {
+                    InvisiCore::transact_0Call {
                         _0: Bytes::from(vec![1, 2]),
                         r: request
                     }
@@ -334,7 +333,7 @@ mod tests {
                 "native_words" => changed.public_inputs[0] = word(U256::from(9)),
                 "calldata" => {
                     let raw = hex::decode(packet.data.trim_start_matches("0x")).unwrap();
-                    let InvisiProtocol::InvisiProtocolCalls::transact_0(mut call) =
+                    let InvisiCore::InvisiCoreCalls::transact_0(mut call) =
                         ProtocolContract::decode_call(&raw).unwrap()
                     else {
                         panic!()

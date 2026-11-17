@@ -2,7 +2,7 @@ use alloy_primitives::{keccak256, Address, B256, U256};
 use alloy_sol_types::SolCall;
 use invisi_sdk::{
     note::{Note, ProtocolContext},
-    protocol::InvisiProtocol,
+    protocol::InvisiCore,
     rpc::{
         CanonicalBlock, CanonicalChain, ContractDeployment, Error, FinalityTag, ProtocolDeployment,
         ProtocolRpcClient, Result, RpcTransport,
@@ -90,11 +90,11 @@ impl CanonicalChain for Chain {
     }
     fn call(&self, address: Address, data: &[u8], number: u64) -> Result<Vec<u8>> {
         assert_eq!(address, Address::with_last_byte(1));
-        let yes = if data.starts_with(&InvisiProtocol::isNullifierSpentCall::SELECTOR) {
+        let yes = if data.starts_with(&InvisiCore::isNullifierSpentCall::SELECTOR) {
             assert_eq!(number, 12);
             self.native_spent_reads.fetch_add(1, Ordering::SeqCst);
             self.spent.load(Ordering::SeqCst)
-        } else if data.starts_with(&InvisiProtocol::rootHistoryCall::SELECTOR) {
+        } else if data.starts_with(&InvisiCore::rootHistoryCall::SELECTOR) {
             number != 12 || self.current_root_known.load(Ordering::SeqCst)
         } else {
             panic!("unexpected contract read")

@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    protocol::{IInvisiProtocol as abi, InvisiProtocol as P},
+    protocol::{IInvisiCore as abi, InvisiCore as P},
     prover::{ProofBundle, ProofStatement, Prover, ProvingRequest},
     rpc::{CanonicalLog, CanonicalReceipt, CanonicalTransaction, Membership, MembershipInput},
     sdk::{ChainState, TransferPreparation, WalletResponse},

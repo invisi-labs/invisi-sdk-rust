@@ -1142,7 +1142,7 @@ impl PreparedTransaction {
         )
         .map_err(|e| e.to_string())?;
         let call =
-            InvisiProtocol::transact_0Call::abi_decode(&data, true).map_err(|e| e.to_string())?;
+            InvisiCore::transact_0Call::abi_decode(&data, true).map_err(|e| e.to_string())?;
         let Plan::Transfer {
             params,
             outputs,
@@ -1232,7 +1232,7 @@ impl PreparedTransaction {
     /// Retains an authoritative final call for Source-only recovery without granting normal proof export.
     pub fn with_provenance_calldata(mut self, data: Vec<u8>) -> Result<Self> {
         let call =
-            InvisiProtocol::transact_0Call::abi_decode(&data, true).map_err(|e| e.to_string())?;
+            InvisiCore::transact_0Call::abi_decode(&data, true).map_err(|e| e.to_string())?;
         let Plan::Transfer {
             params,
             outputs,
@@ -1287,7 +1287,7 @@ impl PreparedTransaction {
             self.public_inputs()?.into_iter().map(field_word).collect(),
         )?;
         prover::assert_bundle(proof, &statement)?;
-        let data = InvisiProtocol::transact_0Call {
+        let data = InvisiCore::transact_0Call {
             _0: proof.proof.clone().into(),
             r: abi::TransactRequest {
                 params: params.clone(),
@@ -1684,7 +1684,7 @@ mod tests {
             data: format!(
                 "0x{}",
                 hex::encode(
-                    InvisiProtocol::transact_0Call {
+                    InvisiCore::transact_0Call {
                         _0: Bytes::from(vec![1, 2]),
                         r: request
                     }
@@ -1718,7 +1718,7 @@ mod tests {
     fn cached_public_packet_is_local_and_failed_reproof_preserves_it() {
         let (chain, wallet, params, _) = note_fixture();
         let (packet, trust) = cached_packet_fixture();
-        let call = InvisiProtocol::transact_0Call::abi_decode(
+        let call = InvisiCore::transact_0Call::abi_decode(
             &hex::decode(packet.data.trim_start_matches("0x")).unwrap(),
             true,
         )

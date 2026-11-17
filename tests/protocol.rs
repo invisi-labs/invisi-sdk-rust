@@ -1,6 +1,6 @@
 use alloy_primitives::{Address, U256};
 use alloy_sol_types::{SolCall, SolInterface};
-use invisi_sdk::protocol::{InvisiProtocol, ProtocolContract};
+use invisi_sdk::protocol::{InvisiCore, ProtocolContract};
 #[test]
 fn current_typescript_go_calldata_roundtrips_without_abi_drift() {
     let vectors: serde_json::Value =
@@ -9,7 +9,7 @@ fn current_typescript_go_calldata_roundtrips_without_abi_drift() {
     for (name, fixture) in vectors["fixtures"].as_object().unwrap() {
         if let Some(data) = fixture["calldata"].as_str() {
             let bytes = hex::decode(data.trim_start_matches("0x")).unwrap();
-            let call = InvisiProtocol::InvisiProtocolCalls::abi_decode(&bytes, true)
+            let call = InvisiCore::InvisiCoreCalls::abi_decode(&bytes, true)
                 .unwrap_or_else(|error| panic!("{name}: {error}"));
             assert_eq!(call.abi_encode(), bytes, "{name}");
             count += 1;
@@ -20,7 +20,7 @@ fn current_typescript_go_calldata_roundtrips_without_abi_drift() {
 #[test]
 fn typed_reads_and_writes_have_explicit_destination_and_value() {
     let contract = ProtocolContract::new(Address::repeat_byte(1)).unwrap();
-    let call = InvisiProtocol::isNullifierSpentCall {
+    let call = InvisiCore::isNullifierSpentCall {
         nullifier: [2u8; 32].into(),
     };
     let transaction = contract.call(&call);
@@ -55,13 +55,13 @@ fn receipt(logs: Vec<invisi_sdk::rpc::CanonicalLog>) -> invisi_sdk::rpc::Canonic
 #[test]
 fn canonical_receipts_preserve_omitted_note_positions_and_reject_unpaired_outputs() {
     use alloy_primitives::B256;
-    use invisi_sdk::protocol::{decode_receipt_outputs, IInvisiProtocol::Delivery};
-    let insertion = InvisiProtocol::CommitmentsInserted {
+    use invisi_sdk::protocol::{decode_receipt_outputs, IInvisiCore::Delivery};
+    let insertion = InvisiCore::CommitmentsInserted {
         treeId: U256::from(1),
         startLeafIndex: 7,
         commitments: vec![B256::with_last_byte(3)],
     };
-    let shield = InvisiProtocol::Shield {
+    let shield = InvisiCore::Shield {
         token: Address::repeat_byte(2),
         payer: Address::repeat_byte(3),
         amount: U256::from(1),
@@ -103,17 +103,17 @@ fn current_credit_draw_receipt_keeps_authority_separate_from_recipient_note() {
     )
     .unwrap();
     let call = match ProtocolContract::decode_call(&data).unwrap() {
-        InvisiProtocol::InvisiProtocolCalls::creditDraw(call) => call,
+        InvisiCore::InvisiCoreCalls::creditDraw(call) => call,
         _ => panic!("wrong golden fixture"),
     };
     let mut commitments = call.p.creditCommitments.clone();
     commitments.push(call.p.noteCommitment);
-    let insertion = InvisiProtocol::CommitmentsInserted {
+    let insertion = InvisiCore::CommitmentsInserted {
         treeId: U256::from(1),
         startLeafIndex: 0,
         commitments,
     };
-    let event = InvisiProtocol::CreditDraw {
+    let event = InvisiCore::CreditDraw {
         outputTreeId: U256::from(1),
         params: call.p,
         leafIndices: vec![0, 1],

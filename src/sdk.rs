@@ -3,7 +3,7 @@ use crate::{
     address::{ReceivingAddress, ReceivingKeys},
     delivery::{CreditDeliveryState, CreditRole, DeliveryContext},
     note::{Note, ProtocolContext},
-    protocol::{self, IInvisiProtocol as abi, InvisiProtocol, TransactionCall},
+    protocol::{self, IInvisiCore as abi, InvisiCore, TransactionCall},
     prover::{self, ProofBundle, Prover},
     rpc::{CanonicalBlock, CanonicalHead, ProtocolDeployment},
 };
@@ -1863,7 +1863,7 @@ impl PreparedTransaction {
                     return Err("shield must be ready".into());
                 }
                 validate_submission(funding, caller, anchor.timestamp, params.deadline)?;
-                Ok(contract.call(&InvisiProtocol::shieldCall {
+                Ok(contract.call(&InvisiCore::shieldCall {
                     p: params.clone(),
                     _1: outputs
                         .iter()
@@ -1905,7 +1905,7 @@ impl PreparedTransaction {
                     )
                     .map_err(|e| e.to_string())?;
                 }
-                Ok(contract.call(&InvisiProtocol::transact_0Call {
+                Ok(contract.call(&InvisiCore::transact_0Call {
                     _0: proof.proof.clone().into(),
                     r: abi::TransactRequest {
                         params: params.clone(),
@@ -2654,7 +2654,7 @@ impl PreparedAggregate {
         chain.canonical(&block)?;
         Ok(
             protocol::ProtocolContract::new(word_address(self.context.protocol_address)?)?.call(
-                &InvisiProtocol::transact_1Call {
+                &InvisiCore::transact_1Call {
                     _0: self.proof.proof.clone().into(),
                     requests,
                 },
@@ -2759,7 +2759,7 @@ mod actual_witness_tests {
         let call = aggregate.calldata(&*chain, Address::ZERO).unwrap();
         assert!(matches!(
             protocol::ProtocolContract::decode_call(&call.data).unwrap(),
-            InvisiProtocol::InvisiProtocolCalls::transact_1(_)
+            InvisiCore::InvisiCoreCalls::transact_1(_)
         ));
     }
 }
@@ -2781,11 +2781,11 @@ mod funding_tests {
         for case in all["cases"].as_array().unwrap() {
             let data = hex_bytes(case["calldata"].as_str().unwrap(), None).unwrap();
             let (name, hash) = match protocol::ProtocolContract::decode_call(&data).unwrap() {
-                InvisiProtocol::InvisiProtocolCalls::shield(call) => (
+                InvisiCore::InvisiCoreCalls::shield(call) => (
                     "FundShield",
                     shield_funding_request_hash(&call.p, &call._1, &call._2),
                 ),
-                InvisiProtocol::InvisiProtocolCalls::transact_0(call) => (
+                InvisiCore::InvisiCoreCalls::transact_0(call) => (
                     "FundTransact",
                     transact_funding_request_hash(&call._0, &call.r.params, &call.r.deliveries),
                 ),
@@ -3208,7 +3208,7 @@ impl PreparedTransaction {
             } => {
                 let mut funding = funding.clone();
                 funding.signature = Bytes::new();
-                Ok(contract.call(&InvisiProtocol::shieldCall {
+                Ok(contract.call(&InvisiCore::shieldCall {
                     p: params.clone(),
                     _1: outputs
                         .iter()
@@ -3229,7 +3229,7 @@ impl PreparedTransaction {
             } => {
                 let mut funding = funding.clone();
                 funding.signature = Bytes::new();
-                Ok(contract.call(&InvisiProtocol::transact_0Call {
+                Ok(contract.call(&InvisiCore::transact_0Call {
                     _0: Bytes::new(),
                     r: abi::TransactRequest {
                         params: params.clone(),
@@ -3521,7 +3521,7 @@ mod public_funding_tests {
             .ready()
             .unwrap();
         let call = ready.calldata(&*chain, gas_caller).unwrap();
-        let InvisiProtocol::InvisiProtocolCalls::shield(decoded) =
+        let InvisiCore::InvisiCoreCalls::shield(decoded) =
             protocol::ProtocolContract::decode_call(&call.data).unwrap()
         else {
             panic!("not shield")

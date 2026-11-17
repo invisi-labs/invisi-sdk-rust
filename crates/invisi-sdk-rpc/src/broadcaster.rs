@@ -1,5 +1,5 @@
 //! Registered relay quotes bind canonical public calldata, deployment context and exact fees.
-use crate::protocol::{InvisiProtocol, ProtocolContract};
+use crate::protocol::{InvisiCore, ProtocolContract};
 use crate::rpc::{self, decimal, Error, HttpTransport, JsonRpc, Result, RpcTransport};
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use alloy_sol_types::{SolCall, SolInterface, SolValue};
@@ -145,7 +145,7 @@ fn stripped_intent(data: &[u8]) -> Result<(Intent, Vec<u8>)> {
     if call.abi_encode() != data {
         return Err(Error::Invalid("noncanonical broadcaster calldata"));
     }
-    use InvisiProtocol::InvisiProtocolCalls as Calls;
+    use InvisiCore::InvisiCoreCalls as Calls;
     let make = |method, token, fee_recipient, fee_amount, deadline| Intent {
         method,
         token,
@@ -237,7 +237,7 @@ pub struct MemberProof {
 pub fn validate_member_proof(data: &[u8], proof: &MemberProof) -> Result<()> {
     use sha2::{Digest, Sha256};
     let capacity = aggregate_member_capacity(data)?;
-    let InvisiProtocol::InvisiProtocolCalls::transact_0(call) = ProtocolContract::decode_call(data)
+    let InvisiCore::InvisiCoreCalls::transact_0(call) = ProtocolContract::decode_call(data)
         .map_err(|_| Error::Invalid("invalid member calldata"))?
     else {
         unreachable!()
@@ -278,7 +278,7 @@ pub fn matches_execution_transaction(
     if aggregate_member_capacity(member_data).is_err() {
         return false;
     }
-    use InvisiProtocol::InvisiProtocolCalls as Calls;
+    use InvisiCore::InvisiCoreCalls as Calls;
     let (Ok(Calls::transact_0(member)), Ok(Calls::transact_1(outer))) = (
         ProtocolContract::decode_call(member_data),
         ProtocolContract::decode_call(transaction_data),
@@ -294,7 +294,7 @@ pub fn matches_execution_transaction(
             == 1
 }
 pub fn aggregate_member_capacity(data: &[u8]) -> Result<usize> {
-    use InvisiProtocol::InvisiProtocolCalls as Calls;
+    use InvisiCore::InvisiCoreCalls as Calls;
     match ProtocolContract::decode_call(data) {
         Ok(Calls::transact_0(c)) if c.abi_encode() == data => {
             let capacity = c.r.params.nullifiers.len() + c.r.params.noteCommitments.len();

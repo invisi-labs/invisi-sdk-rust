@@ -3,7 +3,7 @@ use alloy_sol_types::SolEvent;
 use invisi_sdk::{
     disclosure::{Disclosure, DisclosureRole},
     note::{Note, ProtocolContext},
-    protocol::{IInvisiProtocol::Delivery, InvisiProtocol},
+    protocol::{IInvisiCore::Delivery, InvisiCore},
     rpc::{
         CanonicalBlock, CanonicalChain, CanonicalLog, CanonicalReceipt, ChainReceipts,
         ContractDeployment, Error, FinalityTag, ProtocolDeployment, ProtocolRpcClient, Result,
@@ -95,12 +95,12 @@ fn fixture() -> (
         payload: vec![],
     };
     let commitment = B256::from(note.commitment().unwrap().to_be_bytes::<32>());
-    let insertion = InvisiProtocol::CommitmentsInserted {
+    let insertion = InvisiCore::CommitmentsInserted {
         treeId: U256::from(1),
         startLeafIndex: 7,
         commitments: vec![commitment],
     };
-    let shield = InvisiProtocol::Shield {
+    let shield = InvisiCore::Shield {
         token: Address::with_last_byte(2),
         payer: Address::with_last_byte(3),
         amount: U256::from(7),

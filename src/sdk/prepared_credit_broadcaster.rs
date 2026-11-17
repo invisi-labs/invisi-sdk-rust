@@ -21,17 +21,17 @@ impl PreparedCredit {
         let contract =
             protocol::ProtocolContract::new(word_address(self.context.protocol_address)?)?;
         Ok(match &self.plan {
-            CreditPlan::Create { params, .. } => contract.call(&InvisiProtocol::createCreditCall {
+            CreditPlan::Create { params, .. } => contract.call(&InvisiCore::createCreditCall {
                 _0: Bytes::new(),
                 p: params.clone(),
                 _2: self.deliveries.clone(),
             }),
-            CreditPlan::Update { params, .. } => contract.call(&InvisiProtocol::updateCreditCall {
+            CreditPlan::Update { params, .. } => contract.call(&InvisiCore::updateCreditCall {
                 _0: Bytes::new(),
                 p: params.clone(),
                 _2: self.deliveries.clone(),
             }),
-            CreditPlan::Draw { params, .. } => contract.call(&InvisiProtocol::creditDrawCall {
+            CreditPlan::Draw { params, .. } => contract.call(&InvisiCore::creditDrawCall {
                 _0: Bytes::new(),
                 p: params.clone(),
                 _2: self.deliveries.clone(),
@@ -44,7 +44,7 @@ impl PreparedCredit {
                 deadline,
                 fee,
                 ..
-            } => contract.call(&InvisiProtocol::revokeCreditCall {
+            } => contract.call(&InvisiCore::revokeCreditCall {
                 token: *token,
                 owner: *owner,
                 shard: *shard,

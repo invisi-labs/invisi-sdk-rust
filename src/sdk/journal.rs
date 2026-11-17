@@ -1,7 +1,7 @@
 //! Durable, whitelisted prepared plans. Native authorization witnesses are never serialized.
 use super::credit::{CreditPlan, CreditRepriceTemplate};
 use super::*;
-use crate::protocol::{IInvisiProtocol as abi, InvisiProtocol as P};
+use crate::protocol::{IInvisiCore as abi, InvisiCore as P};
 use crate::sdk;
 use alloy_sol_types::{SolCall, SolInterface};
 use serde::{Deserialize, Serialize};
@@ -395,15 +395,15 @@ impl ManagedPrepared {
     }
     pub fn kind_deadline(&self) -> Result<(String, u64)> {
         let s = self.snapshot()?;
-        let call = P::InvisiProtocolCalls::abi_decode(&s.unsigned_call, true)
-            .map_err(|e| e.to_string())?;
+        let call =
+            P::InvisiCoreCalls::abi_decode(&s.unsigned_call, true).map_err(|e| e.to_string())?;
         let (kind, d) = match call {
-            P::InvisiProtocolCalls::shield(c) => ("shield", c.p.deadline),
-            P::InvisiProtocolCalls::transact_0(c) => ("transfer", c.r.params.deadline),
-            P::InvisiProtocolCalls::createCredit(c) => ("create-credit", c.p.deadline),
-            P::InvisiProtocolCalls::updateCredit(c) => ("update-credit", c.p.deadline),
-            P::InvisiProtocolCalls::creditDraw(c) => ("draw-credit", c.p.deadline),
-            P::InvisiProtocolCalls::revokeCredit(c) => ("revoke-credit", c.deadline),
+            P::InvisiCoreCalls::shield(c) => ("shield", c.p.deadline),
+            P::InvisiCoreCalls::transact_0(c) => ("transfer", c.r.params.deadline),
+            P::InvisiCoreCalls::createCredit(c) => ("create-credit", c.p.deadline),
+            P::InvisiCoreCalls::updateCredit(c) => ("update-credit", c.p.deadline),
+            P::InvisiCoreCalls::creditDraw(c) => ("draw-credit", c.p.deadline),
+            P::InvisiCoreCalls::revokeCredit(c) => ("revoke-credit", c.deadline),
             _ => return Err("unsupported managed operation".into()),
         };
         Ok((
@@ -445,8 +445,8 @@ impl PreparedSnapshot {
         {
             return Err("saved construction timestamp precedes canonical anchor".into());
         }
-        let call = P::InvisiProtocolCalls::abi_decode(&self.unsigned_call, true)
-            .map_err(|e| e.to_string())?;
+        let call =
+            P::InvisiCoreCalls::abi_decode(&self.unsigned_call, true).map_err(|e| e.to_string())?;
         if call.abi_encode() != self.unsigned_call {
             return Err("noncanonical saved operation".into());
         }
@@ -469,7 +469,7 @@ impl PreparedSnapshot {
             return Err("unsupported saved proving target".into());
         }
         let mut managed = match call {
-            P::InvisiProtocolCalls::shield(c) => {
+            P::InvisiCoreCalls::shield(c) => {
                 validate_funding(&c._3)?;
                 Fee {
                     recipient: c.p.feeRecipient,
@@ -535,7 +535,7 @@ impl PreparedSnapshot {
                     reprice: None,
                 })
             }
-            P::InvisiProtocolCalls::transact_0(c) => {
+            P::InvisiCoreCalls::transact_0(c) => {
                 validate_funding(&c.r.funding)?;
                 Fee {
                     recipient: c.r.params.feeRecipient,
@@ -656,7 +656,7 @@ impl PreparedSnapshot {
                     state.validate().map_err(|e| e.to_string())?;
                 }
                 let (plan, deliveries) = match other {
-                    P::InvisiProtocolCalls::createCredit(c) => {
+                    P::InvisiCoreCalls::createCredit(c) => {
                         if !c._0.is_empty()
                             || !credit_inputs.is_empty()
                             || !outputs.is_empty()
@@ -689,7 +689,7 @@ impl PreparedSnapshot {
                             c._2,
                         )
                     }
-                    P::InvisiProtocolCalls::updateCredit(c) => {
+                    P::InvisiCoreCalls::updateCredit(c) => {
                         if !c._0.is_empty()
                             || !outputs.is_empty()
                             || c._2.len() != 2
@@ -736,7 +736,7 @@ impl PreparedSnapshot {
                             c._2,
                         )
                     }
-                    P::InvisiProtocolCalls::creditDraw(c) => {
+                    P::InvisiCoreCalls::creditDraw(c) => {
                         let n = credit_inputs.len();
                         if !c._0.is_empty()
                             || n == 0
@@ -794,7 +794,7 @@ impl PreparedSnapshot {
                             c._2,
                         )
                     }
-                    P::InvisiProtocolCalls::revokeCredit(c) => (
+                    P::InvisiCoreCalls::revokeCredit(c) => (
                         CreditPlan::Revoke {
                             owner: c.owner,
                             token: c.token,
@@ -940,12 +940,12 @@ impl PreparedSnapshot {
         if (saved.quote.quote.execution == Execution::Aggregate) != recursive {
             return Err("broadcaster execution does not match proof target".into());
         }
-        let mut call = P::InvisiProtocolCalls::abi_decode(&self.unsigned_call, true)
-            .map_err(|e| e.to_string())?;
+        let mut call =
+            P::InvisiCoreCalls::abi_decode(&self.unsigned_call, true).map_err(|e| e.to_string())?;
         let mut member = None;
         if let Some(proof) = &self.proof {
             let owner = match &call {
-                P::InvisiProtocolCalls::transact_0(c) => self
+                P::InvisiCoreCalls::transact_0(c) => self
                     .inputs
                     .first()
                     .map(|i| sdk::word_address(i.note.owner_address))
@@ -957,9 +957,9 @@ impl PreparedSnapshot {
                             c.r.funding.payer
                         }
                     }),
-                P::InvisiProtocolCalls::createCredit(c) => c.p.owner,
-                P::InvisiProtocolCalls::updateCredit(c) => c.p.owner,
-                P::InvisiProtocolCalls::creditDraw(_) => sdk::word_address(
+                P::InvisiCoreCalls::createCredit(c) => c.p.owner,
+                P::InvisiCoreCalls::updateCredit(c) => c.p.owner,
+                P::InvisiCoreCalls::creditDraw(_) => sdk::word_address(
                     self.credit_inputs
                         .first()
                         .ok_or("saved Credit input required")?
@@ -987,10 +987,10 @@ impl PreparedSnapshot {
                 .into()
             };
             match &mut call {
-                P::InvisiProtocolCalls::transact_0(c) => c._0 = proof.proof.clone().into(),
-                P::InvisiProtocolCalls::createCredit(c) => c._0 = credit_proof(),
-                P::InvisiProtocolCalls::updateCredit(c) => c._0 = credit_proof(),
-                P::InvisiProtocolCalls::creditDraw(c) => c._0 = credit_proof(),
+                P::InvisiCoreCalls::transact_0(c) => c._0 = proof.proof.clone().into(),
+                P::InvisiCoreCalls::createCredit(c) => c._0 = credit_proof(),
+                P::InvisiCoreCalls::updateCredit(c) => c._0 = credit_proof(),
+                P::InvisiCoreCalls::creditDraw(c) => c._0 = credit_proof(),
                 _ => return Err("unexpected saved proof".into()),
             }
             if recursive {
@@ -1008,10 +1008,10 @@ impl PreparedSnapshot {
             }
         } else if matches!(
             call,
-            P::InvisiProtocolCalls::transact_0(_)
-                | P::InvisiProtocolCalls::createCredit(_)
-                | P::InvisiProtocolCalls::updateCredit(_)
-                | P::InvisiProtocolCalls::creditDraw(_)
+            P::InvisiCoreCalls::transact_0(_)
+                | P::InvisiCoreCalls::createCredit(_)
+                | P::InvisiCoreCalls::updateCredit(_)
+                | P::InvisiCoreCalls::creditDraw(_)
         ) {
             return Err("saved public proof required".into());
         }
@@ -1041,9 +1041,8 @@ impl PreparedSnapshot {
         let Some(proof) = &self.proof else {
             return Ok(None);
         };
-        let P::InvisiProtocolCalls::transact_0(mut call) =
-            P::InvisiProtocolCalls::abi_decode(&self.unsigned_call, true)
-                .map_err(|e| e.to_string())?
+        let P::InvisiCoreCalls::transact_0(mut call) =
+            P::InvisiCoreCalls::abi_decode(&self.unsigned_call, true).map_err(|e| e.to_string())?
         else {
             return Ok(None);
         };
@@ -1233,8 +1232,8 @@ pub struct PreparedHistory {
 impl PreparedSnapshot {
     /// Detached business intent only; no signatures, paths, shared keys or proving witness buffers.
     pub fn history(&self) -> Result<PreparedHistory> {
-        let call = P::InvisiProtocolCalls::abi_decode(&self.unsigned_call, true)
-            .map_err(|e| e.to_string())?;
+        let call =
+            P::InvisiCoreCalls::abi_decode(&self.unsigned_call, true).map_err(|e| e.to_string())?;
         let outputs = self
             .outputs
             .iter()
@@ -1279,14 +1278,14 @@ impl PreparedSnapshot {
             },
         };
         let (token, fee_recipient, fee_amount, funding, withdrawal) = match call {
-            P::InvisiProtocolCalls::shield(c) => (
+            P::InvisiCoreCalls::shield(c) => (
                 c.p.token,
                 c.p.feeRecipient,
                 c.p.feeAmount,
                 Some(funding(&c._3)),
                 None,
             ),
-            P::InvisiProtocolCalls::transact_0(c) => (
+            P::InvisiCoreCalls::transact_0(c) => (
                 c.r.params.token,
                 c.r.params.feeRecipient,
                 c.r.params.feeAmount,
@@ -1297,16 +1296,16 @@ impl PreparedSnapshot {
                     Some((c.r.params.withdrawalAddress, c.r.params.withdrawalAmount))
                 },
             ),
-            P::InvisiProtocolCalls::createCredit(c) => {
+            P::InvisiCoreCalls::createCredit(c) => {
                 (c.p.token, c.p.feeRecipient, c.p.feeAmount, None, None)
             }
-            P::InvisiProtocolCalls::updateCredit(c) => {
+            P::InvisiCoreCalls::updateCredit(c) => {
                 (c.p.token, c.p.feeRecipient, c.p.feeAmount, None, None)
             }
-            P::InvisiProtocolCalls::creditDraw(c) => {
+            P::InvisiCoreCalls::creditDraw(c) => {
                 (c.p.token, c.p.feeRecipient, c.p.feeAmount, None, None)
             }
-            P::InvisiProtocolCalls::revokeCredit(c) => {
+            P::InvisiCoreCalls::revokeCredit(c) => {
                 (c.token, c.feeRecipient, c.feeAmount, None, None)
             }
             _ => return Err("unsupported saved business intent".into()),

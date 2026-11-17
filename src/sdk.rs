@@ -1245,6 +1245,10 @@ fn sorted_sources(inputs: &[NoteInput]) -> Result<Vec<abi::InputSource>> {
         .collect())
 }
 impl Invisi {
+    /// The trusted deployment used by preparation.
+    pub fn context(&self) -> ProtocolContext {
+        self.chain.context()
+    }
     pub fn new(chain: Arc<dyn ChainState>) -> Self {
         Self {
             chain,

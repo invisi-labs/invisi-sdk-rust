@@ -1,8 +1,10 @@
 //! Request-based Credit construction keeps allocation and recovery state inside the SDK.
 use super::*;
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct CreateCreditRequest {
     pub token: Address,
+    /// Optional caller-selected nonzero canonical field element; defaults to random.
+    pub credit_shared_key: Option<U256>,
     pub spender: String,
     pub policy: crate::credit::CreditPolicy,
     pub available_credit: U256,
@@ -11,6 +13,14 @@ pub struct CreateCreditRequest {
     pub payload: Vec<u8>,
     pub deadline: u64,
     pub fee: Fee,
+}
+impl std::fmt::Debug for CreateCreditRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateCreditRequest")
+            .field("token", &self.token)
+            .field("expiry", &self.expiry)
+            .finish_non_exhaustive()
+    }
 }
 #[derive(Clone, Debug)]
 pub struct UpdateCreditRequest {
@@ -103,7 +113,7 @@ impl Invisi {
                     revocation_slot: slot,
                     nonce: nonce(),
                     expiry: request.expiry,
-                    credit_shared_key: nonce(),
+                    credit_shared_key: request.credit_shared_key.unwrap_or_else(nonce),
                     policy: request.policy,
                     usage: crate::credit::CreditUsage::default(),
                     available_credit: request.available_credit,

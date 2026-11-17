@@ -32,8 +32,8 @@ class ReleaseTests(unittest.TestCase):
         def verify(files, name='invisi-sdk-prover'):
             buffer = io.BytesIO()
             with tarfile.open(fileobj=buffer, mode='w') as output:
-                for path, data in files.items():
-                    member = tarfile.TarInfo('crate-1.2.4/' + path)
+                for path, data in dict(files, LICENSE=(archive_check.ROOT / 'LICENSE').read_bytes(), NOTICE=(archive_check.ROOT / 'NOTICE').read_bytes()).items():
+                    member = tarfile.TarInfo(name + '-1.2.4/' + path)
                     member.size = len(data)
                     output.addfile(member, io.BytesIO(data))
             buffer.seek(0)
@@ -124,7 +124,7 @@ class ReleaseTests(unittest.TestCase):
             calls.append(('publish', args[-1]))
         with tempfile.TemporaryDirectory() as temporary, patch.object(release, 'package', side_effect=package), patch.object(release, 'run', side_effect=command), patch.object(release, 'archive_checksum', side_effect=lambda archive, name, version, commit: name):
             report = release.publish_cohort(Path(temporary), '1.2.0', 'a' * 40, Path(temporary), Registry())
-        self.assertEqual(len(report['crates']), 7)
+        self.assertEqual(len(report['crates']), len(release.ORDER))
         self.assertNotIn(('publish', release.ORDER[0]), calls)
         self.assertEqual([name for operation, name in calls if operation == 'indexed'], release.ORDER)
         for current, following in zip(release.ORDER, release.ORDER[1:]):

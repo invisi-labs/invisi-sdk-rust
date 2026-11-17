@@ -1,0 +1,24 @@
+[package]
+name = "invisi-sdk-ipp"
+version = "1.2.4"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/invisi-lab/invisi-sdk-rust"
+include = ["Cargo.toml", "LICENSE", "NOTICE", "src/**", "tests/**"]
+description = "Independent IPP protocol validation and session HTTP client"
+[features]
+default = []
+invisi = ["dep:invisi-sdk"]
+[dependencies]
+invisi-sdk-primitives = { path = "../invisi-sdk-primitives", version = "=1.2.4" }
+invisi-sdk = { path = "../..", version = "=1.2.4", optional = true }
+alloy-primitives = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+url = "2"
+percent-encoding = "2"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+tokio = { version = "1", features = ["time", "sync", "macros", "rt"] }
+httpdate = "1"

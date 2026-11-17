@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish the seven tagged crates, resuming only byte-identical registered versions."""
+"""Publish the eight tagged crates, resuming only byte-identical registered versions."""
 import argparse
 import hashlib
 import json
@@ -15,7 +15,7 @@ import urllib.error
 import urllib.request
 
 REPOSITORY = 'invisi-lab/invisi-sdk-rust'
-ORDER = ['invisi-sdk-primitives', 'invisi-sdk-protocol', 'invisi-sdk-prover', 'invisi-sdk-rpc', 'invisi-sdk', 'invisi-sdk-session', 'invisi-sdk-ffi']
+ORDER = ['invisi-sdk-primitives', 'invisi-sdk-protocol', 'invisi-sdk-prover', 'invisi-sdk-rpc', 'invisi-sdk', 'invisi-sdk-session', 'invisi-sdk-ffi', 'invisi-sdk-ipp']
 
 
 class ReleaseError(RuntimeError):
@@ -50,7 +50,7 @@ def validate(root, tag, repository):
         package_data = data['package']
         name = package_data['name']
         if name not in ORDER or name in found or package_data['version'] != version:
-            raise ReleaseError(f'Invalid seven-crate version cohort: {manifest}')
+            raise ReleaseError(f'Invalid eight-crate version cohort: {manifest}')
         if package_data.get('repository') != f'https://github.com/{REPOSITORY}':
             raise ReleaseError(f'Unexpected package repository: {name}')
         found.add(name)
@@ -61,7 +61,7 @@ def validate(root, tag, repository):
                     if canonical not in ORDER or not isinstance(settings, dict) or settings.get('version') != f'={version}':
                         raise ReleaseError(f'Invalid sibling version requirement: {name}/{dependency}')
     if found != set(ORDER):
-        raise ReleaseError('Release must contain exactly the seven public crates')
+        raise ReleaseError('Release must contain exactly the eight public crates')
     return version, commit
 
 
@@ -180,7 +180,7 @@ def main():
     options = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     version, commit = validate(root, options.tag, options.repository)
-    print(f'Validated {options.tag}: seven crates at clean commit {commit}', flush=True)
+    print(f'Validated {options.tag}: eight crates at clean commit {commit}', flush=True)
     if options.validate_only:
         return
     require_token()
@@ -189,7 +189,7 @@ def main():
     report = publish_cohort(root, version, commit, options.target_dir.resolve(), Registry())
     options.report.parent.mkdir(parents=True, exist_ok=True)
     options.report.write_text(json.dumps(report, indent=2) + '\n')
-    print('All seven registry archives match the tagged release', flush=True)
+    print('All eight registry archives match the tagged release', flush=True)
 
 
 if __name__ == '__main__':

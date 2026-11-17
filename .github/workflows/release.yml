@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing stable release tag (all seven crate versions must match)'
+        description: 'Existing stable release tag (all eight crate versions must match)'
         required: true
         default: 'v1.2.4'
         type: string
@@ -50,7 +50,7 @@ jobs:
         with:
           toolchain: '1.94.0'
           components: rustfmt, clippy
-      - name: Validate repository, tag and seven-crate version cohort
+      - name: Validate repository, tag and eight-crate version cohort
         run: python3 scripts/publish-release.py --tag "$RELEASE_TAG" --validate-only
       - name: Check registry credential configuration
         env:
@@ -91,7 +91,7 @@ jobs:
           name: rust-registry-${{ env.RELEASE_TAG }}
           path: ${{ runner.temp }}/invisi-release-checksums.json
           if-no-files-found: error
-      - name: Create GitHub release after all seven registrations
+      - name: Create GitHub release after all eight registrations
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

@@ -3875,6 +3875,7 @@ fn archived_history_keeps_its_captured_public_generation() {
 fn session_preparation_preserves_structured_recipient_and_selection_errors() {
     let h = synced();
     let request = sdk::CreateCreditRequest {
+        credit_shared_key: None,
         token: sdk::word_address(h.note.token_address).unwrap(),
         spender: "invalid".into(),
         policy: crate::credit::CreditPolicy::default(),

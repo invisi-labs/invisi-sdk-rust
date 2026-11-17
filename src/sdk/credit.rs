@@ -1256,6 +1256,7 @@ mod lifecycle_tests {
         let spender = wallet(2);
         let initial = initial(chain.as_ref());
         let request = CreateCreditRequest {
+            credit_shared_key: None,
             token: word_address(initial.note.token_address).unwrap(),
             spender: spender.address().unwrap(),
             policy: initial.note.policy.clone(),
@@ -1266,7 +1267,7 @@ mod lifecycle_tests {
             deadline: 2000000100,
             fee: Fee::default(),
         };
-        let invisi = Invisi::new(chain);
+        let invisi = Invisi::new(chain.clone());
         let prepared = invisi
             .prepare_create_credit(&owner, request.clone(), None)
             .unwrap();
@@ -1277,6 +1278,80 @@ mod lifecycle_tests {
         );
         assert_eq!(state.note.payload, vec![7]);
         assert_ne!(state.note.credit_shared_key, U256::ZERO);
+        let mut explicit = request.clone();
+        explicit.credit_shared_key = Some(U256::from(123));
+        let prepared_explicit = invisi
+            .prepare_create_credit(&owner, explicit, None)
+            .unwrap();
+        assert_eq!(
+            prepared_explicit.successor_states()[0]
+                .note
+                .credit_shared_key,
+            U256::from(123)
+        );
+        let delivery_context = DeliveryContext {
+            context: invisi.context(),
+            token_address: state.note.token_address,
+            output_commitment: prepared_explicit.successor_states()[0]
+                .note
+                .commitment()
+                .unwrap(),
+        };
+        for (index, (role, who, seed)) in [
+            (CreditRole::Owner, &owner, 1),
+            (CreditRole::Spender, &spender, 2),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let viewing = crate::wallet::viewing_key(&secret(seed)).unwrap();
+            let decoded = crate::delivery::decrypt_credit(
+                &*viewing,
+                &prepared_explicit.deliveries[index].ciphertext,
+                &delivery_context,
+                role,
+                address_word(who.owner_address()),
+            )
+            .unwrap();
+            assert_eq!(decoded.note.credit_shared_key, U256::from(123));
+        }
+        let prepared_explicit = prepared_explicit
+            .quote_for_broadcaster(
+                chain.clone(),
+                Arc::new(CreditRelay {
+                    fees: std::sync::atomic::AtomicUsize::new(0),
+                    submits: std::sync::atomic::AtomicUsize::new(0),
+                }),
+                &BroadcasterOptions {
+                    max_fee_amount: Some(U256::from(100)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            prepared_explicit.successor_states()[0]
+                .note
+                .credit_shared_key,
+            U256::from(123)
+        );
+        let saved = journal::ManagedPrepared::Credit(prepared_explicit.clone())
+            .snapshot()
+            .unwrap();
+        let saved: journal::PreparedSnapshot =
+            serde_json::from_slice(&serde_json::to_vec(&saved).unwrap()).unwrap();
+        let restored = saved.restore(&owner, None).unwrap();
+        let journal::ManagedPrepared::Credit(restored) = restored else {
+            panic!("credit expected")
+        };
+        assert_eq!(
+            restored.successor_states()[0].note.credit_shared_key,
+            U256::from(123)
+        );
+        for invalid_key in [U256::ZERO, crate::note::field_modulus()] {
+            let mut invalid = request.clone();
+            invalid.credit_shared_key = Some(invalid_key);
+            assert!(invisi.prepare_create_credit(&owner, invalid, None).is_err());
+        }
         let mut invalid = request.clone();
         invalid.spender = "broken".into();
         assert_eq!(

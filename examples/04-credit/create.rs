@@ -27,6 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let prepared = invisi.prepare_create_credit(
         &wallet,
         sdk::CreateCreditRequest {
+            credit_shared_key: None,
             token,
             spender: env::var("SPENDER_ADDRESS")?,
             policy: invisi_sdk::credit::CreditPolicy::default(),

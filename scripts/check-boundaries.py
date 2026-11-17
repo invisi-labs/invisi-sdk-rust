@@ -13,6 +13,7 @@ expected = {
     'invisi-sdk': {'invisi-sdk-primitives', 'invisi-sdk-protocol', 'invisi-sdk-prover', 'invisi-sdk-rpc'},
     # Session exposes protocol DTOs directly; proving is accessed through SDK.
     'invisi-sdk-session': {'invisi-sdk', 'invisi-sdk-primitives', 'invisi-sdk-rpc', 'invisi-sdk-protocol'},
+    'invisi-sdk-ipp': {'invisi-sdk-primitives', 'invisi-sdk'},
     'invisi-sdk-ffi': {'invisi-sdk-primitives'},
 }
 found = {}
@@ -27,6 +28,9 @@ for manifest in [root / 'Cargo.toml', *sorted((root / 'crates').glob('*/Cargo.to
     assert internal == expected[name], f'{name}: dependency boundary changed: {internal}'
     for dependency in internal:
         assert dependencies[dependency]['version'] == '=1.2.4'
+    if name == 'invisi-sdk-ipp':
+        assert dependencies['invisi-sdk'].get('optional') is True
+        assert config.get('features', {}).get('default') == []
     if name in {'invisi-sdk-primitives', 'invisi-sdk-protocol'}:
         assert not {'reqwest', 'tokio', 'rusqlite'} & dependencies.keys(), f'{name}: IO dependency'
         for source in (manifest.parent / 'src').rglob('*.rs'):
@@ -44,4 +48,4 @@ assert 'pub use invisi_sdk_primitives::*' not in (root / 'crates/invisi-sdk-prot
 public = json.loads((root / 'crates/invisi-sdk-protocol/assets/circuit-statements.json').read_text())
 witness = json.loads((root / 'crates/invisi-sdk-prover/assets/prover/witness-layouts.json').read_text())
 assert public == {name: {key: layout[key] for key in ('artifactSha256', 'keys', 'publicInputCount')} for name, layout in witness.items()}, 'Public statement catalog drifted from witness layouts'
-print('Seven public crates and six-module production boundaries verified')
+print('Eight public crates and six-module production boundaries verified')

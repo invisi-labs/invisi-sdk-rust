@@ -52,6 +52,10 @@ jobs:
           components: rustfmt, clippy
       - name: Validate repository, tag and eight-crate version cohort
         run: python3 scripts/publish-release.py --tag "$RELEASE_TAG" --validate-only
+      - name: Validate complete versioned release notes
+        run: |
+          python3 scripts/test_release_notes.py
+          python3 scripts/release-notes.py "$RELEASE_TAG" --output "$RUNNER_TEMP/release-notes.md"
       - name: Check registry credential configuration
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -96,10 +100,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "GitHub release already exists for $RELEASE_TAG; registry archives were independently verified."
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false \
+              --title "Rust SDK $RELEASE_TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
           else
             gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
-              --title "Rust SDK $RELEASE_TAG" --notes-file CHANGELOG.md \
+              --title "Rust SDK $RELEASE_TAG" --notes-file "$RUNNER_TEMP/release-notes.md" \
               "$RUNNER_TEMP/invisi-release-checksums.json" \
               "$RUNNER_TEMP"/invisi-release-publish/package/invisi-sdk*-*.crate
           fi

@@ -47,6 +47,10 @@ class ReleaseTests(unittest.TestCase):
             verify(base, 'invisi-sdk')
 
     def cohort(self, root):
+        import shutil
+        (root / 'scripts').mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(Path(__file__).with_name('release-notes.py'), root / 'scripts/release-notes.py')
+        (root / 'CHANGELOG.md').write_text('# Changes\n## 1.2.0\n- Version details.\n')
         for name in release.ORDER:
             directory = root if name == 'invisi-sdk' else root / 'crates' / name
             directory.mkdir(parents=True, exist_ok=True)
@@ -70,6 +74,15 @@ class ReleaseTests(unittest.TestCase):
             with patch.object(release, 'git', side_effect=lambda root, *args: '' if args[0] == 'status' else 'a' * 40):
                 (root / 'crates/invisi-sdk-rpc/Cargo.toml').write_text('[package]\nname="invisi-sdk-rpc"\nversion="1.1.7"\n')
                 with self.assertRaises(release.ReleaseError):
+                    release.validate(root, 'v1.2.0', release.REPOSITORY)
+
+    def test_rejects_missing_current_version_changelog(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.cohort(root)
+            (root / 'CHANGELOG.md').write_text('# Changes\n## 1.1.7\n- Old details.\n')
+            with patch.object(release, 'git', side_effect=lambda root, *args: '' if args[0] == 'status' else 'a' * 40):
+                with self.assertRaisesRegex(release.ReleaseError, 'changelog'):
                     release.validate(root, 'v1.2.0', release.REPOSITORY)
 
     def test_archive_requires_tagged_clean_vcs_and_cohort_identity(self):

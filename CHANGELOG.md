@@ -6,6 +6,14 @@
 - Load pinned public proving resources lazily with verified, shared disk caches; retain local directory and offline circuit support.
 
 
+## 1.2.4
+
+- Refresh receipt-calibrated gas estimates for optimized Protocol contracts and validate authorization and unsigned funding boundaries.
+- Add trusted RPC Note confirmation and collection with broadcaster fees deducted from the payout.
+- Support scheduled broadcaster submissions and cancellation; align quote lifecycle, Credit proof validation and managed recovery.
+- Bound parallel public-history header reads during wallet synchronization.
+- Preserve Protocol ABI and authenticated circuit formats. Gas estimates remain distinct from transaction gas limits.
+
 ## 1.2.3
 
 - Align transaction preparation, public history and Provenance interfaces with the current protocol contracts.

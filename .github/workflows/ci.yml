@@ -19,6 +19,7 @@ jobs:
         with:
           components: rustfmt
       - run: python3 scripts/test_publish_release.py
+      - run: python3 scripts/test_release_notes.py
       - run: python3 scripts/check-english.py
       - run: python3 scripts/check-boundaries.py
       - run: cargo fmt --all --check

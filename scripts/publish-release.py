@@ -62,6 +62,10 @@ def validate(root, tag, repository):
                         raise ReleaseError(f'Invalid sibling version requirement: {name}/{dependency}')
     if found != set(ORDER):
         raise ReleaseError('Release must contain exactly the eight public crates')
+    try:
+        run([sys.executable, root / 'scripts/release-notes.py', tag], stdout=subprocess.DEVNULL)
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise ReleaseError('Release changelog is missing or invalid') from error
     return version, commit
 
 

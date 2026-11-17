@@ -95,3 +95,10 @@ release, attaching the exact archives and `invisi-release-checksums.json`. The
 report is also retained as a workflow artifact. An already-existing GitHub release
 is preserved on retry. A partial registry release can be resumed from the same tag;
 immutable published versions cannot be rolled back by editing the workflow.
+
+Release notes use the local versioned CHANGELOG as the only maintained source.
+`scripts/release-notes.py vMAJOR.MINOR.PATCH --output NOTES.md` renders the complete
+current entry (all public package entries for TypeScript) into the GitHub Release
+body. Missing, duplicate, empty or link-only entries fail validation before
+publication. Historical entries are retained locally; a release body includes only
+its matching version. Release retries update the same body from the same source.

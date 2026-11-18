@@ -417,3 +417,55 @@ fn first_source_proof_after_terminal_restart_binds_authoritative_main_proof_byte
     assert_eq!(source.hits.load(Ordering::SeqCst), hits);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
+
+#[test]
+fn host_factory_supports_initial_provenance_recovery_and_reproof() {
+    let source = LocalSource::start();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut h = synced();
+    h.chain.source_anchors.store(true, Ordering::SeqCst);
+    let cap = capability(&source, 1, calls.clone(), cancel);
+    h.session.invisi.provenance_factory = Some(Arc::new(move |scope| {
+        assert_eq!(scope, context());
+        Ok(cap.clone())
+    }));
+    let mut operation = h
+        .session
+        .prepare_transfer(transfer(&h))
+        .unwrap()
+        .prove(&Backend, false)
+        .unwrap();
+    let id = operation.id().to_owned();
+    assert!(h.session.recover_provenance_proof(&id).unwrap().is_none());
+    let packet = operation.prove_provenance().unwrap();
+    assert_eq!(
+        h.session
+            .recover_provenance_proof(&id)
+            .unwrap()
+            .unwrap()
+            .data,
+        packet.data
+    );
+    assert_eq!(
+        h.session.reprove_provenance_proof(&id).unwrap().data,
+        packet.data
+    );
+    let before = serde_json::to_value(h.session.snapshot().unwrap()).unwrap();
+    h.session.invisi.provenance_factory =
+        Some(Arc::new(|_| Err("host provenance unavailable".into())));
+    assert!(h
+        .session
+        .recover_provenance_proof(&id)
+        .unwrap_err()
+        .contains("host provenance unavailable"));
+    assert!(h
+        .session
+        .reprove_provenance_proof(&id)
+        .unwrap_err()
+        .contains("host provenance unavailable"));
+    assert_eq!(
+        serde_json::to_value(h.session.snapshot().unwrap()).unwrap(),
+        before
+    );
+}

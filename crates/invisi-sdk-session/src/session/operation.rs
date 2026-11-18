@@ -556,7 +556,6 @@ impl Operation {
         self.prove_provenance_inner(true)
     }
     fn prove_provenance_inner(&mut self, reprove: bool) -> Result<sdk::ProvenanceProof> {
-        // Cached public evidence remains useful after the operation is consumed.
         if !reprove {
             if let Some(packet) = self.export_provenance_proof()? {
                 return Ok(packet);
@@ -575,7 +574,13 @@ impl Operation {
         }
         let staged = match self.prepared.clone_for_stage() {
             ManagedPrepared::Funds(value) => {
-                ManagedPrepared::Funds(bind_provenance_call(record, value)?)
+                let cap = self
+                    .session
+                    .provenance_capability()?
+                    .ok_or("trusted provenance capability required")?;
+                ManagedPrepared::Funds(
+                    bind_provenance_call(record, value)?.reattach_provenance(cap)?,
+                )
             }
             other => other,
         };
@@ -748,6 +753,19 @@ fn phase_status(phase: Phase) -> OperationStatus {
     }
 }
 impl WalletSession {
+    fn provenance_capability(&self) -> Result<Option<Arc<sdk::PreparedProvenance>>> {
+        self.invisi
+            .provenance
+            .clone()
+            .map(Ok)
+            .or_else(|| {
+                self.invisi
+                    .provenance_factory
+                    .as_ref()
+                    .map(|factory| factory(self.scope.context))
+            })
+            .transpose()
+    }
     pub fn register(&self, prepared: ManagedPrepared) -> Result<Operation> {
         self.register_with_preparation(prepared, None)
     }
@@ -1076,7 +1094,6 @@ impl WalletSession {
             ))
         })
     }
-    /// Recovers the public proof packet, including for completed operations, without resuming spending.
     pub fn recover_provenance_proof(&self, id: &str) -> Result<Option<sdk::ProvenanceProof>> {
         let state = self.snapshot()?;
         let record = state.operations.get(id).ok_or("operation not found")?;
@@ -1084,9 +1101,7 @@ impl WalletSession {
         match prepared {
             ManagedPrepared::Funds(v) => {
                 let cap = self
-                    .invisi
-                    .provenance
-                    .clone()
+                    .provenance_capability()?
                     .ok_or("trusted provenance capability required")?;
                 bind_provenance_call(record, v)?
                     .reattach_provenance(cap)?
@@ -1095,7 +1110,6 @@ impl WalletSession {
             ManagedPrepared::Credit(_) => Err("private Note transaction required".into()),
         }
     }
-    /// Refreshes Source evidence after restart while preserving terminal payment state.
     pub fn reprove_provenance_proof(&self, id: &str) -> Result<sdk::ProvenanceProof> {
         let mut state = self.snapshot()?;
         if state.invalidated {
@@ -1107,9 +1121,7 @@ impl WalletSession {
             return Err("private Note transaction required".into());
         };
         let cap = self
-            .invisi
-            .provenance
-            .clone()
+            .provenance_capability()?
             .ok_or("trusted provenance capability required")?;
         let value = bind_provenance_call(record, value)?.reattach_provenance(cap)?;
         let packet = value.reprove_provenance(&*self.invisi.chain)?;
@@ -1132,18 +1144,7 @@ impl WalletSession {
             return Err("saved operation deployment mismatch".into());
         }
         let mut prepared = record.snapshot.restore(&self.wallet, backend)?;
-        let capability = self
-            .invisi
-            .provenance
-            .clone()
-            .map(Ok)
-            .or_else(|| {
-                self.invisi
-                    .provenance_factory
-                    .as_ref()
-                    .map(|factory| factory(self.scope.context))
-            })
-            .transpose()?;
+        let capability = self.provenance_capability()?;
         if let Some(cap) = capability {
             match &mut prepared {
                 ManagedPrepared::Funds(v) => *v = v.clone().reattach_provenance(cap.clone())?,

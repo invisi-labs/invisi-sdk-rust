@@ -7,7 +7,7 @@ on:
       tag:
         description: Existing immutable release tag
         required: true
-        default: v1.2.5
+        default: v1.2.6
         type: string
 jobs:
   verify:

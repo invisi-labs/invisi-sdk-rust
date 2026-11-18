@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.6
+
+- Update GitHub repository and release references to the `invisi-labs` organization.
+
 ## Unreleased
 
 - Align Alloy core types and ABI bindings to 1.5.7 and consensus/EIP decoding to 1.7.3, matching the mobile App. Public Rust types and generated return types change; consumers must rebuild against the aligned dependencies.

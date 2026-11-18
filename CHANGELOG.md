@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.8
+
+- Add native receiving-key registration and recovery preparation, including registration state queries and externally authorized calls.
+- Read the registry nonce for unregistered receiving addresses so initial registration uses the current on-chain nonce.
+
 ## 1.2.7
 
 - Resolve the host-provided Provenance capabilities throughout session proof recovery.

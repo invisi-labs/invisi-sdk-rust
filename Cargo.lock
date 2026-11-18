@@ -2047,7 +2047,7 @@ dependencies = [
 
 [[package]]
 name = "invisi-sdk"
-version = "1.2.7"
+version = "1.2.8"
 dependencies = [
  "aes-gcm",
  "alloy-primitives",
@@ -2089,7 +2089,7 @@ dependencies = [
 
 [[package]]
 name = "invisi-sdk-ffi"
-version = "1.2.7"
+version = "1.2.8"
 dependencies = [
  "hex",
  "invisi-sdk-primitives",
@@ -2099,7 +2099,7 @@ dependencies = [
 
 [[package]]
 name = "invisi-sdk-ipp"
-version = "1.2.7"
+version = "1.2.8"
 dependencies = [
  "alloy-primitives",
  "chrono",
@@ -2117,7 +2117,7 @@ dependencies = [
 
 [[package]]
 name = "invisi-sdk-primitives"
-version = "1.2.7"
+version = "1.2.8"
 dependencies = [
  "aes-gcm",
  "alloy-primitives",
@@ -2138,7 +2138,7 @@ dependencies = [
 
 [[package]]
 name = "invisi-sdk-protocol"
-version = "1.2.7"
+version = "1.2.8"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
@@ -2153,7 +2153,7 @@ dependencies = [
 
 [[package]]
 name = "invisi-sdk-prover"
-version = "1.2.7"
+version = "1.2.8"
 dependencies = [
  "alloy-primitives",
  "hex",
@@ -2171,7 +2171,7 @@ dependencies = [
 
 [[package]]
 name = "invisi-sdk-rpc"
-version = "1.2.7"
+version = "1.2.8"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -2191,7 +2191,7 @@ dependencies = [
 
 [[package]]
 name = "invisi-sdk-session"
-version = "1.2.7"
+version = "1.2.8"
 dependencies = [
  "aes-gcm",
  "alloy-primitives",

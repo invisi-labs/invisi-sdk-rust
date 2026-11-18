@@ -4,7 +4,7 @@ use crate::interfaces::{
     field, CanonicalReceipt, IndexedCreditState, IndexedDelivery, LeafMetadata, NoteOutput,
 };
 use alloy_primitives::{Address, B256, U256};
-use alloy_sol_types::{SolEvent, SolEventInterface};
+use alloy_sol_types::SolEvent;
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,8 +74,6 @@ fn metadata(
         kind: kind.into(),
     })
 }
-/// The caller must obtain the receipt through an independent canonical Chain RPC.
-/// Indexed service rows are not acceptable substitutes for the complete receipt.
 pub fn decode_receipt_outputs(
     protocol_address: Address,
     receipt: &CanonicalReceipt,
@@ -95,35 +93,66 @@ pub fn decode_receipt_outputs(
         created_trees: vec![],
         events: vec![],
     };
-    let signatures = [
-        P::CommitmentsInserted::SIGNATURE_HASH,
-        P::BatchOutputs::SIGNATURE_HASH,
-        P::Shield::SIGNATURE_HASH,
-        P::Transact::SIGNATURE_HASH,
-        P::CrossTreeTransact::SIGNATURE_HASH,
-        P::CreditCreated::SIGNATURE_HASH,
-        P::CreditDraw::SIGNATURE_HASH,
-        P::CreditUpdated::SIGNATURE_HASH,
-        P::CreditRevoked::SIGNATURE_HASH,
-        P::BatchRequest::SIGNATURE_HASH,
-        P::TreeCreated::SIGNATURE_HASH,
-    ];
     let mut previous = None;
     for log in &receipt.logs {
         if previous.is_some_and(|last| last >= log.log_index) {
             return Err("canonical logs must be ordered and unique".into());
         }
         previous = Some(log.log_index);
-        if log.address != protocol_address
-            || !log
-                .topics
-                .first()
-                .is_some_and(|topic| signatures.contains(topic))
-        {
+        if log.address != protocol_address {
             continue;
         }
-        let event = P::InvisiCoreEvents::decode_raw_log(&log.topics, &log.data, true)
-            .map_err(|e| e.to_string())?;
+        let event = match log.topics.first() {
+            Some(signature) if *signature == P::CommitmentsInserted::SIGNATURE_HASH => {
+                P::CommitmentsInserted::decode_raw_log_validate(
+                    log.topics.iter().copied(),
+                    &log.data,
+                )
+                .map(P::InvisiCoreEvents::CommitmentsInserted)
+            }
+            Some(signature) if *signature == P::BatchOutputs::SIGNATURE_HASH => {
+                P::BatchOutputs::decode_raw_log_validate(log.topics.iter().copied(), &log.data)
+                    .map(P::InvisiCoreEvents::BatchOutputs)
+            }
+            Some(signature) if *signature == P::Shield::SIGNATURE_HASH => {
+                P::Shield::decode_raw_log_validate(log.topics.iter().copied(), &log.data)
+                    .map(P::InvisiCoreEvents::Shield)
+            }
+            Some(signature) if *signature == P::Transact::SIGNATURE_HASH => {
+                P::Transact::decode_raw_log_validate(log.topics.iter().copied(), &log.data)
+                    .map(P::InvisiCoreEvents::Transact)
+            }
+            Some(signature) if *signature == P::CrossTreeTransact::SIGNATURE_HASH => {
+                P::CrossTreeTransact::decode_raw_log_validate(log.topics.iter().copied(), &log.data)
+                    .map(P::InvisiCoreEvents::CrossTreeTransact)
+            }
+            Some(signature) if *signature == P::CreditCreated::SIGNATURE_HASH => {
+                P::CreditCreated::decode_raw_log_validate(log.topics.iter().copied(), &log.data)
+                    .map(P::InvisiCoreEvents::CreditCreated)
+            }
+            Some(signature) if *signature == P::CreditDraw::SIGNATURE_HASH => {
+                P::CreditDraw::decode_raw_log_validate(log.topics.iter().copied(), &log.data)
+                    .map(P::InvisiCoreEvents::CreditDraw)
+            }
+            Some(signature) if *signature == P::CreditUpdated::SIGNATURE_HASH => {
+                P::CreditUpdated::decode_raw_log_validate(log.topics.iter().copied(), &log.data)
+                    .map(P::InvisiCoreEvents::CreditUpdated)
+            }
+            Some(signature) if *signature == P::CreditRevoked::SIGNATURE_HASH => {
+                P::CreditRevoked::decode_raw_log_validate(log.topics.iter().copied(), &log.data)
+                    .map(P::InvisiCoreEvents::CreditRevoked)
+            }
+            Some(signature) if *signature == P::BatchRequest::SIGNATURE_HASH => {
+                P::BatchRequest::decode_raw_log_validate(log.topics.iter().copied(), &log.data)
+                    .map(P::InvisiCoreEvents::BatchRequest)
+            }
+            Some(signature) if *signature == P::TreeCreated::SIGNATURE_HASH => {
+                P::TreeCreated::decode_raw_log_validate(log.topics.iter().copied(), &log.data)
+                    .map(P::InvisiCoreEvents::TreeCreated)
+            }
+            _ => continue,
+        }
+        .map_err(|e| e.to_string())?;
         match &event {
             P::InvisiCoreEvents::CommitmentsInserted(value) => output.insertions.push(Insertion {
                 tree_id: tree(value.treeId)?,

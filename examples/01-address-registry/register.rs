@@ -29,7 +29,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .registry
         .ok_or("deployment must pin an address registry")?;
 
-    // Pin registry code and nonce to a canonical block before preparing registration calldata.
     let block = chain.head()?;
     if keccak256(chain.code_at(registry.address, Some(block.number))?) != registry.runtime_code_hash
     {
@@ -43,7 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         walletIdentity: identity,
     };
     let result = chain.call(registry.address, &call.abi_encode(), block.number)?;
-    let nonce = InvisiAddressRegistry::nonceOfCall::abi_decode_returns(&result, true)?._0;
+    let nonce = InvisiAddressRegistry::nonceOfCall::abi_decode_returns_validate(&result)?;
     let deadline: u64 = env::var("DEADLINE")?.parse()?;
     if deadline < block.timestamp {
         return Err("registration deadline expired".into());
@@ -64,7 +63,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             signature: Bytes::new(),
         });
 
-    // Empty authorization is valid only when the EVM transaction caller is the owner.
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({

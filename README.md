@@ -146,6 +146,8 @@ for Shield, transact and Credit; ERC20 approval is explicit SDK data.
 
 ## Examples and verification
 
+The SDK uses the Alloy 1 type family aligned with the mobile App. Exact core and consensus versions are pinned in the crate manifests. Consumers must rebuild generated ABI bindings and public Rust DTOs against these dependencies; protocol calldata and wallet wire formats are unchanged. The aligned consensus dependency requires Rust 1.91 or newer.
+
 ```sh
 cargo run -p invisi-sdk-examples --bin note-output
 cargo check -p invisi-sdk-examples --all-targets --all-features

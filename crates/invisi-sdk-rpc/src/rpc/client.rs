@@ -223,7 +223,7 @@ impl<T: RpcTransport, C: CanonicalChain> ProtocolRpcClient<T, C> {
     ) -> Result<S::Return> {
         self.canonical(block)?;
         let bytes = self.chain.call(address, &call.abi_encode(), block.number)?;
-        let result = S::abi_decode_returns(&bytes, true)
+        let result = S::abi_decode_returns_validate(&bytes)
             .map_err(|_| Error::Invalid("invalid ABI return"))?;
         self.canonical(block)?;
         Ok(result)
@@ -278,7 +278,7 @@ impl<T: RpcTransport, C: CanonicalChain> ProtocolRpcClient<T, C> {
                 },
                 block,
             )?;
-            if known._0 {
+            if known {
                 selected = Some(root);
                 break;
             }

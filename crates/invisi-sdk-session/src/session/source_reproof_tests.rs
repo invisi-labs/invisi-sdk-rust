@@ -403,7 +403,7 @@ fn first_source_proof_after_terminal_restart_binds_authoritative_main_proof_byte
     let mut state = restarted.snapshot().unwrap();
     let record = state.operations.get_mut(&id).unwrap();
     let mut saved = serde_json::to_value(&record.snapshot).unwrap();
-    let mut changed = P::transact_0Call::abi_decode(&call.data, true).unwrap();
+    let mut changed = P::transact_0Call::abi_decode_validate(&call.data).unwrap();
     changed._0 = vec![9, 9, 9].into();
     saved["provenancePacket"]["data"] = json!(format!("0x{}", hex::encode(changed.abi_encode())));
     record.snapshot = serde_json::from_value(saved).unwrap();

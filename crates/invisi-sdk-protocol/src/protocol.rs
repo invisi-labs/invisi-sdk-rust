@@ -63,10 +63,10 @@ impl ProtocolContract {
         }
     }
     pub fn decode_call(data: &[u8]) -> Result<InvisiCore::InvisiCoreCalls, String> {
-        InvisiCore::InvisiCoreCalls::abi_decode(data, true).map_err(|error| error.to_string())
+        InvisiCore::InvisiCoreCalls::abi_decode_validate(data).map_err(|error| error.to_string())
     }
     pub fn decode_return<C: SolCall>(data: &[u8]) -> Result<C::Return, String> {
-        C::abi_decode_returns(data, true).map_err(|error| error.to_string())
+        C::abi_decode_returns_validate(data).map_err(|error| error.to_string())
     }
 }
 
@@ -76,9 +76,8 @@ sol!(
     "src/protocol/abi/BroadcasterRegistry.abi.json"
 );
 
-/// Decode a concrete generated event after independently selecting the emitting contract.
 pub fn decode_event<E: SolEvent>(topics: &[B256], data: &[u8]) -> Result<E, String> {
-    E::decode_raw_log(topics.iter().copied(), data, true).map_err(|error| error.to_string())
+    E::decode_raw_log_validate(topics.iter().copied(), data).map_err(|error| error.to_string())
 }
 
 mod receipts;

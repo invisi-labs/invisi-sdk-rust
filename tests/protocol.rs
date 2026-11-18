@@ -9,7 +9,7 @@ fn current_typescript_go_calldata_roundtrips_without_abi_drift() {
     for (name, fixture) in vectors["fixtures"].as_object().unwrap() {
         if let Some(data) = fixture["calldata"].as_str() {
             let bytes = hex::decode(data.trim_start_matches("0x")).unwrap();
-            let call = InvisiCore::InvisiCoreCalls::abi_decode(&bytes, true)
+            let call = InvisiCore::InvisiCoreCalls::abi_decode_validate(&bytes)
                 .unwrap_or_else(|error| panic!("{name}: {error}"));
             assert_eq!(call.abi_encode(), bytes, "{name}");
             count += 1;
@@ -28,6 +28,19 @@ fn typed_reads_and_writes_have_explicit_destination_and_value() {
     assert_eq!(transaction.value, U256::ZERO);
     assert_eq!(transaction.data, call.abi_encode());
     assert!(ProtocolContract::new(Address::ZERO).is_err());
+}
+
+#[test]
+fn typed_returns_reject_invalid_boolean_padding() {
+    let mut encoded = [0u8; 32];
+    encoded[31] = 1;
+    assert!(ProtocolContract::decode_return::<InvisiCore::isNullifierSpentCall>(&encoded).unwrap());
+    encoded[31] = 0;
+    assert!(
+        !ProtocolContract::decode_return::<InvisiCore::isNullifierSpentCall>(&encoded).unwrap()
+    );
+    encoded[0] = 1;
+    assert!(ProtocolContract::decode_return::<InvisiCore::isNullifierSpentCall>(&encoded).is_err());
 }
 
 fn log<E: alloy_sol_types::SolEvent>(event: &E, index: u32) -> invisi_sdk::rpc::CanonicalLog {
@@ -77,6 +90,13 @@ fn canonical_receipts_preserve_omitted_note_positions_and_reject_unpaired_output
     let decoded = decode_receipt_outputs(Address::repeat_byte(1), &data).unwrap();
     assert_eq!(decoded.notes[0].leaf.leaf_index, 7);
     assert!(decoded.notes[0].delivery.ciphertext.is_empty());
+    let mut malformed = log(&insertion, 1);
+    malformed.data[0] = 1;
+    assert!(decode_receipt_outputs(
+        Address::repeat_byte(1),
+        &receipt(vec![malformed, log(&shield, 2)])
+    )
+    .is_err());
     assert!(
         decode_receipt_outputs(Address::repeat_byte(1), &receipt(vec![log(&shield, 2)])).is_err()
     );

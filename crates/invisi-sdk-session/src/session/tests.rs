@@ -732,7 +732,7 @@ fn successful_canonical_shield_reconciliation_commits_only_after_injected_app_de
         chain_id: context().chain_id,
         block: Some(block(10)),
     });
-    let parsed = P::shieldCall::abi_decode(&call.data, true).unwrap();
+    let parsed = P::shieldCall::abi_decode_validate(&call.data).unwrap();
     let event = P::Shield {
         token: parsed.p.token,
         payer: h.session.wallet.owner_address(),
@@ -3083,7 +3083,7 @@ fn signed_aggregate_defaults_recursive_and_restores_exact_request_without_reprov
     use alloy_sol_types::SolCall;
     let state = h.session.snapshot().unwrap();
     let call = state.operations[&id].call.as_ref().unwrap();
-    let member = P::transact_0Call::abi_decode(&call.data, true).unwrap();
+    let member = P::transact_0Call::abi_decode_validate(&call.data).unwrap();
     let mut outer = P::transact_1Call {
         _0: vec![1; 32].into(),
         requests: vec![member.r.clone(), member.r.clone()],

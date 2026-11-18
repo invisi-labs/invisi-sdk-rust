@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Align Alloy core types and ABI bindings to 1.5.7 and consensus/EIP decoding to 1.7.3, matching the mobile App. Public Rust types and generated return types change; consumers must rebuild against the aligned dependencies.
+- Preserve strict call, return and event ABI validation while adopting the Alloy 1 decoding APIs.
+
 ## 1.2.5
 
 - Restore required non-semantic compiler metadata for official Noir CLI execution of stripped resources without changing pinned artifact or verification-key identities.

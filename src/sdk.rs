@@ -3006,8 +3006,8 @@ impl<T: crate::rpc::RpcTransport, C: CanonicalHead> ReceivingKeyResolver
                 .call(registry.address, &call.abi_encode(), block.number)
                 .map_err(|e| e.to_string())?;
             let registered =
-                protocol::InvisiAddressRegistry::receivingKeysOfCall::abi_decode_returns(
-                    &raw, true,
+                protocol::InvisiAddressRegistry::receivingKeysOfCall::abi_decode_returns_validate(
+                    &raw,
                 )
                 .map_err(|_| "invalid receiving registry response")?;
             if registered.keys.viewingPublicKey.is_empty() {

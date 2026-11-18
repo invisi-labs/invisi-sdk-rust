@@ -152,7 +152,6 @@ impl PaymentNote {
                 &current,
             )
             .map_err(|e| e.to_string())?
-            ._0
         {
             return Err("payment note already spent".into());
         }
@@ -166,7 +165,7 @@ impl PaymentNote {
                 &current,
             )
             .map_err(|e| e.to_string())?;
-        if !known._0 {
+        if !known {
             return Err("payment note root no longer spendable".into());
         }
         canonical(&rpc.chain, &current)?;

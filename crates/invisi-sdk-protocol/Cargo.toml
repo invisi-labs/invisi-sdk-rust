@@ -11,11 +11,11 @@ include = ["Cargo.toml", "README.md", "LICENSE", "NOTICE", "src/**", "assets/**"
 
 [dependencies]
 invisi-sdk-primitives = { path = "../invisi-sdk-primitives", version = "=1.2.5" }
-alloy-primitives = { version = "0.8", features = ["serde"] }
+alloy-primitives = { version = "=1.5.7", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1.0"
 hex = "0.4"
-alloy-sol-types = { version = "0.8", features = ["json"] }
+alloy-sol-types = { version = "=1.5.7", features = ["json"] }
 sha2 = "0.10"
 ed25519-dalek = "2"

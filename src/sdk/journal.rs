@@ -396,7 +396,7 @@ impl ManagedPrepared {
     pub fn kind_deadline(&self) -> Result<(String, u64)> {
         let s = self.snapshot()?;
         let call =
-            P::InvisiCoreCalls::abi_decode(&s.unsigned_call, true).map_err(|e| e.to_string())?;
+            P::InvisiCoreCalls::abi_decode_validate(&s.unsigned_call).map_err(|e| e.to_string())?;
         let (kind, d) = match call {
             P::InvisiCoreCalls::shield(c) => ("shield", c.p.deadline),
             P::InvisiCoreCalls::transact_0(c) => ("transfer", c.r.params.deadline),
@@ -445,8 +445,8 @@ impl PreparedSnapshot {
         {
             return Err("saved construction timestamp precedes canonical anchor".into());
         }
-        let call =
-            P::InvisiCoreCalls::abi_decode(&self.unsigned_call, true).map_err(|e| e.to_string())?;
+        let call = P::InvisiCoreCalls::abi_decode_validate(&self.unsigned_call)
+            .map_err(|e| e.to_string())?;
         if call.abi_encode() != self.unsigned_call {
             return Err("noncanonical saved operation".into());
         }
@@ -929,7 +929,6 @@ impl PreparedSnapshot {
     pub fn broadcaster_execution(&self) -> Option<invisi_sdk_rpc::broadcaster::Execution> {
         self.broadcaster.as_ref().map(|s| s.quote.quote.execution)
     }
-    /// Validate retained public bytes offline; retry never regenerates a proof or reads the chain.
     pub fn export_broadcaster_submission(&self) -> Result<BroadcasterSubmission> {
         use invisi_sdk_rpc::broadcaster::{Execution, MemberProof};
         let saved = self
@@ -940,8 +939,8 @@ impl PreparedSnapshot {
         if (saved.quote.quote.execution == Execution::Aggregate) != recursive {
             return Err("broadcaster execution does not match proof target".into());
         }
-        let mut call =
-            P::InvisiCoreCalls::abi_decode(&self.unsigned_call, true).map_err(|e| e.to_string())?;
+        let mut call = P::InvisiCoreCalls::abi_decode_validate(&self.unsigned_call)
+            .map_err(|e| e.to_string())?;
         let mut member = None;
         if let Some(proof) = &self.proof {
             let owner = match &call {
@@ -1036,13 +1035,13 @@ impl PreparedSnapshot {
         }
         Ok(())
     }
-    /// Reconstructs retained final Note calldata for Source-only proof recovery.
     pub fn provenance_calldata(&self) -> Result<Option<Vec<u8>>> {
         let Some(proof) = &self.proof else {
             return Ok(None);
         };
         let P::InvisiCoreCalls::transact_0(mut call) =
-            P::InvisiCoreCalls::abi_decode(&self.unsigned_call, true).map_err(|e| e.to_string())?
+            P::InvisiCoreCalls::abi_decode_validate(&self.unsigned_call)
+                .map_err(|e| e.to_string())?
         else {
             return Ok(None);
         };
@@ -1230,10 +1229,9 @@ pub struct PreparedHistory {
     pub fee_amount: U256,
 }
 impl PreparedSnapshot {
-    /// Detached business intent only; no signatures, paths, shared keys or proving witness buffers.
     pub fn history(&self) -> Result<PreparedHistory> {
-        let call =
-            P::InvisiCoreCalls::abi_decode(&self.unsigned_call, true).map_err(|e| e.to_string())?;
+        let call = P::InvisiCoreCalls::abi_decode_validate(&self.unsigned_call)
+            .map_err(|e| e.to_string())?;
         let outputs = self
             .outputs
             .iter()

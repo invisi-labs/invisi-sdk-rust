@@ -1142,7 +1142,7 @@ impl PreparedTransaction {
         )
         .map_err(|e| e.to_string())?;
         let call =
-            InvisiCore::transact_0Call::abi_decode(&data, true).map_err(|e| e.to_string())?;
+            InvisiCore::transact_0Call::abi_decode_validate(&data).map_err(|e| e.to_string())?;
         let Plan::Transfer {
             params,
             outputs,
@@ -1229,10 +1229,9 @@ impl PreparedTransaction {
             .map_err(|_| "provenance cache lock poisoned")? = Some(packet.clone());
         Ok(packet)
     }
-    /// Retains an authoritative final call for Source-only recovery without granting normal proof export.
     pub fn with_provenance_calldata(mut self, data: Vec<u8>) -> Result<Self> {
         let call =
-            InvisiCore::transact_0Call::abi_decode(&data, true).map_err(|e| e.to_string())?;
+            InvisiCore::transact_0Call::abi_decode_validate(&data).map_err(|e| e.to_string())?;
         let Plan::Transfer {
             params,
             outputs,
@@ -1718,9 +1717,8 @@ mod tests {
     fn cached_public_packet_is_local_and_failed_reproof_preserves_it() {
         let (chain, wallet, params, _) = note_fixture();
         let (packet, trust) = cached_packet_fixture();
-        let call = InvisiCore::transact_0Call::abi_decode(
+        let call = InvisiCore::transact_0Call::abi_decode_validate(
             &hex::decode(packet.data.trim_start_matches("0x")).unwrap(),
-            true,
         )
         .unwrap();
         let mut prepared = Invisi::new(chain.clone())
@@ -1749,7 +1747,6 @@ mod tests {
             budgets: SourceReplayBudgets::default(),
         }));
         *prepared.provenance_packet.lock().unwrap() = Some(packet.clone());
-        // No main proof is installed: cache reuse must use only its public statement.
         assert!(prepared.proof.is_none());
         assert_eq!(
             prepared.prove_provenance(chain.as_ref()).unwrap().data,

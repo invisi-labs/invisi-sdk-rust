@@ -249,7 +249,7 @@ fn broadcaster_aggregate_confirmation_matches_business_member_exactly_once() {
     let rows: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/broadcaster-vectors.json")).unwrap();
     let data = hex::decode(rows[0]["data"].as_str().unwrap().trim_start_matches("0x")).unwrap();
-    let mut member = P::transact_0Call::abi_decode(&data, true).unwrap();
+    let mut member = P::transact_0Call::abi_decode_validate(&data).unwrap();
     member.r.funding.amount = alloy_primitives::U256::ZERO;
     let member_data = member.abi_encode();
     let mut outer = P::transact_1Call {
@@ -329,9 +329,8 @@ fn aggregate_rpc_sends_the_public_member_and_checks_nested_capability() {
     let rows: Value =
         serde_json::from_str(include_str!("fixtures/broadcaster-vectors.json")).unwrap();
     let row = &rows[0];
-    let mut call = P::transact_0Call::abi_decode(
+    let mut call = P::transact_0Call::abi_decode_validate(
         &hex::decode(row["data"].as_str().unwrap().trim_start_matches("0x")).unwrap(),
-        true,
     )
     .unwrap();
     call.r.funding = invisi_sdk::sdk::empty_funding();

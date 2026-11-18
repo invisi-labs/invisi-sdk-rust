@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.7
+
+- Resolve the host-provided Provenance capabilities throughout session proof recovery.
+
 ## 1.2.6
 
 - Update GitHub repository and release references to the `invisi-labs` organization.

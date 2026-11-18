@@ -33,7 +33,7 @@ class ReleaseTests(unittest.TestCase):
             buffer = io.BytesIO()
             with tarfile.open(fileobj=buffer, mode='w') as output:
                 for path, data in dict(files, LICENSE=(archive_check.ROOT / 'LICENSE').read_bytes(), NOTICE=(archive_check.ROOT / 'NOTICE').read_bytes()).items():
-                    member = tarfile.TarInfo(name + '-1.2.6/' + path)
+                    member = tarfile.TarInfo(name + '-1.2.7/' + path)
                     member.size = len(data)
                     output.addfile(member, io.BytesIO(data))
             buffer.seek(0)

@@ -135,15 +135,14 @@ impl RegistrationOperation {
             .ok_or(Error::Invalid("receiving registry deployment required"))?;
         let raw = chain.call(
             registry.address,
-            &InvisiAddressRegistry::receivingKeysOfCall {
+            &InvisiAddressRegistry::nonceOfCall {
                 walletIdentity: owner.into_word(),
             }
             .abi_encode(),
             head.number,
         )?;
-        let nonce = InvisiAddressRegistry::receivingKeysOfCall::abi_decode_returns_validate(&raw)
-            .map_err(|_| Error::Invalid("invalid receiving registry response"))?
-            .nonce;
+        let nonce = InvisiAddressRegistry::nonceOfCall::abi_decode_returns_validate(&raw)
+            .map_err(|_| Error::Invalid("invalid receiving registry response"))?;
         if nonce == u64::MAX {
             return Err(Error::Invalid("registry nonce exhausted"));
         }
@@ -200,15 +199,14 @@ impl RegistrationOperation {
         }
         let raw = chain.call(
             self.registry_address(),
-            &InvisiAddressRegistry::receivingKeysOfCall {
+            &InvisiAddressRegistry::nonceOfCall {
                 walletIdentity: self.owner.into_word(),
             }
             .abi_encode(),
             head.number,
         )?;
-        let nonce = InvisiAddressRegistry::receivingKeysOfCall::abi_decode_returns_validate(&raw)
-            .map_err(|_| Error::Invalid("invalid receiving registry response"))?
-            .nonce;
+        let nonce = InvisiAddressRegistry::nonceOfCall::abi_decode_returns_validate(&raw)
+            .map_err(|_| Error::Invalid("invalid receiving registry response"))?;
         if nonce != self.nonce {
             return Err(Error::Invalid("registry nonce changed"));
         }
@@ -518,15 +516,14 @@ impl RegistrationOperation {
         }
         let raw = chain.call(
             self.registry_address(),
-            &InvisiAddressRegistry::receivingKeysOfCall {
+            &InvisiAddressRegistry::nonceOfCall {
                 walletIdentity: self.owner.into_word(),
             }
             .abi_encode(),
             head.number,
         )?;
-        let nonce = InvisiAddressRegistry::receivingKeysOfCall::abi_decode_returns_validate(&raw)
-            .map_err(|_| Error::Invalid("invalid receiving registry response"))?
-            .nonce;
+        let nonce = InvisiAddressRegistry::nonceOfCall::abi_decode_returns_validate(&raw)
+            .map_err(|_| Error::Invalid("invalid receiving registry response"))?;
         if chain.block(head.number)? != head {
             return Err(Error::Invalid("registry canonical block changed"));
         }

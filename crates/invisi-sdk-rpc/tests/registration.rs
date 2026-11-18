@@ -54,20 +54,12 @@ impl CanonicalChain for Chain {
             bytes[..4].copy_from_slice(&[0x16, 0x26, 0xba, 0x7e]);
             return Ok(bytes);
         }
-        if data[..4] != InvisiAddressRegistry::receivingKeysOfCall::SELECTOR {
+        if data[..4] != InvisiAddressRegistry::nonceOfCall::SELECTOR {
             return Err(Error::Invalid("unexpected call"));
         }
-        Ok(
-            InvisiAddressRegistry::receivingKeysOfCall::abi_encode_returns(
-                &InvisiAddressRegistry::receivingKeysOfReturn {
-                    keys: IAddressRegistry::ReceivingKeys {
-                        viewingPublicKey: Vec::new().into(),
-                        clueKey: B256::ZERO,
-                    },
-                    nonce: self.nonce.load(Ordering::SeqCst),
-                },
-            ),
-        )
+        Ok(InvisiAddressRegistry::nonceOfCall::abi_encode_returns(
+            &self.nonce.load(Ordering::SeqCst),
+        ))
     }
 }
 impl CanonicalHead for Chain {

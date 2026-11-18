@@ -15,6 +15,69 @@ use invisi_sdk_rpc::{
     provenance_client::ProvenanceClient,
 };
 
+fn submission_quote(
+    saved: &PreparedBroadcasterState,
+    context: ProtocolContext,
+    relay: &dyn PreparedBroadcaster,
+    data: &[u8],
+    now: u64,
+) -> Result<VerifiedQuote> {
+    let trust = Trust {
+        chain_id: context.chain_id,
+        protocol: word_address(context.protocol_address)?,
+        signer: saved.signer,
+    };
+    let original = VerifiedQuote::authenticate(
+        saved.quote.clone(),
+        trust.clone(),
+        data,
+        0,
+        saved.provenance_mode(),
+    )
+    .map_err(|e| e.to_string())?;
+    let deadline = decimal(&json!(saved.quote.quote.deadline))?;
+    if deadline >= U256::from(now) {
+        return Ok(original);
+    }
+    if saved.attempted || !saved.submitted_data.is_empty() {
+        return Err("broadcaster quote expired after submission evidence was frozen".into());
+    }
+    let intent = invisi_sdk_rpc::broadcaster::decode_intent(data).map_err(|e| e.to_string())?;
+    if intent.deadline <= U256::from(now) {
+        return Err("broadcaster transaction intent expired".into());
+    }
+    let config = relay.configuration();
+    if config.endpoint != saved.endpoint
+        || config.quote_signer != saved.signer
+        || config.fee_recipient != saved.fee_recipient
+    {
+        return Err("saved broadcaster configuration mismatch".into());
+    }
+    let renewed = relay.scheduled_quote(
+        data,
+        context.chain_id,
+        trust.protocol,
+        now,
+        &saved.sidecars,
+        saved.quote.quote.schedule.as_ref(),
+    )?;
+    if renewed.signed().quote.execution != original.signed().quote.execution
+        || renewed.signed().quote.schedule != original.signed().quote.schedule
+        || renewed.signed().provenance_required != original.signed().provenance_required
+        || renewed.signed().request_hash_format != original.signed().request_hash_format
+    {
+        return Err("renewed broadcaster quote changed execution or provenance".into());
+    }
+    VerifiedQuote::authenticate(
+        renewed.signed().clone(),
+        trust,
+        data,
+        now,
+        saved.provenance_mode(),
+    )
+    .map_err(|e| e.to_string())
+}
+
 pub type ProvenanceFactory =
     Arc<dyn Fn(ProtocolContext) -> Result<Arc<PreparedProvenance>> + Send + Sync>;
 #[derive(Clone)]
@@ -867,18 +930,13 @@ impl PreparedTransaction {
         {
             return Err("prepared broadcaster submission changed".into());
         }
-        let verified = VerifiedQuote::authenticate(
-            saved.quote.clone(),
-            Trust {
-                chain_id: self.context.chain_id,
-                protocol: word_address(self.context.protocol_address)?,
-                signer: saved.signer,
-            },
+        let verified = submission_quote(
+            saved,
+            self.context,
+            relay,
             &data,
             chain.snapshot()?.timestamp,
-            saved.provenance_mode(),
-        )
-        .map_err(|e| e.to_string())?;
+        )?;
         let required = relay.submission_requirements(&verified)?;
         if required != (verified.signed().provenance_required == Some(true)) {
             return Err("broadcaster provenance requirements changed".into());
@@ -933,6 +991,7 @@ impl PreparedTransaction {
             }
         }
         let saved = self.broadcaster.as_mut().unwrap();
+        saved.quote = verified.signed().clone();
         saved.submitted_data = data;
         saved.member_proof = member;
         Ok(())
@@ -1978,6 +2037,106 @@ mod tests {
             .is_err());
         assert_eq!(prepared.phase(), Phase::Prepared);
         assert!(prepared.broadcaster_state().is_none());
+    }
+    #[test]
+    fn expired_unsubmitted_quote_renews_the_same_authorized_intent() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (chain, wallet, p, _) = note_fixture();
+        let relay = Arc::new(SignedRelay {
+            fees: AtomicUsize::new(0),
+            quotes: AtomicUsize::new(0),
+        });
+        let prepared = Invisi::new(chain.clone())
+            .prepare_shield(
+                &wallet,
+                ShieldPreparation {
+                    token: p.token,
+                    outputs: vec![NoteOutput::identity(
+                        chain.context,
+                        p.token,
+                        U256::from(123),
+                        U256::from(20),
+                    )
+                    .unwrap()],
+                    funding: abi::FundingParams {
+                        amount: U256::from(20),
+                        payer: wallet.owner_address,
+                        ..empty_funding()
+                    },
+                    fee: Fee::default(),
+                    deadline: 100,
+                },
+            )
+            .unwrap()
+            .quote_for_broadcaster(
+                chain.clone(),
+                relay.clone(),
+                &BroadcasterOptions {
+                    max_fee_amount: Some(U256::from(100)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let data = prepared.broadcaster_intent().unwrap().data;
+        let mut saved = prepared.broadcaster_state().unwrap().clone();
+        saved.quote.quote.deadline = "10".into();
+        let trust = Trust {
+            chain_id: chain.context.chain_id,
+            protocol: word_address(chain.context.protocol_address).unwrap(),
+            signer: saved.signer,
+        };
+        let key = k256::ecdsa::SigningKey::from_slice(&[17; 32]).unwrap();
+        let (sig, recovery) = key
+            .sign_prehash_recoverable(
+                invisi_sdk_rpc::broadcaster::quote_digest(&saved.quote.quote, &trust)
+                    .unwrap()
+                    .as_slice(),
+            )
+            .unwrap();
+        let mut signature = sig.to_bytes().to_vec();
+        signature.push(recovery.to_byte());
+        saved.quote.signature = hex(&signature);
+        assert_eq!(
+            submission_quote(&saved, chain.context, relay.as_ref(), &data, 9)
+                .unwrap()
+                .signed(),
+            &saved.quote
+        );
+        assert_eq!(relay.quotes.load(Ordering::SeqCst), 1);
+        let renewed = submission_quote(&saved, chain.context, relay.as_ref(), &data, 11).unwrap();
+        assert_eq!(renewed.signed().quote.deadline, "100");
+        assert_eq!(
+            renewed.signed().quote.request_hash,
+            saved.quote.quote.request_hash
+        );
+        assert_eq!(
+            renewed.signed().quote.fee_amount,
+            saved.quote.quote.fee_amount
+        );
+        assert_eq!(relay.fees.load(Ordering::SeqCst), 3);
+        assert_eq!(relay.quotes.load(Ordering::SeqCst), 2);
+        assert_eq!(saved.quote.quote.deadline, "10");
+        for attempted in [false, true] {
+            let mut frozen = saved.clone();
+            if attempted {
+                frozen.attempted = true;
+            } else {
+                frozen.submitted_data = data.clone();
+            }
+            assert!(submission_quote(&frozen, chain.context, relay.as_ref(), &data, 11).is_err());
+        }
+        assert!(
+            submission_quote(&saved, chain.context, relay.as_ref(), &data, 101)
+                .unwrap_err()
+                .contains("intent expired")
+        );
+        let mut tampered = saved.clone();
+        tampered.quote.quote.fee_amount = "3".into();
+        assert!(submission_quote(&tampered, chain.context, relay.as_ref(), &data, 11).is_err());
+        let mut foreign = saved.clone();
+        foreign.endpoint = "https://other.example".into();
+        assert!(submission_quote(&foreign, chain.context, relay.as_ref(), &data, 11).is_err());
+        assert_eq!(relay.quotes.load(Ordering::SeqCst), 2);
     }
     #[test]
     fn fee_convergence_attaches_only_final_signed_intent_and_freezes_funding() {

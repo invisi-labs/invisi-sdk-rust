@@ -396,11 +396,13 @@ pub(crate) fn verify_quote_with_hash(
         || amount >= U256::from(1) << 128
         || gas == U256::ZERO
         || deadline > intent.deadline
-        || deadline < U256::from(now)
     {
         return Err(Error::Invalid(
             "quote does not match final intent or bounds",
         ));
+    }
+    if deadline < U256::from(now) {
+        return Err(Error::Invalid("broadcaster quote expired"));
     }
     let bytes = rpc::bytes(&json!(signed.signature), 65, 65)?;
     let recovery = match bytes[64] {

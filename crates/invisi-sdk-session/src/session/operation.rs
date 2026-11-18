@@ -1132,7 +1132,19 @@ impl WalletSession {
             return Err("saved operation deployment mismatch".into());
         }
         let mut prepared = record.snapshot.restore(&self.wallet, backend)?;
-        if let Some(cap) = &self.invisi.provenance {
+        let capability = self
+            .invisi
+            .provenance
+            .clone()
+            .map(Ok)
+            .or_else(|| {
+                self.invisi
+                    .provenance_factory
+                    .as_ref()
+                    .map(|factory| factory(self.scope.context))
+            })
+            .transpose()?;
+        if let Some(cap) = capability {
             match &mut prepared {
                 ManagedPrepared::Funds(v) => *v = v.clone().reattach_provenance(cap.clone())?,
                 ManagedPrepared::Credit(v) => *v = v.clone().reattach_provenance(cap.clone())?,

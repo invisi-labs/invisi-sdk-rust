@@ -1,17 +1,20 @@
 //! Public Source JSON-RPC transport, independent of payment execution.
+use crate::rpc::{HttpTransport, RpcTransport};
 use alloy_primitives::U256;
 use invisi_sdk_protocol::provenance::{
     assert_certificate_trust, parse_integer, ProofBundle, ProofSidecar, RootCertificate,
     TrustContext,
 };
 use serde_json::{json, Value};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 pub const DEFAULT_ENDPOINT: &str = "https://provenance.invisipay.fi";
 pub struct ProvenanceClient {
-    endpoint: String,
     pub trust: TrustContext,
-    client: reqwest::blocking::Client,
+    transport: Arc<dyn RpcTransport>,
     sequence: AtomicU64,
 }
 impl ProvenanceClient {
@@ -31,16 +34,21 @@ impl ProvenanceClient {
         {
             return Err("invalid provenance endpoint".into());
         }
-        Ok(Self {
-            endpoint: endpoint.trim_end_matches('/').into(),
+        let transport = HttpTransport::new(&format!(
+            "{}/v1/chains/{}",
+            endpoint.trim_end_matches('/'),
+            trust.scope.chain_id
+        ))
+        .and_then(|v| v.with_response_limit(4 * 1024 * 1024))
+        .map_err(|e| e.to_string())?;
+        Ok(Self::with_transport(trust, Arc::new(transport)))
+    }
+    pub fn with_transport(trust: TrustContext, transport: Arc<dyn RpcTransport>) -> Self {
+        Self {
             trust,
-            client: reqwest::blocking::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(Duration::from_secs(30))
-                .build()
-                .map_err(|e| e.to_string())?,
+            transport,
             sequence: AtomicU64::new(0),
-        })
+        }
     }
     fn call(&self, method: &str, query: Option<Value>) -> Result<Value, String> {
         if let Some(q) = &query {
@@ -48,11 +56,10 @@ impl ProvenanceClient {
                 .map_err(|e| e.to_string())?;
         }
         let id = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
-        let response=self.client.post(format!("{}/v1/chains/{}",self.endpoint,self.trust.scope.chain_id)).json(&json!({"jsonrpc":"2.0","id":id,"method":method,"params":query.map(|q|vec![q]).unwrap_or_default()})).send().map_err(|e|e.to_string())?.error_for_status().map_err(|e|e.to_string())?;
-        if response.content_length().unwrap_or(0) > 4 * 1024 * 1024 {
+        let env = self.transport.send(&json!({"jsonrpc":"2.0","id":id,"method":method,"params":query.map(|q|vec![q]).unwrap_or_default()})).map_err(|e| e.to_string())?;
+        if serde_json::to_vec(&env).map_err(|e| e.to_string())?.len() > 4 * 1024 * 1024 {
             return Err("provenance response exceeds limit".into());
         }
-        let env: Value = response.json().map_err(|e| e.to_string())?;
         if env["jsonrpc"] != "2.0" || env["id"] != id {
             return Err("invalid JSON-RPC response".into());
         }
@@ -420,6 +427,32 @@ mod tests {
             signing_keys: BTreeMap::from([(U256::from(6), [0u8; 32])]),
             signing_key_validity: BTreeMap::new(),
             manifest_sha256: "a".repeat(64),
+        }
+    }
+    #[test]
+    fn host_transport_keeps_envelope_and_deployment_validation() {
+        struct Host {
+            wrong_id: bool,
+            wrong_scope: bool,
+        }
+        impl RpcTransport for Host {
+            fn send(&self, request: &Value) -> crate::rpc::Result<Value> {
+                assert_eq!(request["method"], "provenance_getStatus");
+                assert_eq!(request["params"], json!([{}]));
+                Ok(
+                    json!({"jsonrpc":"2.0","id":if self.wrong_id {json!(999)} else {request["id"].clone()},"result":{"scope":{"chainId":"1","protocolAddress":if self.wrong_scope {"3"}else{"2"}}}}),
+                )
+            }
+        }
+        for (wrong_id, wrong_scope) in [(false, false), (true, false), (false, true)] {
+            let client = ProvenanceClient::with_transport(
+                trust(),
+                Arc::new(Host {
+                    wrong_id,
+                    wrong_scope,
+                }),
+            );
+            assert_eq!(client.get_status().is_ok(), !wrong_id && !wrong_scope);
         }
     }
     fn server(result: Value) -> (String, std::thread::JoinHandle<()>) {

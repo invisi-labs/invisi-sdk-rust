@@ -4494,3 +4494,21 @@ fn explicit_import_authenticates_fresh_membership_without_supplied_path() {
     assert_eq!(state.notes[&h.commitment].input.path, expected_path);
     assert_eq!(state.notes[&h.commitment].input.root, expected_root);
 }
+
+#[test]
+fn resume_uses_host_provenance_factory_without_mutating_on_resolution_failure() {
+    let mut h = synced();
+    let operation = h.session.prepare_transfer(transfer(&h)).unwrap();
+    let id = operation.id().to_owned();
+    let revision = h.session.snapshot().unwrap().revision;
+    h.session.invisi.provenance_factory = Some(Arc::new(|scope| {
+        assert_eq!(scope, context());
+        Err("host provenance unavailable".into())
+    }));
+    assert_eq!(
+        h.session.resume(&id, None).unwrap_err().to_string(),
+        "host provenance unavailable"
+    );
+    assert_eq!(h.session.snapshot().unwrap().revision, revision);
+    operation.abandon().unwrap();
+}

@@ -14,7 +14,7 @@ import tomllib
 import urllib.error
 import urllib.request
 
-REPOSITORY = 'invisi-lab/invisi-sdk-rust'
+REPOSITORY = 'invisi-labs/invisi-sdk-rust'
 ORDER = ['invisi-sdk-primitives', 'invisi-sdk-protocol', 'invisi-sdk-prover', 'invisi-sdk-rpc', 'invisi-sdk', 'invisi-sdk-session', 'invisi-sdk-ffi', 'invisi-sdk-ipp']
 
 
@@ -77,7 +77,7 @@ def require_token():
 def request_bytes(url, attempts=6):
     for attempt in range(attempts):
         try:
-            request = urllib.request.Request(url, headers={'User-Agent': 'invisi-sdk-release/1.2.5 (+https://github.com/invisi-lab/invisi-sdk-rust)'})
+            request = urllib.request.Request(url, headers={'User-Agent': 'invisi-sdk-release/1.2.5 (+https://github.com/invisi-labs/invisi-sdk-rust)'})
             with urllib.request.urlopen(request, timeout=30) as response:
                 return response.read()
         except urllib.error.HTTPError as error:

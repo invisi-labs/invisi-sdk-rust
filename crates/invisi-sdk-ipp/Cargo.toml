@@ -3,7 +3,7 @@ name = "invisi-sdk-ipp"
 version = "1.2.5"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/invisi-lab/invisi-sdk-rust"
+repository = "https://github.com/invisi-labs/invisi-sdk-rust"
 include = ["Cargo.toml", "LICENSE", "NOTICE", "src/**", "tests/**"]
 description = "Independent IPP protocol validation and session HTTP client"
 [features]

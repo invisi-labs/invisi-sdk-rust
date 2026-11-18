@@ -3,7 +3,7 @@ name = "invisi-sdk-primitives"
 version = "1.2.5"
 edition = "2021"
 authors = ["InvisiPay team"]
-repository = "https://github.com/invisi-lab/invisi-sdk-rust"
+repository = "https://github.com/invisi-labs/invisi-sdk-rust"
 license = "Apache-2.0"
 description = "Pure field, key, commitment, wallet and delivery primitives"
 

@@ -54,10 +54,10 @@ order and wait for each preceding registry version to become available.
 ## Publish from GitHub Actions
 
 The eight packages retain the `invisi-sdk` names and version `1.2.5`.
-Publishing runs in [Release Rust SDK](https://github.com/invisi-lab/invisi-sdk-rust/actions/workflows/release.yml)
+Publishing runs in [Release Rust SDK](https://github.com/invisi-labs/invisi-sdk-rust/actions/workflows/release.yml)
 on a pushed `vMAJOR.MINOR.PATCH` tag, or a manual dispatch naming an existing tag.
 If GitHub has not registered a newly added release workflow yet, manually dispatch
-the existing [Rust SDK workflow](https://github.com/invisi-lab/invisi-sdk-rust/actions/workflows/ci.yml)
+the existing [Rust SDK workflow](https://github.com/invisi-labs/invisi-sdk-rust/actions/workflows/ci.yml)
 from the release feature branch with the same `tag` input. It invokes the reusable
 release job, which checks out the immutable tag rather than publishing branch source.
 The checked-out commit must match that tag; all eight public package versions and

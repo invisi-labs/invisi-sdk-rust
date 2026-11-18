@@ -28,7 +28,7 @@ concurrency:
 
 jobs:
   release:
-    if: github.repository == 'invisi-lab/invisi-sdk-rust'
+    if: github.repository == 'invisi-labs/invisi-sdk-rust'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -61,7 +61,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
-            echo '::error::Missing CARGO_REGISTRY_TOKEN repository Actions secret. Configure https://github.com/invisi-lab/invisi-sdk-rust/settings/secrets/actions/new before rerunning this tag.'
+            echo '::error::Missing CARGO_REGISTRY_TOKEN repository Actions secret. Configure https://github.com/invisi-labs/invisi-sdk-rust/settings/secrets/actions/new before rerunning this tag.'
             exit 1
           fi
       - name: Test release safety and module boundaries

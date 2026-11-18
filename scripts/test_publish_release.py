@@ -54,7 +54,7 @@ class ReleaseTests(unittest.TestCase):
         for name in release.ORDER:
             directory = root if name == 'invisi-sdk' else root / 'crates' / name
             directory.mkdir(parents=True, exist_ok=True)
-            (directory / 'Cargo.toml').write_text(f'[package]\nname="{name}"\nversion="1.2.0"\nrepository="https://github.com/invisi-lab/invisi-sdk-rust"\n')
+            (directory / 'Cargo.toml').write_text(f'[package]\nname="{name}"\nversion="1.2.0"\nrepository="https://github.com/invisi-labs/invisi-sdk-rust"\n')
 
     def test_rejects_wrong_repository_tag_commit_dirty_and_cohort(self):
         with tempfile.TemporaryDirectory() as temporary:

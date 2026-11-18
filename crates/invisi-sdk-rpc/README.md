@@ -7,7 +7,7 @@ which accepts ordinary preparations and managed Session operations. This module 
 its independent calldata-level `submit_transaction` and `cancel_transaction` APIs;
 access them through `client.rpc()` from the SDK wrapper.
 
-See the [workspace documentation](https://github.com/invisi-lab/invisi-sdk-rust) for usage. Licensed under Apache-2.0.
+See the [workspace documentation](https://github.com/invisi-labs/invisi-sdk-rust) for usage. Licensed under Apache-2.0.
 
 Protocol RPC exposes public Note updates and Credit transitions. Account detection and authenticated decryption stay local; no detection key is sent to the service. Status validates deployment/version pins and returns the indexed head without detection metadata.
 

@@ -22,12 +22,12 @@ for manifest in [root / 'Cargo.toml', *sorted((root / 'crates').glob('*/Cargo.to
     package = config['package']
     name = package['name']
     assert name in expected, f'Unexpected public crate: {name}'
-    assert package['version'] == '1.2.5', f'Version mismatch: {name}'
+    assert package['version'] == '1.2.6', f'Version mismatch: {name}'
     dependencies = config.get('dependencies', {})
     internal = {key for key, value in dependencies.items() if key.startswith('invisi-') or isinstance(value, dict) and value.get('package', '').startswith('invisi-')}
     assert internal == expected[name], f'{name}: dependency boundary changed: {internal}'
     for dependency in internal:
-        assert dependencies[dependency]['version'] == '=1.2.5'
+        assert dependencies[dependency]['version'] == '=1.2.6'
     if name == 'invisi-sdk-ipp':
         assert dependencies['invisi-sdk'].get('optional') is True
         assert config.get('features', {}).get('default') == []

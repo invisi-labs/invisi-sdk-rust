@@ -18,7 +18,7 @@ pub trait CanonicalChain: Send + Sync {
     fn call(&self, address: Address, data: &[u8], block: u64) -> Result<Vec<u8>>;
 }
 pub struct EthereumChain<T: RpcTransport> {
-    rpc: JsonRpc<T>,
+    pub(crate) rpc: JsonRpc<T>,
 }
 impl<T: RpcTransport> EthereumChain<T> {
     pub fn new(transport: T) -> Self {

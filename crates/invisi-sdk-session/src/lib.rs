@@ -12,3 +12,5 @@ pub use invisi_sdk_protocol::{provenance, provenance_rotation};
 pub mod provenance_recovery;
 
 pub mod public_history;
+
+pub use invisi_sdk_rpc::registration;

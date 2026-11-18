@@ -12,3 +12,5 @@ pub mod provenance_packet;
 pub use invisi_sdk_protocol::{provenance, provenance_rotation};
 
 pub mod provenance_official;
+
+pub mod registration;

@@ -67,3 +67,14 @@ verify consensus or connect to an Ethereum endpoint. It exposes no submission AP
 ## Contributing
 
 See the [contribution guidelines](../../README.md#contributing) for issues, pull requests, validation, and handling sensitive material.
+
+Receiving-key registration is exposed by `registration::RegistrationOperation` and
+re-exported through the root SDK and session crate. `prepare` pins the deployment,
+reads a canonical registry nonce, and freezes the keys and deadline. Call
+`authorize_direct` for an owner-sent transaction, or obtain `authorization` and
+attach a verified EOA/ERC-1271 signature with `with_signature`. `export_transaction`
+checks freshness again; the host still owns fees, signing and durable submission.
+After sending, use `track` and `reconcile`. Recovery uses the original transaction
+hash through `recover`, or a deployment-bound serialized public operation through
+`restore`; it never creates a second registration. Confirmation requires the
+exact transaction, canonical receipt and matching `ReceivingKeysSet` event.

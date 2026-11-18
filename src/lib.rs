@@ -15,3 +15,5 @@ pub use invisi_sdk_protocol::provenance_rotation;
 pub use invisi_sdk_prover::provenance;
 
 pub use invisi_sdk_rpc::provenance_official;
+
+pub use invisi_sdk_rpc::registration;

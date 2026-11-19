@@ -76,6 +76,11 @@ class ReleaseTests(unittest.TestCase):
                 with self.assertRaises(release.ReleaseError):
                     release.validate(root, 'v1.2.0', release.REPOSITORY)
 
+    def test_workflow_commit_pin_uses_environment_without_new_cli_arguments(self):
+        with patch.dict(release.os.environ, {'VERIFIED_COMMIT': 'a' * 40}), patch.object(release.sys, 'argv', ['publish-release.py', '--tag', 'v1.2.0', '--repository', release.REPOSITORY, '--validate-only']), patch.object(release, 'validate', return_value=('1.2.0', 'a' * 40)) as validate:
+            release.main()
+            self.assertEqual(validate.call_args.args[3], 'a' * 40)
+
     def test_rejects_tag_retargeting_after_ci_lookup(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

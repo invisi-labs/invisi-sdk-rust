@@ -180,7 +180,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--tag', required=True)
     parser.add_argument('--repository', default=os.environ.get('GITHUB_REPOSITORY', ''))
-    parser.add_argument('--expected-commit', help='Immutable commit whose CI was verified')
+    parser.add_argument('--expected-commit', default=os.environ.get('VERIFIED_COMMIT'), help='Immutable commit whose CI was verified')
     parser.add_argument('--validate-only', action='store_true')
     parser.add_argument('--target-dir', type=Path)
     parser.add_argument('--report', type=Path)

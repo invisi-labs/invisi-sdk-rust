@@ -1,7 +1,7 @@
 name: Rust SDK
 on:
   push:
-    branches: ['**']
+    branches: [develop, main]
   pull_request:
 permissions:
   contents: read

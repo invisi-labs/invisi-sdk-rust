@@ -42,7 +42,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           commit=$(git rev-parse HEAD)
-          count=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$commit&status=success&event=push&per_page=100" --jq '.workflow_runs | length')
+          count=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$commit&status=success&event=push&per_page=100" --jq '[.workflow_runs[] | select(.head_branch == "develop" or .head_branch == "main")] | length')
           if [ "$count" -gt 0 ]; then
             echo 'verified=true' >> "$GITHUB_OUTPUT"
           else

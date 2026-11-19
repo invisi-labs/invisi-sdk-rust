@@ -129,6 +129,8 @@ pub struct PreparedSnapshot {
     anchor: CanonicalBlock,
     #[serde(default)]
     constructed_at: Option<u64>,
+    #[serde(default)]
+    initial_available_credit: Option<U256>,
     unsigned_call: Vec<u8>,
     inputs: Vec<NoteInputRecord>,
     credit_inputs: Vec<CreditInputSnapshot>,
@@ -225,6 +227,7 @@ impl ManagedPrepared {
             token,
             anchor,
             constructed_at: None,
+            initial_available_credit: None,
             unsigned_call: Vec::new(),
             inputs: Vec::new(),
             credit_inputs: Vec::new(),
@@ -305,8 +308,16 @@ impl ManagedPrepared {
                     .collect();
                 s.ready = matches!(v.phase, Phase::Ready | Phase::Exported);
                 s.unsigned_call = match &v.plan {
-                    CreditPlan::Create { params, created } => {
+                    CreditPlan::Create {
+                        params,
+                        created,
+                        initial_payment,
+                    } => {
                         s.states.push(created.clone());
+                        if let Some((available, output)) = initial_payment {
+                            s.initial_available_credit = Some(*available);
+                            s.outputs.push(OutputSnapshot::capture(output));
+                        }
                         P::createCreditCall {
                             _0: Default::default(),
                             p: params.clone(),
@@ -659,8 +670,8 @@ impl PreparedSnapshot {
                     P::InvisiCoreCalls::createCredit(c) => {
                         if !c._0.is_empty()
                             || !credit_inputs.is_empty()
-                            || !outputs.is_empty()
-                            || c._2.len() != 2
+                            || outputs.len() != usize::from(c.p.hasInitialPayment)
+                            || c._2.len() != if c.p.hasInitialPayment { 3 } else { 2 }
                             || c.p.token != self.token
                             || c.p.owner != owner_address
                         {
@@ -676,15 +687,45 @@ impl PreparedSnapshot {
                             || state.revocation_shard != c.p.revocationShard
                             || state.revocation_slot != c.p.revocationSlot
                             || field_word(model(state.commitment())?) != c.p.creditCommitment
-                            || state.usage != crate::credit::CreditUsage::default()
+                            || !c.p.hasInitialPayment
+                                && state.usage != crate::credit::CreditUsage::default()
                             || c.p.deadline > U256::from(state.expiry)
                         {
                             return Err("saved initial Credit state mismatch".into());
                         }
+                        let initial_payment = if c.p.hasInitialPayment {
+                            let available = self
+                                .initial_available_credit
+                                .ok_or("saved initial available Credit required")?;
+                            let output = outputs[0].clone();
+                            if output.commitment != c.p.noteCommitment
+                                || output.amount + c.p.feeAmount != c.p.totalAmount
+                                || output.note.as_ref().is_none_or(|n| {
+                                    n.owner_address != state.spender_wallet_identity
+                                })
+                            {
+                                return Err("saved initial payment Note mismatch".into());
+                            }
+                            let mut initial = state.clone();
+                            initial.usage = Default::default();
+                            initial.available_credit = available;
+                            let expected = model(crate::credit::apply_credit_draw_usage(
+                                &initial,
+                                c.p.totalAmount,
+                                self.constructed_at.unwrap_or(self.anchor.timestamp),
+                            ))?;
+                            if expected != *state {
+                                return Err("saved initial payment usage mismatch".into());
+                            }
+                            Some((available, output))
+                        } else {
+                            None
+                        };
                         (
                             CreditPlan::Create {
                                 params: c.p,
                                 created: self.states[0].clone(),
+                                initial_payment,
                             },
                             c._2,
                         )
@@ -814,13 +855,31 @@ impl PreparedSnapshot {
                 };
                 let reprice = if self.broadcaster.is_none() {
                     match &plan {
-                        CreditPlan::Create { params, created } => {
-                            Some(CreditRepriceTemplate::Create(
-                                created.clone(),
-                                u64::try_from(params.deadline)
-                                    .map_err(|_| "saved Credit deadline overflow")?,
-                            ))
-                        }
+                        CreditPlan::Create {
+                            params,
+                            created,
+                            initial_payment,
+                        } => Some(CreditRepriceTemplate::Create(
+                            {
+                                let mut initial = created.clone();
+                                if let Some((available, _)) = initial_payment {
+                                    initial.note.available_credit = *available;
+                                    initial.note.usage = Default::default();
+                                }
+                                initial
+                            },
+                            initial_payment
+                                .as_ref()
+                                .map(|(_, output)| InitialCreditPayment {
+                                    amount: params.totalAmount,
+                                    payload: output
+                                        .note
+                                        .as_ref()
+                                        .map_or_else(Vec::new, |n| n.payload.clone()),
+                                }),
+                            u64::try_from(params.deadline)
+                                .map_err(|_| "saved Credit deadline overflow")?,
+                        )),
                         CreditPlan::Update {
                             params,
                             input,

@@ -291,12 +291,12 @@ impl WalletSession {
     ) -> Result<PendingWalletRefresh> {
         let mut candidates = BTreeMap::new();
         let mut keys = BTreeSet::new();
-        let protocol = sdk::word_address(self.scope.context.protocol_address)?;
         for receipt in &receipts {
             if !receipt.success {
                 continue;
             }
-            let decoded = protocol::decode_receipt_outputs(protocol, receipt)?;
+            let decoded =
+                protocol::decode_receipt_outputs_with_context(self.scope.context, receipt)?;
             for note in decoded.notes {
                 if note.delivery.ciphertext.is_empty() {
                     continue;
@@ -698,13 +698,11 @@ impl PendingWalletRefresh {
             if !receipt.success {
                 continue;
             }
-            let records = protocol::decode_receipt_outputs(
-                sdk::word_address(session.scope.context.protocol_address)?,
-                receipt,
-            )?;
-            for (_, event) in records.events {
-                if let P::InvisiCoreEvents::CreditDraw(event) = event {
-                    for (i, nullifier) in event.params.nullifiers.iter().enumerate() {
+            let records =
+                protocol::decode_receipt_outputs_with_context(session.scope.context, receipt)?;
+            for (log_index, event) in records.events {
+                if let P::InvisiCoreEvents::CreditStateTransition(event) = event {
+                    for (i, nullifier) in event.state.nullifiers.iter().enumerate() {
                         let predecessors = next
                             .credits
                             .values()
@@ -712,7 +710,7 @@ impl PendingWalletRefresh {
                             .cloned()
                             .collect::<Vec<_>>();
                         for previous in predecessors {
-                            let commitment = event.params.creditCommitments[i];
+                            let commitment = event.state.creditCommitments[i];
                             let key = credit_key(commitment, previous.role);
                             if next.credits.contains_key(&key) {
                                 continue;
@@ -725,7 +723,7 @@ impl PendingWalletRefresh {
                                     credit_nullifier: U256::from_be_slice(nullifier.as_slice()),
                                     state_commitment: U256::from_be_slice(commitment.as_slice()),
                                     recovery_amount: U256::from_be_slice(
-                                        event.params.recoveryAmounts[i].as_slice(),
+                                        event.state.recoveryAmounts[i].as_slice(),
                                     ),
                                 },
                             )
@@ -734,12 +732,12 @@ impl PendingWalletRefresh {
                                 block: receipt.block.clone(),
                                 tree_id: u64::try_from(event.outputTreeId)
                                     .map_err(|_| "Credit tree overflow")?,
-                                leaf_index: event.leafIndices[i],
+                                leaf_index: event.creditLeafIndices[i],
                                 commitment,
-                                token: event.params.token,
+                                token: sdk::word_address(previous.delivery.note.token_address)?,
                                 transaction_hash: receipt.transaction_hash,
-                                log_index: receipt.logs.first().map_or(0, |v| v.log_index),
-                                kind: "CreditDraw".into(),
+                                log_index,
+                                kind: "CreditStateTransition".into(),
                             };
                             insert_credit(
                                 session,

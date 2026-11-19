@@ -328,23 +328,22 @@ fn harness() -> Harness {
         startLeafIndex: 0,
         commitments: vec![commitment],
     };
-    let shield = P::Shield {
-        token: sdk::word_address(note.token_address).unwrap(),
-        payer: wallet.owner_address(),
-        amount: note.amount,
-        treeId: U256::from(1),
-        startLeafIndex: 0,
-        deliveries: vec![abi::Delivery {
+    let shield_logs = shield_receipt_logs(
+        note.token_address,
+        wallet.owner_address(),
+        note.amount,
+        U256::from(2_000_000_100u64),
+        vec![abi::Delivery {
             ciphertext: ciphertext.into(),
             clue: clue.into(),
         }],
-        deadline: U256::from(2_000_000_100u64),
-    };
+        insert.clone(),
+    );
     let receipt = CanonicalReceipt {
         transaction_hash: B256::with_last_byte(9),
         block: block(10),
         success: true,
-        logs: vec![log(&insert, 0), log(&shield, 1)],
+        logs: shield_logs,
     };
     let mut proofs = BTreeMap::new();
     proofs.insert(commitment, (1, 0, path, root));
@@ -736,16 +735,18 @@ fn successful_canonical_shield_reconciliation_commits_only_after_injected_app_de
         block: Some(block(10)),
     });
     let parsed = P::shieldCall::abi_decode_validate(&call.data).unwrap();
-    let event = P::Shield {
-        token: parsed.p.token,
-        payer: h.session.wallet.owner_address(),
-        amount: h.note.amount,
-        treeId: U256::from(1),
-        startLeafIndex: 0,
-        deliveries: parsed._2,
-        deadline: parsed.p.deadline,
-    };
-    h.source.receipt.lock().unwrap().logs[1] = log(&event, 1);
+    h.source.receipt.lock().unwrap().logs = shield_receipt_logs(
+        sdk::address_word(parsed.p.token),
+        h.session.wallet.owner_address(),
+        h.note.amount,
+        parsed.p.deadline,
+        parsed._2,
+        P::CommitmentsInserted {
+            treeId: U256::from(1),
+            startLeafIndex: 0,
+            commitments: parsed.p.noteCommitments,
+        },
+    );
     let pending = match h.session.reconcile(operation.id()).unwrap() {
         Reconciliation::Ready(v) => v,
         _ => panic!("expected reconciliation"),
@@ -957,13 +958,31 @@ fn credit_inventory_is_separate_and_canonical_draw_recovers_owned_successor_with
         feeAmount: U256::ZERO,
     };
     let draw = P::CreditDraw {
+        token: params.token,
         outputTreeId: U256::from(3),
-        params,
-        leafIndices: vec![0, 1],
-        deliveries: vec![
+        noteCommitment: params.noteCommitment,
+        noteLeafIndex: 1,
+        totalAmount: params.totalAmount,
+        deadline: params.deadline,
+        feeRecipient: params.feeRecipient,
+        feeAmount: params.feeAmount,
+        delivery: output.delivery().clone(),
+    };
+    let transition_event = P::CreditStateTransition {
+        outputTreeId: U256::from(3),
+        noteCommitment: params.noteCommitment,
+        state: abi::CreditDrawState {
+            sources: params.sources,
+            payers: params.payers,
+            grantRefs: params.grantRefs,
+            nullifiers: params.nullifiers,
+            creditCommitments: params.creditCommitments,
+            recoveryAmounts: params.recoveryAmounts,
+        },
+        creditLeafIndices: vec![0],
+        creditDeliveries: vec![
             delivery_for(&successor, CreditRole::Owner),
             delivery_for(&successor, CreditRole::Spender),
-            output.delivery().clone(),
         ],
     };
     let insertion = P::CommitmentsInserted {
@@ -974,7 +993,7 @@ fn credit_inventory_is_separate_and_canonical_draw_recovers_owned_successor_with
     {
         let mut receipt = h.source.receipt.lock().unwrap();
         receipt.transaction_hash = B256::with_last_byte(8);
-        receipt.logs = vec![log(&insertion, 2), log(&draw, 3)];
+        receipt.logs = vec![log(&insertion, 2), log(&transition_event, 3), log(&draw, 4)];
     }
     let pending = h.session.refresh(RefreshOptions::from_block(0)).unwrap();
     pending
@@ -2119,13 +2138,31 @@ fn reverse_discovery_replays_credit_successor_after_late_parent() {
         feeAmount: U256::ZERO,
     };
     let draw = P::CreditDraw {
+        token: params.token,
         outputTreeId: U256::from(3),
-        params,
-        leafIndices: vec![0, 1],
-        deliveries: vec![
+        noteCommitment: params.noteCommitment,
+        noteLeafIndex: 1,
+        totalAmount: params.totalAmount,
+        deadline: params.deadline,
+        feeRecipient: params.feeRecipient,
+        feeAmount: params.feeAmount,
+        delivery: output.delivery().clone(),
+    };
+    let transition_event = P::CreditStateTransition {
+        outputTreeId: U256::from(3),
+        noteCommitment: params.noteCommitment,
+        state: abi::CreditDrawState {
+            sources: params.sources,
+            payers: params.payers,
+            grantRefs: params.grantRefs,
+            nullifiers: params.nullifiers,
+            creditCommitments: params.creditCommitments,
+            recoveryAmounts: params.recoveryAmounts,
+        },
+        creditLeafIndices: vec![0],
+        creditDeliveries: vec![
             delivery_for(&successor, CreditRole::Owner),
             delivery_for(&successor, CreditRole::Spender),
-            output.delivery().clone(),
         ],
     };
     let insertion = P::CommitmentsInserted {
@@ -2136,7 +2173,7 @@ fn reverse_discovery_replays_credit_successor_after_late_parent() {
     {
         let mut receipt = h.source.receipt.lock().unwrap();
         receipt.transaction_hash = B256::with_last_byte(8);
-        receipt.logs = vec![log(&insertion, 2), log(&draw, 3)];
+        receipt.logs = vec![log(&insertion, 2), log(&transition_event, 3), log(&draw, 4)];
     }
     struct ParentOnly(Vec<u8>);
     impl crate::delivery::DeliveryDecryptor for ParentOnly {
@@ -3879,6 +3916,7 @@ fn session_preparation_preserves_structured_recipient_and_selection_errors() {
     let h = synced();
     let request = sdk::CreateCreditRequest {
         credit_shared_key: None,
+        initial_payment: None,
         token: sdk::word_address(h.note.token_address).unwrap(),
         spender: "invalid".into(),
         policy: crate::credit::CreditPolicy::default(),
@@ -4514,4 +4552,69 @@ fn resume_uses_host_provenance_factory_without_mutating_on_resolution_failure() 
     );
     assert_eq!(h.session.snapshot().unwrap().revision, revision);
     operation.abandon().unwrap();
+}
+
+fn shield_receipt_logs(
+    token: U256,
+    payer: Address,
+    amount: U256,
+    deadline: U256,
+    deliveries: Vec<abi::Delivery>,
+    insertion: P::CommitmentsInserted,
+) -> Vec<CanonicalLog> {
+    let token = sdk::word_address(token).unwrap();
+    let params = abi::CrossTreeTransactParams {
+        token,
+        sources: vec![],
+        nullifiers: vec![],
+        noteCommitments: insertion.commitments.clone(),
+        withdrawalAddress: Address::ZERO,
+        withdrawalAmount: U256::ZERO,
+        deadline,
+        feeRecipient: Address::ZERO,
+        feeAmount: U256::ZERO,
+    };
+    let id = crate::protocol::note_operation_id(
+        context().chain_id,
+        sdk::word_address(context().protocol_address).unwrap(),
+        0,
+        &params,
+        payer,
+        amount,
+        &deliveries,
+    )
+    .unwrap();
+    let operation = P::NoteOperation {
+        operationId: id,
+        token,
+        kind: 0,
+        outputCount: U256::from(deliveries.len()),
+        deadline,
+        feeRecipient: Address::ZERO,
+        feeAmount: U256::ZERO,
+    };
+    let deposit = P::PublicDeposit {
+        operationId: id,
+        token,
+        payer,
+        amount,
+    };
+    let mut packed = vec![];
+    for d in deliveries {
+        packed.extend_from_slice(&(d.ciphertext.len() as u16).to_be_bytes());
+        packed.extend_from_slice(&d.ciphertext);
+        packed.extend_from_slice(&d.clue);
+    }
+    let outputs = P::NoteOutputs {
+        operationId: id,
+        treeId: insertion.treeId,
+        startLeafIndex: insertion.startLeafIndex,
+        packedDeliveries: packed.into(),
+    };
+    vec![
+        log(&operation, 0),
+        log(&deposit, 1),
+        log(&insertion, 2),
+        log(&outputs, 3),
+    ]
 }

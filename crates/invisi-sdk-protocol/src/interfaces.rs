@@ -221,15 +221,7 @@ pub struct NoteOutput {
 impl NoteOutput {
     pub fn parse(v: &Value) -> Result<Self> {
         let leaf = LeafMetadata::parse(v)?;
-        if ![
-            "Shield",
-            "Transact",
-            "CrossTreeTransact",
-            "BatchOutputs",
-            "CreditDraw",
-        ]
-        .contains(&leaf.kind.as_str())
-        {
+        if !["NoteOutputs", "CreditDraw"].contains(&leaf.kind.as_str()) {
             return Err(Error::Invalid(
                 "Credit authority cannot appear in Note results",
             ));
@@ -248,7 +240,9 @@ pub struct IndexedCreditState {
 impl IndexedCreditState {
     pub fn parse(v: &Value) -> Result<Self> {
         let leaf = LeafMetadata::parse(v)?;
-        if !["CreditCreated", "CreditDraw", "CreditUpdated"].contains(&leaf.kind.as_str()) {
+        if !["CreditCreated", "CreditStateTransition", "CreditUpdated"]
+            .contains(&leaf.kind.as_str())
+        {
             return Err(Error::Invalid("invalid Credit state event"));
         }
         let d = v["deliveries"]
@@ -282,6 +276,7 @@ impl CreditTransition {
         if ![
             "CreditCreated",
             "CreditDraw",
+            "CreditStateTransition",
             "CreditUpdated",
             "CreditRevoked",
         ]

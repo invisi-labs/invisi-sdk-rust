@@ -75,7 +75,7 @@ fn confirmed() -> Value {
         "indexedHead":block(5),"status":"confirmed","reason":null,
         "output":{"block":block(2),"treeId":1,"leafIndex":0,"commitment":commitment,
             "token":Address::repeat_byte(3),"transactionHash":B256::repeat_byte(9),"logIndex":0,
-            "kind":"Shield","ciphertext":"0x","clue":"0x"},
+            "kind":"NoteOutputs","ciphertext":"0x","clue":"0x"},
         "membership":{"anchor":{"treeId":1,"root":root,"leafCount":1,"block":block(3)},
             "leafIndex":0,"commitment":commitment,"siblings":vec![B256::ZERO;TREE_DEPTH]},
         "confirmation":{"finality":"finalized","verifiedAt":block(5),"finalityHead":block(6)}})

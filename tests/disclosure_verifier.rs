@@ -100,23 +100,61 @@ fn fixture() -> (
         startLeafIndex: 7,
         commitments: vec![commitment],
     };
-    let shield = InvisiCore::Shield {
+    let params = invisi_sdk::protocol::IInvisiCore::CrossTreeTransactParams {
         token: Address::with_last_byte(2),
-        payer: Address::with_last_byte(3),
-        amount: U256::from(7),
-        treeId: U256::from(1),
-        startLeafIndex: 7,
-        deliveries: vec![Delivery {
+        sources: vec![],
+        nullifiers: vec![],
+        noteCommitments: vec![commitment],
+        withdrawalAddress: Address::ZERO,
+        withdrawalAmount: U256::ZERO,
+        deadline: U256::from(900),
+        feeRecipient: Address::ZERO,
+        feeAmount: U256::ZERO,
+    };
+    let id = invisi_sdk::protocol::note_operation_id(
+        97,
+        Address::with_last_byte(1),
+        0,
+        &params,
+        Address::with_last_byte(3),
+        U256::from(7),
+        &[Delivery {
             ciphertext: vec![].into(),
             clue: vec![].into(),
         }],
-        deadline: U256::from(900),
+    )
+    .unwrap();
+    let operation = InvisiCore::NoteOperation {
+        operationId: id,
+        token: params.token,
+        kind: 0,
+        outputCount: U256::from(1),
+        deadline: params.deadline,
+        feeRecipient: Address::ZERO,
+        feeAmount: U256::ZERO,
+    };
+    let deposit = InvisiCore::PublicDeposit {
+        operationId: id,
+        token: params.token,
+        payer: Address::with_last_byte(3),
+        amount: U256::from(7),
+    };
+    let shield = InvisiCore::NoteOutputs {
+        operationId: id,
+        treeId: U256::from(1),
+        startLeafIndex: 7,
+        packedDeliveries: vec![0, 0].into(),
     };
     let receipt = CanonicalReceipt {
         transaction_hash: B256::repeat_byte(7),
         block: block(10),
         success: true,
-        logs: vec![log(&insertion, 1), log(&shield, 2)],
+        logs: vec![
+            log(&operation, 0),
+            log(&insertion, 1),
+            log(&shield, 2),
+            log(&deposit, 3),
+        ],
     };
     let reference = DisclosureReference {
         transaction_hash: receipt.transaction_hash,

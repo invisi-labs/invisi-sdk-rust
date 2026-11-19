@@ -1493,6 +1493,7 @@ pub(crate) fn wallet_authorization_request(
     let name = match operation {
         "transact" => "Invisi.Transact.v1",
         "create-credit" => "Invisi.CreateCredit.v4",
+        "create-credit-initial-payment" => "Invisi.CreateCreditInitialPayment.v4",
         "credit-draw" => "Invisi.CreditDraw.v4",
         "update-credit" => "Invisi.UpdateCredit.v4",
         _ => return Err("unsupported wallet authorization operation".into()),
@@ -3685,13 +3686,13 @@ mod local_gas_tests {
         let ordinary = prepare(0);
         assert_eq!(
             ordinary.estimate_gas().unwrap().gas_units(),
-            Some(U256::from(1545536))
+            Some(U256::from(1550306))
         );
         let fee_paying = prepare(1);
         assert_eq!(fee_paying.phase(), Phase::Prepared);
         assert!(fee_paying.proof().is_none());
         let estimate = fee_paying.estimate_gas().unwrap();
-        assert_eq!(estimate.gas_units(), Some(U256::from(1569965)));
+        assert_eq!(estimate.gas_units(), Some(U256::from(1574735)));
     }
     #[test]
     fn prepared_note_estimate_is_local_stable_and_exact() {

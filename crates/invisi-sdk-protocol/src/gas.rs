@@ -102,6 +102,39 @@ pub fn estimate_gas(q: &Map<String, Value>) -> ModelResult<GasEstimate> {
     use serde_json::json;
     let m = model();
     let kind = q.get("kind").and_then(Value::as_str).unwrap_or("");
+    if kind == "create-credit-initial-payment"
+        || kind == "create-credit"
+            && q.get("creationAbi").and_then(Value::as_str) == Some("initial-payment")
+    {
+        let data: Value = serde_json::from_str(include_str!(
+            "../assets/gas/initial-payment-measurements.json"
+        ))
+        .map_err(|_| invalid())?;
+        let fee = flag(q, "feeEnabled", flag(q, "fee", false));
+        let row = data["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["kind"] == kind && r["feeEnabled"] == fee)
+            .ok_or_else(invalid)?;
+        let combined = kind == "create-credit-initial-payment";
+        let extra = count(q, "extraDeliveryBytes", Some(0))?
+            + 2 * count(q, "creditCiphertextBytes", Some(485))?.saturating_sub(485)
+            + if combined {
+                count(q, "noteCiphertextBytes", Some(160))?.saturating_sub(160)
+            } else {
+                0
+            }
+            + (if combined { 3 } else { 2 }) * count(q, "clueBytes", Some(68))?.saturating_sub(68);
+        return Ok(GasEstimate::Available(AvailableReference {
+            source:"benchmark".into(),available:true,gas_units:U256::from(row["gasUnits"].as_u64().unwrap())+U256::from(extra)*U256::from(32),
+            statistic:if extra==0 {"median"} else {"estimate"}.into(),sample_count:if extra==0 {3} else {0},reference_id:"initial-payment-receipt-v1".into(),
+            document:"scripts/benchmark-credit-initial-payment-gas.mjs".into(),source_sha256:data["sourceSha256"].as_str().unwrap().into(),protocol_commit:data["protocolCommit"].as_str().unwrap().into(),docs_commit:String::new(),
+            release_identity:json!({"creditManifestVersion":7,"creditFormatVersion":8,"creditManifestSha256":data["creditManifestSha256"]}),conditions:data["conditions"].as_str().unwrap().into(),
+            assumptions:vec!["Pre-signing local fee preview; not an RPC simulation or transaction gas limit.".into(),"Token behavior, storage warmth, tree cursor and rollover can change actual gas.".into(),"Additional source trees, authorization and delivery bytes use explicit benchmark-calibrated allowances.".into(),"Measured against the recorded working-tree source hash before commit.".into()],
+        }));
+    }
+
     if ![
         "shield",
         "transact",
@@ -274,16 +307,16 @@ pub fn estimate_gas(q: &Map<String, Value>) -> ModelResult<GasEstimate> {
         sample_count: if exact.is_some() { 3 } else { 0 },
         reference_id: exact.map(|(i, _)| format!("receipt-{i}"))
             .unwrap_or_else(|| format!("{kind}-benchmark-estimate-v1")),
-        document: "05-benchmarks/5.10-sdk-gas-estimation.md".into(),
-        source_sha256: m["sourceSha256"].as_str().unwrap().into(),
-        protocol_commit: m["protocolCommit"].as_str().unwrap().into(),
+        document: if kind=="draw-credit" {"test-support/gas-benchmark/measure-credit.mjs"} else {"05-benchmarks/5.10-sdk-gas-estimation.md"}.into(),
+        source_sha256: if kind=="draw-credit" {&m["creditDrawMeasurement"]["sourceSha256"]} else {&m["sourceSha256"]}.as_str().unwrap().into(),
+        protocol_commit: if kind=="draw-credit" {&m["creditDrawMeasurement"]["protocolCommit"]} else {&m["protocolCommit"]}.as_str().unwrap().into(),
         docs_commit: String::new(),
         release_identity: Value::Null,
-        conditions: "Local Anvil31337 / Prague, Solidity0.8.38 optimizer200, real verifiers, reference ERC20.".into(),
+        conditions: if kind=="draw-credit" {m["creditDrawMeasurement"]["conditions"].as_str().unwrap()} else {"Local Anvil31337 / Prague, Solidity0.8.38 optimizer200, real verifiers, reference ERC20."}.into(),
         assumptions: vec![
             "Pre-signing local fee preview; not an RPC simulation or transaction gas limit.".into(),
             "Token behavior, storage warmth, tree cursor and rollover can change actual gas.".into(),
             "Additional source trees, authorization and delivery bytes use explicit benchmark-calibrated allowances.".into(),
-        ],
+        ].into_iter().chain((kind=="draw-credit").then(||"Unified CreditDraw / CreditStateTransition receipts; measured working-tree source hash before commit.".into())).collect(),
     }))
 }

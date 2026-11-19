@@ -264,7 +264,11 @@ fn terms(v: &Value, extra: &[&str]) -> Result<()> {
         "expiresAt",
     ];
     keys.extend_from_slice(extra);
-    object(v, &keys, &[])?;
+    object(v, &keys, &["initialPayment"])?;
+    if let Some(payment) = v.get("initialPayment") {
+        object(payment, &["amount"], &[])?;
+        uint(&payment["amount"], 126, true)?;
+    }
     let s = text(&v["spender"])?;
     require(s.starts_with("0i"))?;
     invisi_sdk_primitives::address::ReceivingAddress::parse(s)
@@ -387,7 +391,6 @@ pub fn parse_payment_request(v: Value, origin: Option<&str>) -> Result<crate::Re
             "requestId",
             "optionId",
             "status",
-            "action",
             "createdAt",
             "expiresAt",
             "links",
@@ -412,8 +415,6 @@ pub fn parse_payment_request(v: Value, origin: Option<&str>) -> Result<crate::Re
     require(timestamp(&v["expiresAt"])? > timestamp(&v["createdAt"])?)?;
     object(&v["links"], &["credentials"], &[])?;
     link(&v["links"]["credentials"], "POST", origin)?;
-    object(&v["action"], &["type"], &[])?;
-    require(v["action"]["type"] == "invisi_transaction")?;
     let d = &v[m];
     if m == "payment" {
         object(
@@ -472,7 +473,7 @@ fn receipt(v: &Value, credit: bool) -> Result<()> {
             "expiresAt",
         ]);
     }
-    object(v, &keys, &[])?;
+    object(v, &keys, if credit { &["initialPayment"] } else { &[] })?;
     network(&v["network"])?;
     hex(&v["protocolAddress"], 20, true)?;
     hex(&v["transactionHash"], 32, true)?;
@@ -482,7 +483,34 @@ fn receipt(v: &Value, credit: bool) -> Result<()> {
     timestamp(&v["completedAt"])?;
     if credit {
         text(&v["creditId"])?;
-        require(v["creditStatus"] == "active")?;
+        require(
+            v["creditStatus"] == "active"
+                || v["creditStatus"] == "depleted" && v.get("initialPayment").is_some(),
+        )?;
+        if let Some(p) = v.get("initialPayment") {
+            object(
+                p,
+                &[
+                    "noteCommitment",
+                    "grossAmount",
+                    "netAmount",
+                    "feeAmount",
+                    "feeRecipient",
+                ],
+                &[],
+            )?;
+            field(&p["noteCommitment"])?;
+            require(p["noteCommitment"] != v["commitment"])?;
+            let gross = uint(&p["grossAmount"], 126, true)?;
+            let net = uint(&p["netAmount"], 126, true)?;
+            let fee = uint(&p["feeAmount"], 126, false)?;
+            hex(&p["feeRecipient"], 20, false)?;
+            let recipient = text(&p["feeRecipient"])?;
+            require(
+                gross == net + fee
+                    && (fee == U256::ZERO) == recipient[2..].bytes().all(|b| b == b'0'),
+            )?;
+        }
         hex(&v["owner"], 20, true)?;
         uint(&v["revocationShard"], 64, false)?;
         number(&v["revocationSlot"], 65535)?;
@@ -633,9 +661,46 @@ pub fn assert_request_matches_session(r: &crate::Request, s: &crate::PaymentSess
         for (k, v) in o["credit"].as_object().ok_or(Error::InvalidMessage)? {
             require(d[k] == *v)?;
         }
+        require(d.get("initialPayment") == o["credit"].get("initialPayment"))?;
     }
     Ok(())
 }
 pub(crate) fn check(ok: bool) -> Result<()> {
     require(ok)
+}
+
+pub(crate) fn assert_receipt_matches_request(
+    receipt: &Value,
+    request: &crate::Request,
+) -> Result<()> {
+    let r = &request.0;
+    let d = &r[text(&r["mode"])?];
+    for key in ["network", "protocolAddress"] {
+        require(receipt[key] == d[key])?;
+    }
+    if r["mode"] == "credit" {
+        match (d.get("initialPayment"), receipt.get("initialPayment")) {
+            (Some(terms), Some(result)) => require(terms["amount"] == result["netAmount"])?,
+            (None, None) => {}
+            _ => return Err(Error::InvalidMessage),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod initial_payment_receipt_tests {
+    use super::*;
+    #[test]
+    fn confirmed_receipt_binds_frozen_initial_payment_net() {
+        let request = crate::Request(
+            serde_json::json!({"mode":"credit","credit":{"network":"eip155:1","protocolAddress":"core","initialPayment":{"amount":"5"}}}),
+        );
+        let mut receipt = serde_json::json!({"network":"eip155:1","protocolAddress":"core","initialPayment":{"netAmount":"5"}});
+        assert!(assert_receipt_matches_request(&receipt, &request).is_ok());
+        receipt["initialPayment"]["netAmount"] = serde_json::json!("6");
+        assert!(assert_receipt_matches_request(&receipt, &request).is_err());
+        receipt.as_object_mut().unwrap().remove("initialPayment");
+        assert!(assert_receipt_matches_request(&receipt, &request).is_err());
+    }
 }

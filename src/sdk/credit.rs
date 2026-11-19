@@ -45,6 +45,7 @@ pub(crate) enum CreditPlan {
     Create {
         params: abi::CreateCreditParams,
         created: CreditDeliveryState,
+        initial_payment: Option<(U256, NoteOutput)>,
     },
     Update {
         params: abi::UpdateCreditParams,
@@ -89,7 +90,7 @@ pub struct PreparedCredit {
 }
 #[derive(Clone)]
 pub(crate) enum CreditRepriceTemplate {
-    Create(CreditDeliveryState, u64),
+    Create(CreditDeliveryState, Option<InitialCreditPayment>, u64),
     Update(CreditInput, crate::credit::CreditUpdateChanges, u64),
     Draw(Vec<CreditInput>, Wallet, u64, Vec<u8>),
     Revoke(Address, u64, u16, u64),
@@ -160,17 +161,30 @@ impl Invisi {
         deadline: u64,
         fee: Fee,
     ) -> PreparationResult<PreparedCredit> {
-        self.prepare_create_credit_explicit_internal(wallet, state, deadline, fee)
+        self.prepare_create_credit_explicit_internal(wallet, state, None, deadline, fee)
+            .map_err(|cause| InvisiError::preparation("prepare_create_credit", cause))
+    }
+    pub fn prepare_create_credit_with_initial_payment(
+        &self,
+        wallet: &Wallet,
+        state: CreditDeliveryState,
+        initial_payment: Option<InitialCreditPayment>,
+        deadline: u64,
+        fee: Fee,
+    ) -> PreparationResult<PreparedCredit> {
+        self.prepare_create_credit_explicit_internal(wallet, state, initial_payment, deadline, fee)
             .map_err(|cause| InvisiError::preparation("prepare_create_credit", cause))
     }
     fn prepare_create_credit_explicit_internal(
         &self,
         wallet: &Wallet,
-        state: CreditDeliveryState,
+        mut state: CreditDeliveryState,
+        initial_payment: Option<InitialCreditPayment>,
         deadline: u64,
         fee: Fee,
     ) -> Result<PreparedCredit> {
-        let template = CreditRepriceTemplate::Create(state.clone(), deadline);
+        let template =
+            CreditRepriceTemplate::Create(state.clone(), initial_payment.clone(), deadline);
         let reads = Arc::new(PreparationChain::new(self.chain.clone()));
         let chain = &*reads;
         let anchor = chain.snapshot()?;
@@ -195,7 +209,35 @@ impl Invisi {
         {
             return Err("Credit allocation changed".into());
         }
-        fee_balance(chain, wallet.owner_address, token, fee.amount, &anchor)?;
+        let initial_available = state.note.available_credit;
+        let payment = if let Some(payment) = initial_payment {
+            model(crate::note::uint(payment.amount, 126, "initial payment"))?;
+            if payment.amount <= fee.amount {
+                return Err("initial payment must leave a positive Note".into());
+            }
+            fee_balance(chain, wallet.owner_address, token, payment.amount, &anchor)?;
+            let spender = Wallet::from_keys(
+                word_address(state.note.spender_wallet_identity)?,
+                state.spender_receiving_keys.clone(),
+            )?;
+            let output = NoteOutput::for_recipient(
+                context,
+                token,
+                &spender,
+                payment.amount - fee.amount,
+                payment.payload,
+            )?;
+            state.note = model(crate::credit::apply_credit_draw_usage(
+                &state.note,
+                payment.amount,
+                constructed_at,
+            ))?;
+            Some((payment.amount, output))
+        } else {
+            fee_balance(chain, wallet.owner_address, token, fee.amount, &anchor)?;
+            None
+        };
+        let s = &state.note;
         let params = abi::CreateCreditParams {
             token,
             owner: wallet.owner_address,
@@ -205,8 +247,14 @@ impl Invisi {
             deadline: U256::from(deadline),
             feeRecipient: fee.recipient,
             feeAmount: fee.amount,
+            hasInitialPayment: payment.is_some(),
+            totalAmount: payment.as_ref().map_or(U256::ZERO, |p| p.0),
+            noteCommitment: payment.as_ref().map_or(B256::ZERO, |p| p.1.commitment),
         };
-        let deliveries = credit_deliveries(&state)?;
+        let mut deliveries = credit_deliveries(&state)?;
+        if let Some((_, output)) = &payment {
+            deliveries.push(output.delivery.clone());
+        }
         chain.canonical(&anchor)?;
         Ok(PreparedCredit {
             preparation_reads: Some(reads),
@@ -219,6 +267,7 @@ impl Invisi {
             plan: CreditPlan::Create {
                 params,
                 created: state,
+                initial_payment: payment.map(|(_, output)| (initial_available, output)),
             },
             deliveries,
             phase: Phase::Prepared,
@@ -619,6 +668,10 @@ impl PreparedCredit {
     pub fn output_note(&self) -> Option<&NoteOutput> {
         match &self.plan {
             CreditPlan::Draw { output, .. } => Some(output),
+            CreditPlan::Create {
+                initial_payment: Some((_, output)),
+                ..
+            } => Some(output),
             _ => None,
         }
     }
@@ -639,6 +692,14 @@ impl PreparedCredit {
     }
     fn operation(&self) -> Result<(&'static str, String, usize)> {
         Ok(match &self.plan {
+            CreditPlan::Create {
+                initial_payment: Some(_),
+                ..
+            } => (
+                "create-credit-initial-payment",
+                "create_credit_initial_payment".into(),
+                1,
+            ),
             CreditPlan::Create { .. } => ("create-credit", "create_credit".into(), 1),
             CreditPlan::Update { .. } => ("update-credit", "credit_update".into(), 1),
             CreditPlan::Draw { inputs, .. } => {
@@ -669,6 +730,15 @@ impl PreparedCredit {
                     address_word(p.feeRecipient),
                     p.feeAmount,
                 ]);
+                if p.hasInitialPayment {
+                    let (day, month) = crate::credit::credit_periods(self.constructed_at);
+                    words.extend([
+                        U256::from_be_slice(p.noteCommitment.as_slice()),
+                        p.totalAmount,
+                        U256::from(day),
+                        U256::from(month),
+                    ]);
+                }
             }
             CreditPlan::Update { params: p, .. } => {
                 words.extend([
@@ -784,14 +854,29 @@ impl PreparedCredit {
             .ok_or("Credit wallet authorization required")?;
         let mut v = json!({"public_key_x":a.spending_public_key[1..33].to_vec(),"public_key_y":a.spending_public_key[33..].to_vec(),"signature":a.signature.to_vec()});
         match &self.plan {
-            CreditPlan::Create { created, .. } => {
+            CreditPlan::Create {
+                created,
+                initial_payment,
+                ..
+            } => {
                 let s = &created.note;
                 v["spender_wallet_identity"] = json!(s.spender_wallet_identity.to_string());
                 v["credit_nonce"] = json!(s.nonce.to_string());
                 v["expiry"] = json!(s.expiry.to_string());
                 v["credit_shared_key"] = json!(s.credit_shared_key.to_string());
                 v["limits"] = json!(policy_fields(&s.policy));
-                v["available_credit"] = json!(s.available_credit.to_string());
+                v["available_credit"] = json!(initial_payment
+                    .as_ref()
+                    .map_or(s.available_credit, |p| p.0)
+                    .to_string());
+                if let Some((_, output)) = initial_payment {
+                    v["output_nonce"] = json!(output
+                        .note
+                        .as_ref()
+                        .ok_or("initial payment Note missing")?
+                        .nonce
+                        .to_string());
+                }
                 v["unlimited"] = json!(bool_field(s.unlimited));
             }
             CreditPlan::Update {
@@ -950,13 +1035,30 @@ impl PreparedCredit {
         };
         match &self.plan {
             CreditPlan::Create { params: p, .. } => {
+                if p.hasInitialPayment
+                    && !chain.historical_preparation()
+                    && crate::credit::credit_periods(block.timestamp)
+                        != crate::credit::credit_periods(self.constructed_at)
+                {
+                    return Err("initial payment Credit usage period changed".into());
+                }
                 if p.deadline < U256::from(block.timestamp)
                     || chain.credit_allocation(p.owner, p.token, &block)?
                         != (p.revocationShard, p.revocationSlot)
                 {
                     return Err("Credit create deadline or allocation changed".into());
                 }
-                fee_balance(chain, p.owner, p.token, p.feeAmount, &block)?;
+                fee_balance(
+                    chain,
+                    p.owner,
+                    p.token,
+                    if p.hasInitialPayment {
+                        p.totalAmount
+                    } else {
+                        p.feeAmount
+                    },
+                    &block,
+                )?;
                 Ok(contract.call(&InvisiCore::createCreditCall {
                     _0: proof,
                     p: p.clone(),
@@ -1107,13 +1209,18 @@ impl PreparedCredit {
     pub fn approval_requirements(&self) -> Vec<CreditApprovalRequirement> {
         match &self.plan {
             CreditPlan::Create { params, .. } => {
-                if params.feeAmount == U256::ZERO {
+                let amount = if params.hasInitialPayment {
+                    params.totalAmount
+                } else {
+                    params.feeAmount
+                };
+                if amount == U256::ZERO {
                     Vec::new()
                 } else {
                     vec![CreditApprovalRequirement {
                         token: params.token,
                         payer: params.owner,
-                        amount: params.feeAmount,
+                        amount,
                     }]
                 }
             }
@@ -1249,6 +1356,236 @@ pub struct CreditApprovalRequirement {
 #[cfg(test)]
 mod lifecycle_tests {
     #[test]
+    fn combined_fixture_matches_typescript_public_inputs_and_private_witness() {
+        use super::*;
+        let f: Value =
+            serde_json::from_str(include_str!("../../testdata/initial-payment-fixture.json"))
+                .unwrap();
+        let chain = chain();
+        let owner = wallet(1);
+        let invisi = Invisi::new(chain.clone());
+        let mut state = initial(chain.as_ref());
+        state.note.nonce = f["witness"]["credit_nonce"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        state.note.available_credit = U256::from(10);
+        state.note.policy = crate::credit::CreditPolicy {
+            single_limit: U256::from(7),
+            daily_limit: U256::from(10),
+            monthly_limit: U256::from(10),
+        };
+        let mut prepared = invisi
+            .prepare_create_credit_with_initial_payment(
+                &owner,
+                state,
+                Some(InitialCreditPayment {
+                    amount: U256::from(7),
+                    payload: vec![],
+                }),
+                2_000_000_100,
+                Fee {
+                    recipient: Address::repeat_byte(0x44),
+                    amount: U256::from(1),
+                },
+            )
+            .unwrap();
+        let output = NoteOutput::from_note(
+            Note {
+                context: chain.context(),
+                token_address: address_word(prepared.token),
+                owner_address: address_word(wallet(2).owner_address()),
+                amount: U256::from(6),
+                nonce: U256::from(8675309),
+                payload: vec![],
+            },
+            Some(wallet(2).receiving_keys()),
+        )
+        .unwrap();
+        if let CreditPlan::Create {
+            params,
+            initial_payment,
+            ..
+        } = &mut prepared.plan
+        {
+            params.noteCommitment = output.commitment;
+            initial_payment.as_mut().unwrap().1 = output;
+        }
+        prepared.deliveries = f["deliveries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| abi::Delivery {
+                ciphertext: hex::decode(d["ciphertext"].as_str().unwrap().trim_start_matches("0x"))
+                    .unwrap()
+                    .into(),
+                clue: hex::decode(d["clue"].as_str().unwrap().trim_start_matches("0x"))
+                    .unwrap()
+                    .into(),
+            })
+            .collect();
+        let expected: Vec<B256> = serde_json::from_value(f["publicInputs"].clone()).unwrap();
+        assert_eq!(
+            prepared
+                .public_inputs()
+                .unwrap()
+                .into_iter()
+                .map(field_word)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        let key = k256::ecdsa::SigningKey::from_slice(&secret(1)).unwrap();
+        let (signature, id) = key
+            .sign_prehash_recoverable(
+                prepared
+                    .export_wallet_authorization()
+                    .unwrap()
+                    .digest
+                    .as_slice(),
+            )
+            .unwrap();
+        let mut bytes = signature.to_bytes().to_vec();
+        bytes.push(id.to_byte() + 27);
+        let authorized = prepared.with_wallet_signature(&bytes).unwrap();
+        let request = authorized.proving_request().unwrap();
+        assert_eq!(
+            request.statement.circuit_name,
+            "create_credit_initial_payment"
+        );
+        let expected_private = f["witness"].clone();
+        let actual = authorized.private_inputs().unwrap();
+        for key in actual.as_object().unwrap().keys() {
+            assert_eq!(actual[key], expected_private[key], "{key}");
+        }
+        let intent = authorized.clone().broadcaster_intent();
+        assert!(intent.is_err());
+    }
+    #[test]
+    fn combined_creation_rejects_submission_after_utc_rollover() {
+        use super::*;
+        let chain = chain();
+        let owner = wallet(1);
+        let invisi = Invisi::new(chain.clone());
+        let now = chain.snapshot().unwrap().timestamp;
+        let midnight = (now / 86400 + 1) * 86400;
+        let prepared = invisi
+            .prepare_create_credit_with_initial_payment(
+                &owner,
+                initial(chain.as_ref()),
+                Some(InitialCreditPayment {
+                    amount: U256::from(7),
+                    payload: vec![],
+                }),
+                midnight + 100,
+                Fee::default(),
+            )
+            .unwrap();
+        let key = k256::ecdsa::SigningKey::from_slice(&secret(1)).unwrap();
+        let (signature, id) = key
+            .sign_prehash_recoverable(
+                prepared
+                    .export_wallet_authorization()
+                    .unwrap()
+                    .digest
+                    .as_slice(),
+            )
+            .unwrap();
+        let mut bytes = signature.to_bytes().to_vec();
+        bytes.push(id.to_byte() + 27);
+        let proved = prepared
+            .with_wallet_signature(&bytes)
+            .unwrap()
+            .prove(&SyntheticCreditBackend)
+            .unwrap();
+        assert!(proved
+            .calldata(chain.as_ref(), owner.owner_address())
+            .is_ok());
+        chain.block.lock().unwrap().timestamp = midnight;
+        assert!(proved
+            .calldata(chain.as_ref(), owner.owner_address())
+            .is_err());
+    }
+    #[test]
+    fn combined_creation_debits_gross_and_requires_full_owner_approval() {
+        use super::*;
+        let chain = chain();
+        let owner = wallet(1);
+        let invisi = Invisi::new(chain.clone());
+        let mut state = initial(chain.as_ref());
+        state.note.available_credit = U256::from(10);
+        state.note.policy = crate::credit::CreditPolicy {
+            single_limit: U256::from(7),
+            daily_limit: U256::from(10),
+            monthly_limit: U256::from(10),
+        };
+        let fee = Fee {
+            recipient: Address::repeat_byte(4),
+            amount: U256::from(1),
+        };
+        let prepared = invisi
+            .prepare_create_credit_with_initial_payment(
+                &owner,
+                state.clone(),
+                Some(InitialCreditPayment {
+                    amount: U256::from(7),
+                    payload: vec![8],
+                }),
+                2_000_000_100,
+                fee.clone(),
+            )
+            .unwrap();
+        assert_eq!(prepared.approval_requirements()[0].amount, U256::from(7));
+        assert_eq!(prepared.output_note().unwrap().amount(), U256::from(6));
+        assert_eq!(
+            prepared
+                .output_note()
+                .unwrap()
+                .note
+                .as_ref()
+                .unwrap()
+                .owner_address,
+            state.note.spender_wallet_identity
+        );
+        assert_eq!(
+            prepared.successor_states()[0].note.available_credit,
+            U256::from(3)
+        );
+        assert_eq!(
+            prepared.successor_states()[0].note.usage.total_spent,
+            U256::from(7)
+        );
+        assert_eq!(prepared.public_inputs().unwrap().len(), 18);
+        assert_eq!(
+            prepared.operation().unwrap().1,
+            "create_credit_initial_payment"
+        );
+        assert_eq!(prepared.deliveries().len(), 3);
+        let saved = journal::ManagedPrepared::Credit(prepared.clone())
+            .snapshot()
+            .unwrap();
+        let restored = match saved.restore(&owner, None).unwrap() {
+            journal::ManagedPrepared::Credit(v) => v,
+            _ => panic!("credit"),
+        };
+        assert_eq!(
+            restored.public_inputs().unwrap(),
+            prepared.public_inputs().unwrap()
+        );
+        assert!(invisi
+            .prepare_create_credit_with_initial_payment(
+                &owner,
+                state,
+                Some(InitialCreditPayment {
+                    amount: U256::from(8),
+                    payload: vec![]
+                }),
+                2_000_000_100,
+                fee
+            )
+            .is_err());
+    }
+    #[test]
     fn request_create_allocates_state_and_preserves_typed_recipient_failures() {
         use super::*;
         let chain = chain();
@@ -1257,6 +1594,7 @@ mod lifecycle_tests {
         let initial = initial(chain.as_ref());
         let request = CreateCreditRequest {
             credit_shared_key: None,
+            initial_payment: None,
             token: word_address(initial.note.token_address).unwrap(),
             spender: spender.address().unwrap(),
             policy: initial.note.policy.clone(),
@@ -2585,7 +2923,7 @@ impl PreparedCredit {
     pub fn estimate_gas(&self) -> Result<crate::gas::GasEstimate> {
         let (mut query, fee, draw) = match &self.plan {
             CreditPlan::Create { params, .. } => (
-                json!({"kind":"create-credit","scenario":"first-allocation-empty-tree"}),
+                json!({"kind":if params.hasInitialPayment {"create-credit-initial-payment"} else {"create-credit"},"creationAbi":"initial-payment","scenario":"first-allocation-empty-tree"}),
                 params.feeAmount,
                 false,
             ),

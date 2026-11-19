@@ -28,6 +28,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &wallet,
         sdk::CreateCreditRequest {
             credit_shared_key: None,
+            // Gross owner debit includes the broadcaster fee; the encrypted first Note belongs to the spender.
+            initial_payment: env::var("INITIAL_PAYMENT_GROSS")
+                .ok()
+                .map(|value| {
+                    value
+                        .parse::<U256>()
+                        .map(|amount| sdk::InitialCreditPayment {
+                            amount,
+                            payload: Vec::new(),
+                        })
+                })
+                .transpose()?,
             token,
             spender: env::var("SPENDER_ADDRESS")?,
             policy: invisi_sdk::credit::CreditPolicy::default(),

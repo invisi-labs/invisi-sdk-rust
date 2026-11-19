@@ -79,8 +79,17 @@ impl<'a, T: RpcTransport, C: CanonicalChain + ChainReceipts> DisclosureVerifier<
         {
             return Err("disclosure receipt binding mismatch".into());
         }
-        let outputs =
-            protocol::decode_receipt_outputs(self.rpc.deployment().protocol.address, &receipt)?;
+        let outputs = protocol::decode_receipt_outputs_with_context(
+            ProtocolContext {
+                chain_id: self
+                    .rpc
+                    .deployment()
+                    .chain_id()
+                    .map_err(|e| e.to_string())?,
+                protocol_address: address_word(self.rpc.deployment().protocol.address),
+            },
+            &receipt,
+        )?;
         let matches = |leaf: &crate::rpc::LeafMetadata| {
             leaf.tree_id == reference.tree_id
                 && leaf.leaf_index == reference.leaf_index as u32

@@ -1,10 +1,17 @@
 //! Request-based Credit construction keeps allocation and recovery state inside the SDK.
 use super::*;
+#[derive(Clone, Debug)]
+pub struct InitialCreditPayment {
+    /// Gross owner debit, including the actual broadcaster fee.
+    pub amount: U256,
+    pub payload: Vec<u8>,
+}
 #[derive(Clone)]
 pub struct CreateCreditRequest {
     pub token: Address,
     /// Optional caller-selected nonzero canonical field element; defaults to random.
     pub credit_shared_key: Option<U256>,
+    pub initial_payment: Option<InitialCreditPayment>,
     pub spender: String,
     pub policy: crate::credit::CreditPolicy,
     pub available_credit: U256,
@@ -123,8 +130,14 @@ impl Invisi {
                 owner_receiving_keys: wallet.receiving_keys().clone(),
                 spender_receiving_keys: spender.receiving_keys().clone(),
             };
-            self.prepare_create_credit_explicit(wallet, delivery, request.deadline, request.fee)
-                .map_err(String::from)
+            self.prepare_create_credit_with_initial_payment(
+                wallet,
+                delivery,
+                request.initial_payment,
+                request.deadline,
+                request.fee,
+            )
+            .map_err(String::from)
         };
         build().map_err(|cause| InvisiError::preparation("prepare_create_credit", cause))
     }

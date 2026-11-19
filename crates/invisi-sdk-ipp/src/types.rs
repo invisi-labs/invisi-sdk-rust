@@ -25,6 +25,8 @@ pub struct Asset {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreditTerms {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_payment: Option<InitialPaymentTerms>,
     pub spender: String,
     pub available_credit: String,
     pub unlimited: bool,
@@ -32,6 +34,20 @@ pub struct CreditTerms {
     pub daily_limit: String,
     pub monthly_limit: String,
     pub expires_at: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InitialPaymentTerms {
+    pub amount: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InitialPaymentReceipt {
+    pub note_commitment: String,
+    pub gross_amount: String,
+    pub net_amount: String,
+    pub fee_amount: String,
+    pub fee_recipient: String,
 }
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -109,6 +125,8 @@ pub struct VerificationBlock {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreditReceipt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_payment: Option<InitialPaymentReceipt>,
     #[serde(flatten)]
     pub payment: PaymentReceipt,
     pub credit_id: String,

@@ -1405,10 +1405,8 @@ impl WalletSession {
             return Err("import transaction mismatch".into());
         }
         self.invisi.chain.canonical(&receipt.block)?;
-        let decoded = crate::protocol::decode_receipt_outputs(
-            sdk::word_address(self.scope.context.protocol_address)?,
-            &receipt,
-        )?;
+        let decoded =
+            crate::protocol::decode_receipt_outputs_with_context(self.scope.context, &receipt)?;
         let commitment = sdk::field_word(input.note.commitment().map_err(|e| e.to_string())?);
         if !decoded.notes.iter().any(|n| {
             n.leaf.commitment == commitment

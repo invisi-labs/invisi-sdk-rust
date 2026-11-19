@@ -48,7 +48,7 @@ impl RpcTransport for Index {
                 json!({"apiVersion":"v1","protocolVersion":"1","deployment":deployment(),"indexedHead":block(10)})
             }
             "invisi_getNote" => {
-                json!({"output":{"block":block(10),"treeId":"1","leafIndex":0,"commitment":self.commitment,"token":Address::with_last_byte(2),"transactionHash":B256::with_last_byte(4),"logIndex":1,"kind":"Shield","ciphertext":"0x","clue":"0x"},"membership":membership})
+                json!({"output":{"block":block(10),"treeId":"1","leafIndex":0,"commitment":self.commitment,"token":Address::with_last_byte(2),"transactionHash":B256::with_last_byte(4),"logIndex":1,"kind":"NoteOutputs","ciphertext":"0x","clue":"0x"},"membership":membership})
             }
             "invisi_getRoots" => json!([anchor]),
             "invisi_getMembership" => membership,

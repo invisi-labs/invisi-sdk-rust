@@ -659,8 +659,13 @@ impl PublicHistory {
                 {
                     return Err("public receipt canonical binding mismatch".into());
                 }
-                let outputs =
-                    crate::protocol::decode_receipt_outputs(self.scope.protocol_address, &receipt)?;
+                let outputs = crate::protocol::decode_receipt_outputs_with_context(
+                    crate::note::ProtocolContext {
+                        chain_id: self.scope.chain_id,
+                        protocol_address: crate::sdk::address_word(self.scope.protocol_address),
+                    },
+                    &receipt,
+                )?;
                 for leaf in outputs
                     .notes
                     .iter()

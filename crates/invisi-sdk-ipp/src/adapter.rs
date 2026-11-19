@@ -81,6 +81,22 @@ pub fn prepare_invisi_request_with<T>(
         credit(sdk::CreateCreditRequest {
             token,
             credit_shared_key: Some(key),
+            initial_payment: if let Some(payment) = d.get("initialPayment") {
+                if (fee.amount == U256::ZERO) != (fee.recipient == Address::ZERO) {
+                    return Err(Error::InvalidMessage);
+                }
+                let net = uint(&payment["amount"], 126, true)?;
+                let gross = net.checked_add(fee.amount).ok_or(Error::InvalidMessage)?;
+                if gross >= U256::from(1) << 126 {
+                    return Err(Error::InvalidMessage);
+                }
+                Some(sdk::InitialCreditPayment {
+                    amount: gross,
+                    payload: vec![],
+                })
+            } else {
+                None
+            },
             spender: text(&d["spender"])?.into(),
             policy: invisi_sdk::credit::CreditPolicy {
                 single_limit: uint(&d["singleLimit"], 126, false)?,

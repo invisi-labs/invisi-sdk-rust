@@ -100,3 +100,55 @@ fn callback_boundary_preserves_exact_terms_without_executing_a_wallet() {
         assert_eq!(result, mode);
     }
 }
+
+#[test]
+fn initial_payment_adapter_adds_actual_fee_and_rejects_invalid_fee_or_overflow() {
+    use alloy_primitives::{Address, U256};
+    let corpus: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/ipp-wire-vectors.json")).unwrap();
+    let raw = corpus["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "credit-request")
+        .unwrap();
+    let mut value = parse_json(raw["json"].as_str().unwrap().as_bytes()).unwrap();
+    value["credit"]["initialPayment"] = serde_json::json!({"amount":"5"});
+    let context = invisi_sdk::note::ProtocolContext {
+        chain_id: 8453,
+        protocol_address: value["credit"]["protocolAddress"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap(),
+    };
+    let request = parse_payment_request(value, None).unwrap();
+    let prepare = |fee| {
+        prepare_invisi_request_with(
+            &request,
+            context,
+            0,
+            fee,
+            |_| panic!("payment"),
+            |c| Ok(c.initial_payment.unwrap().amount),
+        )
+    };
+    assert_eq!(
+        prepare(invisi_sdk::sdk::Fee {
+            recipient: Address::repeat_byte(4),
+            amount: U256::from(2)
+        })
+        .unwrap(),
+        U256::from(7)
+    );
+    assert!(prepare(invisi_sdk::sdk::Fee {
+        recipient: Address::ZERO,
+        amount: U256::from(2)
+    })
+    .is_err());
+    assert!(prepare(invisi_sdk::sdk::Fee {
+        recipient: Address::repeat_byte(4),
+        amount: (U256::from(1) << 126) - U256::from(5)
+    })
+    .is_err());
+}

@@ -67,7 +67,7 @@ fn client(
     ProtocolRpcClient::new(Transport{handler:Box::new(move|request|Ok(json!({"jsonrpc":"2.0","id":request["id"],"result":handler(request["method"].as_str().unwrap(),&request["params"])})))},Chain{reorg:Arc::new(AtomicBool::new(false))},deployment()).unwrap()
 }
 fn note() -> Value {
-    json!({"block":block(10),"treeId":"1","leafIndex":7,"commitment":B256::with_last_byte(3),"token":Address::repeat_byte(2),"transactionHash":B256::with_last_byte(4),"logIndex":1,"kind":"Shield","ciphertext":"0x","clue":"0x"})
+    json!({"block":block(10),"treeId":"1","leafIndex":7,"commitment":B256::with_last_byte(3),"token":Address::repeat_byte(2),"transactionHash":B256::with_last_byte(4),"logIndex":1,"kind":"NoteOutputs","ciphertext":"0x","clue":"0x"})
 }
 #[test]
 fn transport_rejects_substituted_envelopes_and_preserves_remote_errors() {

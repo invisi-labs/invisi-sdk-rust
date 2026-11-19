@@ -25,6 +25,7 @@ struct Layout {
 struct PublicField {
     name: String,
     count: usize,
+    #[serde(default)]
     array: bool,
 }
 fn layouts() -> Result<BTreeMap<String, Layout>> {
@@ -446,8 +447,23 @@ impl Assets for ResourceProvider {
         if statement(&s.circuit_name, &s.target, s.expected_public_inputs.clone())? != *s {
             return Err("untrusted circuit metadata".into());
         }
-        let artifact = self.load_resource(&format!("circuits/{}.json", s.circuit_name))?;
-        let key = self.load_resource(&format!("circuits/{}.{}.vk", s.circuit_name, s.target))?;
+        let mut provider = self.clone();
+        if s.circuit_name == "create_credit_initial_payment" {
+            let release: Value = serde_json::from_str(include_str!(
+                "../assets/prover/initial-payment-resource-release.json"
+            ))
+            .map_err(|_| "invalid combined circuit resource pin")?;
+            let pin = release["indexSha256"]
+                .as_str()
+                .ok_or("missing combined circuit resource pin")?;
+            if provider.options.source == resource_release_source(&provider.options.index_sha256) {
+                provider.options.source = resource_release_source(pin);
+            }
+            provider.options.index_sha256 = pin.into();
+        }
+        let artifact = provider.load_resource(&format!("circuits/{}.json", s.circuit_name))?;
+        let key =
+            provider.load_resource(&format!("circuits/{}.{}.vk", s.circuit_name, s.target))?;
         validate_assets(s, &artifact, &key)?;
         Ok((artifact, key))
     }

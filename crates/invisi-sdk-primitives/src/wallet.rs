@@ -212,6 +212,7 @@ pub fn authorization_digest(request: &Value) -> Result<[u8; 32], String> {
             ],
         ),
         "create-credit" => ("CreateCredit", &[1]),
+        "create-credit-initial-payment" => ("CreateCreditInitialPayment", &[1]),
         "credit-draw" => (
             "CreditDraw",
             &[1, 2, 3, 4, 5, 10, 20, 30, 40, 50, 60, 70, 80],

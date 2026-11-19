@@ -377,10 +377,7 @@ impl IppClient {
             assert_request_matches_session(r, &s)?;
             check(s.0["activeRequestId"] == r.0["requestId"])?;
             if !s.0["receipt"].is_null() {
-                let d = &r.0[text(&r.0["mode"])?];
-                for k in ["network", "protocolAddress"] {
-                    check(d[k] == s.0["receipt"][k])?;
-                }
+                crate::validation::assert_receipt_matches_request(&s.0["receipt"], r)?;
             }
         }
         self.retry_after =
@@ -407,10 +404,7 @@ impl IppClient {
         }
         assert_request_matches_session(&r, session)?;
         if !session.0["receipt"].is_null() {
-            let details = &r.0[text(&r.0["mode"])?];
-            for key in ["network", "protocolAddress"] {
-                check(details[key] == session.0["receipt"][key])?;
-            }
+            crate::validation::assert_receipt_matches_request(&session.0["receipt"], &r)?;
         }
         if let Some(option) = &self.option {
             check(r.0["optionId"] == *option)?;

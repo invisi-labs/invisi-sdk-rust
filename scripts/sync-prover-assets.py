@@ -20,13 +20,15 @@ def main():
     parser.add_argument('release_directory', type=Path)
     parser.add_argument('--cache', type=Path, default=ROOT / '.cache/prover-assets')
     parser.add_argument('--update-pin', action='store_true')
+    parser.add_argument('--initial-payment', action='store_true', help='Authenticate the separate combined Credit circuit set')
     args = parser.parse_args()
+    pin_path = PIN.with_name('initial-payment-resource-release.json') if args.initial_payment else PIN
     raw = (args.release_directory / 'index.json').read_bytes()
     digest = hashlib.sha256(raw).hexdigest()
     index = json.loads(raw)
     if len(raw) > 1024 * 1024 or index['format'] != 'invisi.prover-assets.v1' or index['noirVersion'] != '1.0.0' or index['bbVersion'] != '6.0.0':
         raise SystemExit('Unsupported resource index')
-    if not args.update_pin and json.loads(PIN.read_bytes())['indexSha256'] != digest:
+    if not args.update_pin and json.loads(pin_path.read_bytes())['indexSha256'] != digest:
         raise SystemExit('Untrusted index: review the release before updating its pin')
     objects = {}
     for logical, entry in index['files'].items():
@@ -47,7 +49,7 @@ def main():
         temporary.replace(args.cache / name)
     (args.cache / (digest + '.index.json')).write_bytes(raw)
     if args.update_pin:
-        PIN.write_text(json.dumps({'indexSha256': digest, 'noirVersion': '1.0.0', 'bbVersion': '6.0.0'}, separators=(',', ':')) + '\n')
+        pin_path.write_text(json.dumps({'indexSha256': digest, 'noirVersion': '1.0.0', 'bbVersion': '6.0.0'}, separators=(',', ':')) + '\n')
     print(f'Authenticated {len(index["files"])} public resources; external cache: {args.cache}; index: {digest}')
 
 

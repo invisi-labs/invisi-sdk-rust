@@ -136,12 +136,13 @@ impl PreparedCredit {
                 return Err("positive Credit relay fee required".into());
             }
             let mut candidate = match template {
-                CreditRepriceTemplate::Create(state, deadline) => runtime
-                    .prepare_create_credit_explicit(
+                CreditRepriceTemplate::Create(state, payment, deadline) => runtime
+                    .prepare_create_credit_with_initial_payment(
                         self.wallet
                             .as_ref()
                             .ok_or("complete wallet required for Credit repricing")?,
                         state.clone(),
+                        payment.clone(),
                         *deadline,
                         f,
                     )?,

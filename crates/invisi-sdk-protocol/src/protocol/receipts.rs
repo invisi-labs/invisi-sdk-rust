@@ -110,60 +110,71 @@ pub fn decode_receipt_outputs(
                 )
                 .map(P::InvisiCoreEvents::CommitmentsInserted)
             }
-            Some(signature) if *signature == P::BatchOutputs::SIGNATURE_HASH => {
-                P::BatchOutputs::decode_raw_log_validate(log.topics.iter().copied(), &log.data)
-                    .map(P::InvisiCoreEvents::BatchOutputs)
+            Some(signature) if *signature == P::TreeCreated::SIGNATURE_HASH => {
+                P::TreeCreated::decode_raw_log_validate(log.topics.iter().copied(), &log.data)
+                    .map(P::InvisiCoreEvents::TreeCreated)
             }
-            Some(signature) if *signature == P::Shield::SIGNATURE_HASH => {
-                P::Shield::decode_raw_log_validate(log.topics.iter().copied(), &log.data)
-                    .map(P::InvisiCoreEvents::Shield)
+            Some(signature) if *signature == P::NoteOperation::SIGNATURE_HASH => {
+                P::NoteOperation::decode_raw_log_validate(log.topics.iter().copied(), &log.data)
+                    .map(P::InvisiCoreEvents::NoteOperation)
             }
-            Some(signature) if *signature == P::Transact::SIGNATURE_HASH => {
-                P::Transact::decode_raw_log_validate(log.topics.iter().copied(), &log.data)
-                    .map(P::InvisiCoreEvents::Transact)
+            Some(signature) if *signature == P::NoteOutputs::SIGNATURE_HASH => {
+                P::NoteOutputs::decode_raw_log_validate(log.topics.iter().copied(), &log.data)
+                    .map(P::InvisiCoreEvents::NoteOutputs)
             }
-            Some(signature) if *signature == P::CrossTreeTransact::SIGNATURE_HASH => {
-                P::CrossTreeTransact::decode_raw_log_validate(log.topics.iter().copied(), &log.data)
-                    .map(P::InvisiCoreEvents::CrossTreeTransact)
+            Some(signature) if *signature == P::NoteStateTransition::SIGNATURE_HASH => {
+                P::NoteStateTransition::decode_raw_log_validate(
+                    log.topics.iter().copied(),
+                    &log.data,
+                )
+                .map(P::InvisiCoreEvents::NoteStateTransition)
+            }
+            Some(signature) if *signature == P::PublicDeposit::SIGNATURE_HASH => {
+                P::PublicDeposit::decode_raw_log_validate(log.topics.iter().copied(), &log.data)
+                    .map(P::InvisiCoreEvents::PublicDeposit)
+            }
+            Some(signature) if *signature == P::PublicWithdrawal::SIGNATURE_HASH => {
+                P::PublicWithdrawal::decode_raw_log_validate(log.topics.iter().copied(), &log.data)
+                    .map(P::InvisiCoreEvents::PublicWithdrawal)
+            }
+            Some(signature) if *signature == P::TransactAggregated::SIGNATURE_HASH => {
+                P::TransactAggregated::decode_raw_log_validate(
+                    log.topics.iter().copied(),
+                    &log.data,
+                )
+                .map(P::InvisiCoreEvents::TransactAggregated)
             }
             Some(signature) if *signature == P::CreditCreated::SIGNATURE_HASH => {
                 P::CreditCreated::decode_raw_log_validate(log.topics.iter().copied(), &log.data)
                     .map(P::InvisiCoreEvents::CreditCreated)
             }
+            Some(signature) if *signature == P::CreditUpdated::SIGNATURE_HASH => {
+                P::CreditUpdated::decode_raw_log_validate(log.topics.iter().copied(), &log.data)
+                    .map(P::InvisiCoreEvents::CreditUpdated)
+            }
             Some(signature) if *signature == P::CreditDraw::SIGNATURE_HASH => {
                 P::CreditDraw::decode_raw_log_validate(log.topics.iter().copied(), &log.data)
                     .map(P::InvisiCoreEvents::CreditDraw)
             }
-            Some(signature) if *signature == P::CreditUpdated::SIGNATURE_HASH => {
-                P::CreditUpdated::decode_raw_log_validate(log.topics.iter().copied(), &log.data)
-                    .map(P::InvisiCoreEvents::CreditUpdated)
+            Some(signature) if *signature == P::CreditStateTransition::SIGNATURE_HASH => {
+                P::CreditStateTransition::decode_raw_log_validate(
+                    log.topics.iter().copied(),
+                    &log.data,
+                )
+                .map(P::InvisiCoreEvents::CreditStateTransition)
             }
             Some(signature) if *signature == P::CreditRevoked::SIGNATURE_HASH => {
                 P::CreditRevoked::decode_raw_log_validate(log.topics.iter().copied(), &log.data)
                     .map(P::InvisiCoreEvents::CreditRevoked)
             }
-            Some(signature) if *signature == P::BatchRequest::SIGNATURE_HASH => {
-                P::BatchRequest::decode_raw_log_validate(log.topics.iter().copied(), &log.data)
-                    .map(P::InvisiCoreEvents::BatchRequest)
-            }
-            Some(signature) if *signature == P::TreeCreated::SIGNATURE_HASH => {
-                P::TreeCreated::decode_raw_log_validate(log.topics.iter().copied(), &log.data)
-                    .map(P::InvisiCoreEvents::TreeCreated)
-            }
             _ => continue,
         }
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| error.to_string())?;
         match &event {
             P::InvisiCoreEvents::CommitmentsInserted(value) => output.insertions.push(Insertion {
                 tree_id: tree(value.treeId)?,
                 start_leaf_index: value.startLeafIndex,
                 commitments: value.commitments.clone(),
-                log_index: log.log_index,
-            }),
-            P::InvisiCoreEvents::BatchOutputs(value) => output.insertions.push(Insertion {
-                tree_id: tree(value.treeId)?,
-                start_leaf_index: value.startLeafIndex,
-                commitments: value.noteCommitments.clone(),
                 log_index: log.log_index,
             }),
             P::InvisiCoreEvents::TreeCreated(value) => {
@@ -201,6 +212,7 @@ pub fn decode_receipt_outputs(
             }
         }
     }
+    let mut claimed = std::collections::HashSet::new();
     for (log_index, event) in &output.events {
         let note =
             |id, index, commitment, token, value: &Delivery, kind| -> Result<NoteOutput, String> {
@@ -229,14 +241,46 @@ pub fn decode_receipt_outputs(
             })
         };
         match event {
-            P::InvisiCoreEvents::BatchOutputs(value) => {
-                let id = tree(value.treeId)?;
-                if value.tokens.len() != value.noteCommitments.len() {
-                    return Err("batch token dimensions differ".into());
+            P::InvisiCoreEvents::NoteOutputs(value) => {
+                let operation = output
+                    .events
+                    .iter()
+                    .filter_map(|(_, event)| match event {
+                        P::InvisiCoreEvents::NoteOperation(op)
+                            if op.operationId == value.operationId =>
+                        {
+                            Some(op)
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if operation.len() != 1 {
+                    return Err("missing or duplicate Note operation".into());
                 }
-                let packed = &value.packedDeliveries;
+                let operation = operation[0];
+                let count =
+                    usize::try_from(operation.outputCount).map_err(|_| "output count overflow")?;
+                if count == 0 || count > 190 {
+                    return Err("invalid Note output count".into());
+                }
+                let id = tree(value.treeId)?;
+                let matching = output
+                    .insertions
+                    .iter()
+                    .filter(|insertion| {
+                        insertion.tree_id == id
+                            && value.startLeafIndex >= insertion.start_leaf_index
+                            && u64::from(value.startLeafIndex) + count as u64
+                                <= u64::from(insertion.start_leaf_index)
+                                    + insertion.commitments.len() as u64
+                    })
+                    .count();
+                if matching != 1 {
+                    return Err("output range has no unique matching insertion".into());
+                }
                 let mut offset = 0usize;
-                for (i, commitment) in value.noteCommitments.iter().enumerate() {
+                for i in 0..count {
+                    let packed = &value.packedDeliveries;
                     let prefix = packed
                         .get(offset..offset + 2)
                         .ok_or("truncated delivery length")?;
@@ -247,90 +291,40 @@ pub fn decode_receipt_outputs(
                     }
                     let ciphertext = packed
                         .get(offset..offset + length)
-                        .ok_or("truncated delivery ciphertext")?;
+                        .ok_or("truncated ciphertext")?;
                     offset += length;
                     let clue = if length == 0 {
                         &[][..]
                     } else {
-                        let clue = packed
-                            .get(offset..offset + 68)
-                            .ok_or("truncated delivery clue")?;
+                        let clue = packed.get(offset..offset + 68).ok_or("truncated clue")?;
                         offset += 68;
                         clue
                     };
-                    output.notes.push(note(
-                        id,
-                        value.startLeafIndex + i as u32,
-                        *commitment,
-                        value.tokens[i],
-                        &Delivery {
-                            ciphertext: ciphertext.to_vec().into(),
-                            clue: clue.to_vec().into(),
-                        },
-                        "BatchOutputs",
-                    )?);
-                }
-                if offset != packed.len() {
-                    return Err("trailing packed delivery data".into());
-                }
-            }
-            P::InvisiCoreEvents::Shield(value) => {
-                let id = tree(value.treeId)?;
-                if lengths.get(&(id, value.startLeafIndex)) != Some(&value.deliveries.len()) {
-                    return Err("Shield deliveries do not match insertion length".into());
-                }
-                for (i, value_delivery) in value.deliveries.iter().enumerate() {
-                    let index = value.startLeafIndex + i as u32;
-                    let commitment = *inserted
-                        .get(&(id, index))
-                        .ok_or("missing Shield insertion")?;
+                    let index = value
+                        .startLeafIndex
+                        .checked_add(i as u32)
+                        .ok_or("leaf overflow")?;
+                    if !claimed.insert((id, index)) {
+                        return Err("overlapping output ranges".into());
+                    }
+                    let commitment = *inserted.get(&(id, index)).ok_or("missing insertion")?;
                     output.notes.push(note(
                         id,
                         index,
                         commitment,
-                        value.token,
-                        value_delivery,
-                        "Shield",
+                        operation.token,
+                        &Delivery {
+                            ciphertext: ciphertext.to_vec().into(),
+                            clue: clue.to_vec().into(),
+                        },
+                        "NoteOutputs",
                     )?);
                 }
-            }
-            P::InvisiCoreEvents::Transact(value) => {
-                output.nullifiers.extend_from_slice(&value.nullifiers);
-                if value.noteCommitments.len() != value.leafIndices.len()
-                    || value.noteCommitments.len() != value.deliveries.len()
-                {
-                    return Err("Transact output dimensions differ".into());
-                }
-                for (i, commitment) in value.noteCommitments.iter().enumerate() {
-                    output.notes.push(note(
-                        tree(value.outputTreeId)?,
-                        value.leafIndices[i],
-                        *commitment,
-                        value.token,
-                        &value.deliveries[i],
-                        "Transact",
-                    )?);
+                if offset != value.packedDeliveries.len() {
+                    return Err("trailing packed delivery data".into());
                 }
             }
-            P::InvisiCoreEvents::CrossTreeTransact(value) => {
-                output.nullifiers.extend_from_slice(&value.nullifiers);
-                if value.noteCommitments.len() != value.leafIndices.len()
-                    || value.noteCommitments.len() != value.deliveries.len()
-                {
-                    return Err("CrossTreeTransact output dimensions differ".into());
-                }
-                for (i, commitment) in value.noteCommitments.iter().enumerate() {
-                    output.notes.push(note(
-                        tree(value.outputTreeId)?,
-                        value.leafIndices[i],
-                        *commitment,
-                        value.token,
-                        &value.deliveries[i],
-                        "CrossTreeTransact",
-                    )?);
-                }
-            }
-            P::InvisiCoreEvents::BatchRequest(value) => {
+            P::InvisiCoreEvents::NoteStateTransition(value) => {
                 output.nullifiers.extend_from_slice(&value.nullifiers)
             }
             P::InvisiCoreEvents::CreditCreated(value) => output.credits.push(credit(
@@ -353,45 +347,255 @@ pub fn decode_receipt_outputs(
                 )?);
             }
             P::InvisiCoreEvents::CreditDraw(value) => {
-                let p = &value.params;
+                output.notes.push(note(
+                    tree(value.outputTreeId)?,
+                    value.noteLeafIndex,
+                    value.noteCommitment,
+                    value.token,
+                    &value.delivery,
+                    "CreditDraw",
+                )?);
+            }
+            P::InvisiCoreEvents::CreditStateTransition(value) => {
+                let p = &value.state;
                 let n = p.creditCommitments.len();
                 if n == 0
                     || p.nullifiers.len() != n
                     || p.recoveryAmounts.len() != n
-                    || value.leafIndices.len() != n + 1
-                    || value.deliveries.len() != 2 * n + 1
+                    || value.creditLeafIndices.len() != n
+                    || value.creditDeliveries.len() != 2 * n
                 {
-                    return Err("CreditDraw state and Note dimensions differ".into());
+                    return Err("Credit state dimensions differ".into());
+                }
+                let results = output
+                    .events
+                    .iter()
+                    .filter_map(|(_, event)| match event {
+                        P::InvisiCoreEvents::CreditDraw(draw)
+                            if draw.outputTreeId == value.outputTreeId
+                                && draw.noteCommitment == value.noteCommitment =>
+                        {
+                            Some(draw)
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if results.len() != 1 {
+                    return Err("Credit transition requires unique draw result".into());
                 }
                 output.credit_nullifiers.extend_from_slice(&p.nullifiers);
-                let id = tree(value.outputTreeId)?;
                 for (i, commitment) in p.creditCommitments.iter().enumerate() {
-                    if *commitment == B256::ZERO {
-                        return Err("zero successor Credit state".into());
-                    }
                     output.credits.push(credit(
-                        id,
-                        value.leafIndices[i],
+                        tree(value.outputTreeId)?,
+                        value.creditLeafIndices[i],
                         *commitment,
-                        p.token,
-                        &value.deliveries[2 * i..2 * i + 2],
-                        "CreditDraw",
+                        results[0].token,
+                        &value.creditDeliveries[2 * i..2 * i + 2],
+                        "CreditStateTransition",
                     )?);
                 }
-                output.notes.push(note(
-                    id,
-                    value.leafIndices[n],
-                    p.noteCommitment,
-                    p.token,
-                    &value.deliveries[2 * n],
-                    "CreditDraw",
-                )?);
             }
             _ => {}
+        }
+    }
+    let mut positions = std::collections::HashSet::new();
+    for leaf in output
+        .notes
+        .iter()
+        .map(|v| &v.leaf)
+        .chain(output.credits.iter().map(|v| &v.leaf))
+    {
+        if !positions.insert((leaf.tree_id, leaf.leaf_index)) {
+            return Err("overlapping financial output positions".into());
         }
     }
     for nullifier in output.nullifiers.iter().chain(&output.credit_nullifiers) {
         field(*nullifier).map_err(|e| e.to_string())?;
     }
+    validate_operations(&output, None)?;
     Ok(output)
+}
+
+/// Decode and authenticate operation IDs against the deployment's chain domain.
+pub fn decode_receipt_outputs_with_context(
+    context: invisi_sdk_primitives::note::ProtocolContext,
+    receipt: &CanonicalReceipt,
+) -> Result<ReceiptOutputs, String> {
+    let address = Address::from_slice(&context.protocol_address.to_be_bytes::<32>()[12..]);
+    let outputs = decode_receipt_outputs(address, receipt)?;
+    validate_operations(&outputs, Some((context.chain_id, address)))?;
+    Ok(outputs)
+}
+
+fn validate_operations(
+    outputs: &ReceiptOutputs,
+    domain: Option<(u64, Address)>,
+) -> Result<(), String> {
+    use super::IInvisiCore::CrossTreeTransactParams;
+    use alloy_primitives::keccak256;
+    use alloy_sol_types::SolValue;
+    use std::collections::HashSet;
+    let mut operations = HashSet::new();
+    let mut members = HashSet::new();
+    for (index, event) in &outputs.events {
+        let P::InvisiCoreEvents::NoteOperation(op) = event else {
+            continue;
+        };
+        if !operations.insert(op.operationId)
+            || op.kind > 1
+            || op.token == Address::ZERO
+            || op.deadline >= U256::from(1) << 64
+            || op.feeAmount >= U256::from(1) << 128
+            || (op.feeAmount == U256::ZERO) != (op.feeRecipient == Address::ZERO)
+        {
+            return Err("invalid or duplicate Note operation".into());
+        }
+        let mut params = CrossTreeTransactParams {
+            token: op.token,
+            sources: vec![],
+            nullifiers: vec![],
+            noteCommitments: vec![],
+            withdrawalAddress: Address::ZERO,
+            withdrawalAmount: U256::ZERO,
+            deadline: op.deadline,
+            feeRecipient: op.feeRecipient,
+            feeAmount: op.feeAmount,
+        };
+        let mut payer = Address::ZERO;
+        let mut amount = U256::ZERO;
+        let mut deliveries = Vec::new();
+        let mut seen = HashSet::new();
+        for (event_index, event) in &outputs.events {
+            let kind = match event {
+                P::InvisiCoreEvents::NoteOutputs(v) if v.operationId == op.operationId => {
+                    let tree = tree(v.treeId)?;
+                    for note in outputs.notes.iter().filter(|n| {
+                        n.leaf.kind == "NoteOutputs"
+                            && n.leaf.tree_id == tree
+                            && n.leaf.log_index == *event_index
+                    }) {
+                        params.noteCommitments.push(note.leaf.commitment);
+                        deliveries.push(Delivery {
+                            ciphertext: note.delivery.ciphertext.clone().into(),
+                            clue: note.delivery.clue.clone().into(),
+                        });
+                    }
+                    "outputs"
+                }
+                P::InvisiCoreEvents::NoteStateTransition(v) if v.operationId == op.operationId => {
+                    params.sources = v.sources.clone();
+                    params.nullifiers = v.nullifiers.clone();
+                    let mut last = U256::ZERO;
+                    if op.kind != 1
+                        || v.nullifiers.is_empty()
+                        || v.sources.is_empty()
+                        || v.sources.len() > v.nullifiers.len()
+                    {
+                        return Err("invalid Note transition".into());
+                    }
+                    let mut nullifiers = HashSet::new();
+                    for n in &v.nullifiers {
+                        if !nullifiers.insert(n) {
+                            return Err("duplicate Note nullifier".into());
+                        }
+                    }
+                    for source in &v.sources {
+                        if source.treeId <= last
+                            || source.treeId >= U256::from(1) << 64
+                            || source.merkleRoot == B256::ZERO
+                        {
+                            return Err("invalid source order".into());
+                        }
+                        last = source.treeId;
+                    }
+                    "state"
+                }
+                P::InvisiCoreEvents::PublicDeposit(v) if v.operationId == op.operationId => {
+                    if v.token != op.token
+                        || v.amount == U256::ZERO
+                        || v.amount >= U256::from(1) << 128
+                        || v.payer == Address::ZERO
+                    {
+                        return Err("invalid public deposit".into());
+                    }
+                    payer = v.payer;
+                    amount = v.amount;
+                    "deposit"
+                }
+                P::InvisiCoreEvents::PublicWithdrawal(v) if v.operationId == op.operationId => {
+                    if v.token != op.token
+                        || v.amount == U256::ZERO
+                        || v.amount >= U256::from(1) << 128
+                        || v.recipient == Address::ZERO
+                    {
+                        return Err("invalid public withdrawal".into());
+                    }
+                    params.withdrawalAddress = v.recipient;
+                    params.withdrawalAmount = v.amount;
+                    "withdrawal"
+                }
+                _ => continue,
+            };
+            if !seen.insert(kind) {
+                return Err("duplicate operation fact".into());
+            }
+        }
+        if U256::from(deliveries.len()) != op.outputCount
+            || op.outputCount > U256::from(190)
+            || op.kind == 0
+                && (deliveries.is_empty()
+                    || deliveries.len() > 10
+                    || !params.nullifiers.is_empty()
+                    || amount == U256::ZERO
+                    || params.withdrawalAmount != U256::ZERO)
+            || op.kind == 1 && params.nullifiers.is_empty() && amount == U256::ZERO
+        {
+            return Err("invalid Note operation funding or output count".into());
+        }
+        if let Some((chain, address)) = domain {
+            let actual = keccak256(
+                (
+                    keccak256("Invisi.NoteOperation.v1"),
+                    U256::from(chain),
+                    address,
+                    U256::from(op.kind),
+                    params,
+                    payer,
+                    amount,
+                    keccak256((deliveries,).abi_encode_params()),
+                )
+                    .abi_encode_params(),
+            );
+            if actual != op.operationId {
+                return Err("Note operation hash mismatch".into());
+            }
+        }
+        let _ = index;
+    }
+    for (index, event) in &outputs.events {
+        match event {
+            P::InvisiCoreEvents::TransactAggregated(v) => {
+                if v.operationIds.is_empty() || v.operationIds.len() > 5 {
+                    return Err("invalid aggregate membership".into());
+                }
+                for id in &v.operationIds {
+                    if !members.insert(id) || !outputs.events.iter().any(|(i,e)|*i<*index && matches!(e,P::InvisiCoreEvents::NoteOperation(op) if op.operationId==*id && op.kind==1)) {return Err("invalid aggregate member".into());}
+                }
+            }
+            P::InvisiCoreEvents::NoteOutputs(v) if !operations.contains(&v.operationId) => {
+                return Err("orphan Note outputs".into())
+            }
+            P::InvisiCoreEvents::NoteStateTransition(v) if !operations.contains(&v.operationId) => {
+                return Err("orphan Note transition".into())
+            }
+            P::InvisiCoreEvents::PublicDeposit(v) if !operations.contains(&v.operationId) => {
+                return Err("orphan public deposit".into())
+            }
+            P::InvisiCoreEvents::PublicWithdrawal(v) if !operations.contains(&v.operationId) => {
+                return Err("orphan public withdrawal".into())
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }

@@ -92,6 +92,17 @@ let call = ready.calldata(&chain, caller)?;
 
 ## Note and Credit
 
+`CreateCreditRequest.initial_payment` optionally combines creation with a first encrypted
+payment to the spender. `InitialCreditPayment.amount` is the gross owner debit including
+the actual fee; all Credit limits and available authority count that gross amount. The
+owner signs once, the remaining grant and first Note share one proof, and both are
+available through the normal managed Session and portable output APIs. IPP's
+`credit.initialPayment.amount` is the merchant net amount; its adapter adds the local fee.
+The creation example accepts `INITIAL_PAYMENT_GROSS`. Combined circuit resources use a
+separate authenticated pin and the existing lazy cache, explicit directory and offline
+settings; no circuit assets are bundled. `legacy_create_credit_call` retains explicit
+encoding for pure creation against legacy deployments.
+
 Notes use envelope `0x01`. Credit uses `0x82`, finite `availableCredit`, a canonical
 `unlimited` flag, three limits and gross usage counters. Create/update/revoke fees are
 pulled from the owner allowance; draw collects gross amounts, deducts its fee and issues

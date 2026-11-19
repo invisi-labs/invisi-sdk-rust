@@ -82,3 +82,78 @@ pub fn decode_event<E: SolEvent>(topics: &[B256], data: &[u8]) -> Result<E, Stri
 
 mod receipts;
 pub use receipts::*;
+
+// Explicit compatibility for deployments exposing the pre-initial-payment creation ABI.
+sol! {
+    #[derive(Debug, Default, PartialEq, Eq, Hash)]
+    struct LegacyCreateCreditParams {
+        address token; address owner; uint64 revocationShard; uint16 revocationSlot;
+        bytes32 creditCommitment; uint256 deadline; address feeRecipient; uint256 feeAmount;
+    }
+    #[derive(Debug, Default, PartialEq, Eq, Hash)]
+    struct LegacyCreditDelivery { bytes ciphertext; bytes clue; }
+    #[sol(all_derives)]
+    interface LegacyCreditCreation {
+        function createCredit(bytes proof, LegacyCreateCreditParams p, LegacyCreditDelivery[] deliveries) external;
+    }
+}
+/// Encode legacy pure creation explicitly. Initial payments require the current ABI.
+pub fn legacy_create_credit_call(
+    proof: alloy_primitives::Bytes,
+    p: &IInvisiCore::CreateCreditParams,
+    deliveries: &[IInvisiCore::Delivery],
+) -> Result<LegacyCreditCreation::createCreditCall, String> {
+    if p.hasInitialPayment || p.totalAmount != U256::ZERO || p.noteCommitment != B256::ZERO {
+        return Err("initial payment requires current creation ABI".into());
+    }
+    Ok(LegacyCreditCreation::createCreditCall {
+        proof,
+        p: LegacyCreateCreditParams {
+            token: p.token,
+            owner: p.owner,
+            revocationShard: p.revocationShard,
+            revocationSlot: p.revocationSlot,
+            creditCommitment: p.creditCommitment,
+            deadline: p.deadline,
+            feeRecipient: p.feeRecipient,
+            feeAmount: p.feeAmount,
+        },
+        deliveries: deliveries
+            .iter()
+            .map(|v| LegacyCreditDelivery {
+                ciphertext: v.ciphertext.clone(),
+                clue: v.clue.clone(),
+            })
+            .collect(),
+    })
+}
+
+/// Deterministic public Note operation identity; proof and funding authorization are excluded.
+pub fn note_operation_id(
+    chain_id: u64,
+    core: Address,
+    kind: u8,
+    params: &IInvisiCore::CrossTreeTransactParams,
+    payer: Address,
+    amount: U256,
+    deliveries: &[IInvisiCore::Delivery],
+) -> Result<B256, String> {
+    use alloy_primitives::keccak256;
+    use alloy_sol_types::SolValue;
+    if kind > 1 {
+        return Err("unsupported Note operation kind".into());
+    }
+    Ok(keccak256(
+        (
+            keccak256("Invisi.NoteOperation.v1"),
+            U256::from(chain_id),
+            core,
+            U256::from(kind),
+            params.clone(),
+            payer,
+            amount,
+            keccak256((deliveries.to_vec(),).abi_encode_params()),
+        )
+            .abi_encode_params(),
+    ))
+}

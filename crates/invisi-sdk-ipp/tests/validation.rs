@@ -45,3 +45,24 @@ fn checkout_input_enforces_terms_and_allows_expired_replay() {
     invalid["unexpected"] = json!(true);
     assert!(parse_checkout_input(invalid).is_err());
 }
+
+#[test]
+fn invisi_request_uses_method_and_terms_without_action() {
+    let vectors: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/ipp-wire-vectors.json")).unwrap();
+    let case = vectors["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|case| {
+            let raw = case["json"].as_str().unwrap_or("");
+            raw.contains("payment_request") && case["valid"].as_bool().unwrap_or(false)
+        })
+        .unwrap_or(&vectors["cases"][1]);
+    let mut request: serde_json::Value =
+        serde_json::from_str(case["json"].as_str().unwrap()).unwrap();
+    request.as_object_mut().unwrap().remove("action");
+    assert!(invisi_sdk_ipp::parse_payment_request(request.clone(), None).is_ok());
+    request["action"] = json!({"type":"invisi_transaction"});
+    assert!(invisi_sdk_ipp::parse_payment_request(request, None).is_err());
+}

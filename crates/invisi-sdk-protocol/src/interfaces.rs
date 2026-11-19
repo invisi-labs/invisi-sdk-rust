@@ -240,8 +240,13 @@ pub struct IndexedCreditState {
 impl IndexedCreditState {
     pub fn parse(v: &Value) -> Result<Self> {
         let leaf = LeafMetadata::parse(v)?;
-        if !["CreditCreated", "CreditStateTransition", "CreditUpdated"]
-            .contains(&leaf.kind.as_str())
+        if ![
+            "CreditCreated",
+            "CreditDraw",
+            "CreditStateTransition",
+            "CreditUpdated",
+        ]
+        .contains(&leaf.kind.as_str())
         {
             return Err(Error::Invalid("invalid Credit state event"));
         }

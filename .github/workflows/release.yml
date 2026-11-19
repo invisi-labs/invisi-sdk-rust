@@ -32,6 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       verified: ${{ steps.lookup.outputs.verified }}
+      commit: ${{ steps.lookup.outputs.commit }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -42,6 +43,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           commit=$(git rev-parse HEAD)
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
           count=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$commit&status=success&event=push&per_page=100" --jq '[.workflow_runs[] | select(.head_branch == "develop" or .head_branch == "main")] | length')
           if [ "$count" -gt 0 ]; then
             echo 'verified=true' >> "$GITHUB_OUTPUT"
@@ -53,22 +55,23 @@ jobs:
     if: needs.previous.outputs.verified != 'true'
     uses: ./.github/workflows/verify.yml
     with:
-      ref: ${{ inputs.tag || github.ref }}
+      ref: ${{ needs.previous.outputs.commit }}
   release:
     needs: [previous, verify]
-    if: always() && needs.previous.result == 'success' && (needs.verify.result == 'success' || (needs.verify.result == 'skipped' && needs.previous.outputs.verified == 'true')) && github.repository == 'invisi-labs/invisi-sdk-rust'
+    if: ${{ !cancelled() && needs.previous.result == 'success' && (needs.verify.result == 'success' || (needs.verify.result == 'skipped' && needs.previous.outputs.verified == 'true')) && github.repository == 'invisi-labs/invisi-sdk-rust' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
       contents: write
     env:
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      VERIFIED_COMMIT: ${{ needs.previous.outputs.commit }}
       CARGO_TERM_COLOR: always
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ needs.previous.outputs.commit }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@v6
@@ -79,7 +82,7 @@ jobs:
           toolchain: '1.94.0'
           components: rustfmt, clippy
       - name: Validate repository, tag and eight-crate version cohort
-        run: python3 scripts/publish-release.py --tag "$RELEASE_TAG" --validate-only
+        run: python3 scripts/publish-release.py --tag "$RELEASE_TAG" --expected-commit "$VERIFIED_COMMIT" --validate-only
       - name: Validate complete versioned release notes
         run: |
           python3 scripts/release-notes.py "$RELEASE_TAG" --output "$RUNNER_TEMP/release-notes.md"
@@ -99,7 +102,7 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          python3 scripts/publish-release.py --tag "$RELEASE_TAG" \
+          python3 scripts/publish-release.py --tag "$RELEASE_TAG" --expected-commit "$VERIFIED_COMMIT" \
             --target-dir "$GITHUB_WORKSPACE/target" \
             --report "$RUNNER_TEMP/invisi-release-checksums.json"
       - name: Retain registry integrity report

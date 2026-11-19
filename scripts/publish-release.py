@@ -31,7 +31,7 @@ def git(root, *args):
     return subprocess.check_output(['git', *args], cwd=root, text=True).strip()
 
 
-def validate(root, tag, repository):
+def validate(root, tag, repository, expected_commit=None):
     if repository != REPOSITORY:
         raise ReleaseError(f'Release repository must be {REPOSITORY}')
     match = re.fullmatch(r'v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)', tag)
@@ -39,6 +39,8 @@ def validate(root, tag, repository):
         raise ReleaseError('Release tag must be a stable vMAJOR.MINOR.PATCH version')
     version = tag[1:]
     commit = git(root, 'rev-parse', 'HEAD')
+    if expected_commit is not None and commit != expected_commit:
+        raise ReleaseError('Checked-out commit does not match the verified CI commit')
     tagged = git(root, 'rev-parse', f'refs/tags/{tag}^{{commit}}')
     if tagged != commit:
         raise ReleaseError('Checked-out commit does not match the release tag')
@@ -178,12 +180,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--tag', required=True)
     parser.add_argument('--repository', default=os.environ.get('GITHUB_REPOSITORY', ''))
+    parser.add_argument('--expected-commit', help='Immutable commit whose CI was verified')
     parser.add_argument('--validate-only', action='store_true')
     parser.add_argument('--target-dir', type=Path)
     parser.add_argument('--report', type=Path)
     options = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
-    version, commit = validate(root, options.tag, options.repository)
+    version, commit = validate(root, options.tag, options.repository, options.expected_commit)
     print(f'Validated {options.tag}: eight crates at clean commit {commit}', flush=True)
     if options.validate_only:
         return

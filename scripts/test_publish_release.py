@@ -76,6 +76,16 @@ class ReleaseTests(unittest.TestCase):
                 with self.assertRaises(release.ReleaseError):
                     release.validate(root, 'v1.2.0', release.REPOSITORY)
 
+    def test_rejects_tag_retargeting_after_ci_lookup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.cohort(root)
+            with patch.object(release, 'git', side_effect=lambda root, *args: '' if args[0] == 'status' else 'a' * 40):
+                self.assertEqual(release.validate(root, 'v1.2.0', release.REPOSITORY, 'a' * 40), ('1.2.0', 'a' * 40))
+                for expected in ['b' * 40, '']:
+                    with self.subTest(expected=expected), self.assertRaisesRegex(release.ReleaseError, 'verified CI commit'):
+                        release.validate(root, 'v1.2.0', release.REPOSITORY, expected)
+
     def test_rejects_missing_current_version_changelog(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

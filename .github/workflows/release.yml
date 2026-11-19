@@ -16,7 +16,7 @@ on:
       tag:
         description: 'Existing stable release tag (all eight crate versions must match)'
         required: true
-        default: 'v1.2.9'
+        default: 'v1.3.0'
         type: string
 
 permissions:

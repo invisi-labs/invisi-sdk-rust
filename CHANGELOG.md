@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.3.0
+
+- Support optional owner-only Credit initial payments, post-debit Credit state, merchant net Notes, gross funding checks and UTC-period validation.
+- Align contract bindings, unified Note operation events and CreditDraw/CreditStateTransition discovery and recovery with the redeployed Core contracts.
+- Recompute operation IDs and validate physical insertions and aggregate membership against shared real-receipt fixtures.
+- Add independently pinned lazy resources and witness metadata for the 18-input combined circuit without bundling large assets.
+- Refresh measured Gas models and TS parity vectors; expose uncovered paths explicitly.
+- Extend IPP initial-payment terms and receipts; remove the obsolete Invisi action field.
+- Prepare the complete SDK module cohort at 1.3.0; no registry publication or contract deployment is performed.
+
+- Align Alloy core types and ABI bindings to 1.5.7 and consensus/EIP decoding to 1.7.3, matching the mobile App. Public Rust types and generated return types change; consumers must rebuild against the aligned dependencies.
+- Preserve strict call, return and event ABI validation while adopting the Alloy 1 decoding APIs.
+
+
 ## 1.2.9
 
 - Validate Provenance certificate anchors without requiring synthetic headers.
@@ -16,11 +30,6 @@
 ## 1.2.6
 
 - Update GitHub repository and release references to the `invisi-labs` organization.
-
-## Unreleased
-
-- Align Alloy core types and ABI bindings to 1.5.7 and consensus/EIP decoding to 1.7.3, matching the mobile App. Public Rust types and generated return types change; consumers must rebuild against the aligned dependencies.
-- Preserve strict call, return and event ABI validation while adopting the Alloy 1 decoding APIs.
 
 ## 1.2.5
 

@@ -4,6 +4,8 @@ use super::*;
 pub struct InitialCreditPayment {
     /// Gross owner debit, including the actual broadcaster fee.
     pub amount: U256,
+    /// Optional merchant net pin; gross must equal net plus fee.
+    pub net_amount: Option<U256>,
     pub payload: Vec<u8>,
 }
 #[derive(Clone)]

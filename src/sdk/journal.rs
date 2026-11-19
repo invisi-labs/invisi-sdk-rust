@@ -131,6 +131,8 @@ pub struct PreparedSnapshot {
     constructed_at: Option<u64>,
     #[serde(default)]
     initial_available_credit: Option<U256>,
+    #[serde(default)]
+    initial_payment_net_amount: Option<U256>,
     unsigned_call: Vec<u8>,
     inputs: Vec<NoteInputRecord>,
     credit_inputs: Vec<CreditInputSnapshot>,
@@ -228,6 +230,7 @@ impl ManagedPrepared {
             anchor,
             constructed_at: None,
             initial_available_credit: None,
+            initial_payment_net_amount: None,
             unsigned_call: Vec::new(),
             inputs: Vec::new(),
             credit_inputs: Vec::new(),
@@ -316,6 +319,7 @@ impl ManagedPrepared {
                         s.states.push(created.clone());
                         if let Some((available, output)) = initial_payment {
                             s.initial_available_credit = Some(*available);
+                            s.initial_payment_net_amount = v.initial_payment_net_amount;
                             s.outputs.push(OutputSnapshot::capture(output));
                         }
                         P::createCreditCall {
@@ -693,6 +697,14 @@ impl PreparedSnapshot {
                         {
                             return Err("saved initial Credit state mismatch".into());
                         }
+                        if let Some(net) = self.initial_payment_net_amount {
+                            if !c.p.hasInitialPayment
+                                || net == U256::ZERO
+                                || net.checked_add(c.p.feeAmount) != Some(c.p.totalAmount)
+                            {
+                                return Err("saved initial payment net mismatch".into());
+                            }
+                        }
                         let initial_payment = if c.p.hasInitialPayment {
                             let available = self
                                 .initial_available_credit
@@ -871,6 +883,7 @@ impl PreparedSnapshot {
                             initial_payment
                                 .as_ref()
                                 .map(|(_, output)| InitialCreditPayment {
+                                    net_amount: self.initial_payment_net_amount,
                                     amount: params.totalAmount,
                                     payload: output
                                         .note
@@ -930,6 +943,7 @@ impl PreparedSnapshot {
                     None
                 };
                 ManagedPrepared::Credit(PreparedCredit {
+                    initial_payment_net_amount: self.initial_payment_net_amount,
                     constructed_at: self.constructed_at.unwrap_or(self.anchor.timestamp),
                     preparation_reads: None,
                     wallet: wallet.cloned(),
@@ -1158,6 +1172,7 @@ impl ManagedPrepared {
                 reprice: v.reprice.clone(),
             }),
             Self::Credit(v) => Self::Credit(PreparedCredit {
+                initial_payment_net_amount: v.initial_payment_net_amount,
                 constructed_at: v.constructed_at,
                 preparation_reads: v.preparation_reads.clone(),
                 wallet: v.wallet.clone(),

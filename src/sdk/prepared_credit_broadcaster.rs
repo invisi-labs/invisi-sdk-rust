@@ -142,7 +142,17 @@ impl PreparedCredit {
                             .as_ref()
                             .ok_or("complete wallet required for Credit repricing")?,
                         state.clone(),
-                        payment.clone(),
+                        payment
+                            .clone()
+                            .map(|mut p| -> Result<_> {
+                                if let Some(net) = p.net_amount {
+                                    p.amount = net
+                                        .checked_add(amount)
+                                        .ok_or("initial payment gross overflow")?;
+                                }
+                                Ok(p)
+                            })
+                            .transpose()?,
                         *deadline,
                         f,
                     )?,

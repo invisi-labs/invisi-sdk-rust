@@ -97,7 +97,11 @@ payment to the spender. `InitialCreditPayment.amount` is the gross owner debit i
 the actual fee; all Credit limits and available authority count that gross amount. The
 owner signs once, the remaining grant and first Note share one proof, and both are
 available through the normal managed Session and portable output APIs. IPP's
-`credit.initialPayment.amount` is the merchant net amount; its adapter adds the local fee.
+`credit.initialPayment.amount` is the merchant net amount; its adapter adds the local fee
+and always sets `InitialCreditPayment.net_amount`. This optional pin requires initial
+`amount == net_amount + fee.amount`, survives saved journals, and makes quotation
+rebuild gross debit, grant usage and deliveries while keeping the merchant Note fixed.
+Without a net pin, `amount` stays gross and the fee reduces the Note.
 The creation example accepts `INITIAL_PAYMENT_GROSS`. Combined circuit resources use a
 separate authenticated pin and the existing lazy cache, explicit directory and offline
 settings; no circuit assets are bundled. `legacy_create_credit_call` retains explicit
@@ -138,7 +142,10 @@ Only public resource GET requests leave the host. Witness execution and proofs r
 Set `INVISI_PROVER_CACHE_DIR` to choose the disk cache, `INVISI_PROVER_SOURCE` for an HTTPS
 mirror or a directory of Core release objects, and `INVISI_PROVER_OFFLINE=1` to require
 cached resources. `INVISI_PROVER_ASSETS` selects a logical resource directory containing
-`index.json`, `circuits/` and `provenance/`. `ResourceOptions` configures these explicitly.
+`<pin>.index.json` (with `index.json` fallback), `circuits/` and `provenance/`.
+For a mirror serving separate release sets, use an explicit `{pin}` placeholder in
+`INVISI_PROVER_SOURCE` (for example `https://mirror.example/prover/sets/{pin}`).
+A flat mirror may instead serve both pin-named indices and content-addressed objects. `ResourceOptions` configures these explicitly.
 `DirectoryAssets` retains its existing explicit local circuit-directory behavior.
 `NativeProver` accepts a host `WitnessExecutor`, including the external Noir CLI adapter;
 a mobile host can use its embedded native ACVM. Blocking RPC/proving work belongs

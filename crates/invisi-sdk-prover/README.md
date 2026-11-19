@@ -23,3 +23,7 @@ The default disk cache is the system cache directory plus `invisi/prover-assets`
 An explicit cache option overrides `INVISI_PROVER_CACHE_DIR`, which overrides this default.
 Index files use `<index-sha256>.index.json`; objects use `<sha256>.json` or `<sha256>.vk`,
 so Node, Go and Rust can share the same verified disk cache. Offline mode defaults to false.
+
+Local directories support `<pin>.index.json` before `index.json`. For per-set mirrors,
+`ResourceOptions.source` accepts an explicit `{pin}` placeholder; it is resolved for
+each trusted circuit set. A flat mirror can host pin-named indices and hashed objects.

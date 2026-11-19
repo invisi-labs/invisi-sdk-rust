@@ -87,6 +87,7 @@ pub struct PreparedCredit {
     pub(crate) provenance_factory: Option<ProvenanceFactory>,
     pub(crate) broadcaster: Option<PreparedBroadcasterState>,
     pub(crate) reprice: Option<CreditRepriceTemplate>,
+    pub(crate) initial_payment_net_amount: Option<U256>,
 }
 #[derive(Clone)]
 pub(crate) enum CreditRepriceTemplate {
@@ -183,6 +184,7 @@ impl Invisi {
         deadline: u64,
         fee: Fee,
     ) -> Result<PreparedCredit> {
+        let net_amount = initial_payment.as_ref().and_then(|p| p.net_amount);
         let template =
             CreditRepriceTemplate::Create(state.clone(), initial_payment.clone(), deadline);
         let reads = Arc::new(PreparationChain::new(self.chain.clone()));
@@ -211,6 +213,11 @@ impl Invisi {
         }
         let initial_available = state.note.available_credit;
         let payment = if let Some(payment) = initial_payment {
+            if let Some(net) = payment.net_amount {
+                if net == U256::ZERO || net.checked_add(fee.amount) != Some(payment.amount) {
+                    return Err("initial payment gross must equal net plus fee".into());
+                }
+            }
             model(crate::note::uint(payment.amount, 126, "initial payment"))?;
             if payment.amount <= fee.amount {
                 return Err("initial payment must leave a positive Note".into());
@@ -277,6 +284,7 @@ impl Invisi {
             provenance_factory: self.provenance_factory.clone(),
             broadcaster: None,
             reprice: Some(template),
+            initial_payment_net_amount: net_amount,
         })
     }
     pub fn prepare_update_credit_explicit(
@@ -359,6 +367,7 @@ impl Invisi {
             provenance_factory: self.provenance_factory.clone(),
             broadcaster: None,
             reprice: Some(template),
+            initial_payment_net_amount: None,
         })
     }
     pub fn prepare_draw_credit_explicit(
@@ -555,6 +564,7 @@ impl Invisi {
             provenance_factory: self.provenance_factory.clone(),
             broadcaster: None,
             reprice: Some(template),
+            initial_payment_net_amount: None,
         })
     }
     pub fn prepare_revoke_credit_explicit(
@@ -630,6 +640,7 @@ impl Invisi {
             provenance_factory: self.provenance_factory.clone(),
             broadcaster: None,
             reprice: Some(template),
+            initial_payment_net_amount: None,
         })
     }
 }
@@ -1381,6 +1392,7 @@ mod lifecycle_tests {
                 &owner,
                 state,
                 Some(InitialCreditPayment {
+                    net_amount: None,
                     amount: U256::from(7),
                     payload: vec![],
                 }),
@@ -1474,6 +1486,7 @@ mod lifecycle_tests {
                 &owner,
                 initial(chain.as_ref()),
                 Some(InitialCreditPayment {
+                    net_amount: None,
                     amount: U256::from(7),
                     payload: vec![],
                 }),
@@ -1528,6 +1541,7 @@ mod lifecycle_tests {
                 &owner,
                 state.clone(),
                 Some(InitialCreditPayment {
+                    net_amount: None,
                     amount: U256::from(7),
                     payload: vec![8],
                 }),
@@ -1577,6 +1591,7 @@ mod lifecycle_tests {
                 &owner,
                 state,
                 Some(InitialCreditPayment {
+                    net_amount: None,
                     amount: U256::from(8),
                     payload: vec![]
                 }),
@@ -1712,6 +1727,123 @@ mod lifecycle_tests {
     use super::*;
     use k256::elliptic_curve::sec1::ToEncodedPoint;
     use std::sync::Mutex;
+    #[test]
+    fn pinned_initial_net_survives_quote_recovery_and_limits() {
+        let chain = chain();
+        let owner = wallet(1);
+        let runtime = Invisi::new(chain.clone());
+        let mut original = initial(chain.as_ref());
+        original.note.available_credit = U256::from(10);
+        let pure = runtime
+            .prepare_create_credit_explicit(&owner, original.clone(), 2000000100, Fee::default())
+            .unwrap();
+        assert_eq!(
+            &pure.broadcaster_intent().unwrap().data[..4],
+            &[0x00, 0xb6, 0xfa, 0x56]
+        );
+        if let CreditPlan::Create { params, .. } = &pure.plan {
+            assert!(!params.hasInitialPayment);
+        } else {
+            panic!("creation required");
+        }
+        let payment = InitialCreditPayment {
+            amount: U256::from(5),
+            net_amount: Some(U256::from(5)),
+            payload: vec![9],
+        };
+        let prepared = runtime
+            .prepare_create_credit_with_initial_payment(
+                &owner,
+                original.clone(),
+                Some(payment.clone()),
+                2000000100,
+                Fee::default(),
+            )
+            .unwrap();
+        let snapshot = journal::ManagedPrepared::Credit(prepared.clone())
+            .snapshot()
+            .unwrap();
+        let raw = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(raw["initialPaymentNetAmount"], json!(U256::from(5)));
+        let restored = match snapshot.restore(&owner, None).unwrap() {
+            journal::ManagedPrepared::Credit(p) => p,
+            _ => panic!("Credit required"),
+        };
+        let quoted = restored
+            .quote_for_broadcaster(
+                chain.clone(),
+                Arc::new(CreditRelay {
+                    fees: 0.into(),
+                    submits: 0.into(),
+                }),
+                &BroadcasterOptions {
+                    max_fee_amount: Some(U256::from(2)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(quoted.output_note().unwrap().amount(), U256::from(5));
+        assert_eq!(quoted.approval_requirements()[0].amount, U256::from(7));
+        assert_eq!(
+            quoted.successor_states()[0].note.available_credit,
+            U256::from(3)
+        );
+        assert_eq!(
+            quoted.successor_states()[0].note.usage.total_spent,
+            U256::from(7)
+        );
+        assert!(prepared
+            .quote_for_broadcaster(
+                chain.clone(),
+                Arc::new(CreditRelay {
+                    fees: 0.into(),
+                    submits: 0.into()
+                }),
+                &BroadcasterOptions {
+                    max_fee_amount: Some(U256::from(1)),
+                    ..Default::default()
+                }
+            )
+            .is_err());
+        original.note.policy.single_limit = U256::from(5);
+        let limited = runtime
+            .prepare_create_credit_with_initial_payment(
+                &owner,
+                original,
+                Some(payment.clone()),
+                2000000100,
+                Fee::default(),
+            )
+            .unwrap();
+        assert!(limited
+            .quote_for_broadcaster(
+                chain.clone(),
+                Arc::new(CreditRelay {
+                    fees: 0.into(),
+                    submits: 0.into()
+                }),
+                &BroadcasterOptions {
+                    max_fee_amount: Some(U256::from(2)),
+                    ..Default::default()
+                }
+            )
+            .is_err());
+        let mut wrong = payment;
+        wrong.net_amount = Some(U256::from(4));
+        assert!(runtime
+            .prepare_create_credit_with_initial_payment(
+                &owner,
+                initial(chain.as_ref()),
+                Some(wrong),
+                2000000100,
+                Fee::default()
+            )
+            .is_err());
+        let mut forged = raw;
+        forged["initialPaymentNetAmount"] = json!(U256::from(4));
+        let forged: journal::PreparedSnapshot = serde_json::from_value(forged).unwrap();
+        assert!(forged.restore(&owner, None).is_err());
+    }
     #[test]
     fn repeated_quotes_retain_the_original_credit_read_set() {
         let chain = chain();

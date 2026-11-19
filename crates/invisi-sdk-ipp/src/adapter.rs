@@ -91,6 +91,7 @@ pub fn prepare_invisi_request_with<T>(
                     return Err(Error::InvalidMessage);
                 }
                 Some(sdk::InitialCreditPayment {
+                    net_amount: Some(net),
                     amount: gross,
                     payload: vec![],
                 })

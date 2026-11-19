@@ -182,7 +182,8 @@ pub trait Assets: Send + Sync {
 /// Configuration for public circuit resources. Witnesses never enter this transport.
 #[derive(Clone, Debug)]
 pub struct ResourceOptions {
-    /// HTTPS base URL or directory containing index.json and content-addressed objects.
+    /// HTTPS base URL or directory containing pin-named indices and content-addressed objects.
+    /// An explicit `{pin}` placeholder selects per-set mirrors for both circuit families.
     pub source: String,
     pub cache: PathBuf,
     /// Optional published object directory; logical layouts remain supported.
@@ -295,9 +296,24 @@ impl ResourceProvider {
         if !self.options.source.starts_with("https://")
             && !self.options.source.starts_with("http://")
         {
-            return bounded_read(&PathBuf::from(&self.options.source).join(filename), limit);
+            return bounded_read(
+                &PathBuf::from(
+                    self.options
+                        .source
+                        .replace("{pin}", &self.options.index_sha256),
+                )
+                .join(filename),
+                limit,
+            );
         }
-        let url = format!("{}/{}", self.options.source.trim_end_matches('/'), filename);
+        let url = format!(
+            "{}/{}",
+            self.options
+                .source
+                .replace("{pin}", &self.options.index_sha256)
+                .trim_end_matches('/'),
+            filename
+        );
         let timeout = self.options.timeout;
         // Build, use and drop the blocking client off any caller's async runtime.
         std::thread::spawn(move || -> Result<Vec<u8>> {
@@ -376,9 +392,19 @@ impl ResourceProvider {
             Ok(bytes) if sha256(&bytes) == self.options.index_sha256 => bytes,
             _ => {
                 let bytes = if let Some(directory) = &self.options.directory {
-                    bounded_read(&directory.join("index.json"), 1024 * 1024)?
+                    let pinned =
+                        directory.join(format!("{}.index.json", self.options.index_sha256));
+                    if pinned.exists() {
+                        bounded_read(&pinned, 1024 * 1024)?
+                    } else {
+                        bounded_read(&directory.join("index.json"), 1024 * 1024)?
+                    }
                 } else {
-                    self.fetch("index.json", 1024 * 1024)?
+                    self.fetch(
+                        &format!("{}.index.json", self.options.index_sha256),
+                        1024 * 1024,
+                    )
+                    .or_else(|_| self.fetch("index.json", 1024 * 1024))?
                 };
                 if sha256(&bytes) != self.options.index_sha256 {
                     return Err("resource index digest mismatch".into());
@@ -1182,6 +1208,107 @@ mod resource_tests {
         (dir, provider)
     }
     #[test]
+    fn pin_named_local_index_works_from_cold_cache() {
+        let (dir, mut provider) = fixture();
+        let source = dir.path("source");
+        fs::rename(
+            source.join("index.json"),
+            source.join(format!("{}.index.json", provider.options.index_sha256)),
+        )
+        .unwrap();
+        provider.options.directory = Some(source);
+        provider.options.offline = true;
+        assert_eq!(
+            provider.load_resource("circuits/example.json").unwrap(),
+            b"public resource"
+        );
+    }
+    #[test]
+    fn local_two_indices_mirror_template_and_tampering() {
+        let (dir, provider) = fixture();
+        let source = dir.path("source");
+        let first = fs::read(source.join("index.json")).unwrap();
+        fs::rename(
+            source.join("index.json"),
+            source.join(format!("{}.index.json", provider.options.index_sha256)),
+        )
+        .unwrap();
+        let mut second: Value = serde_json::from_slice(&first).unwrap();
+        second["files"]["circuits/combined.json"] =
+            second["files"]["circuits/example.json"].clone();
+        let second = serde_json::to_vec(&second).unwrap();
+        let second_pin = sha256(&second);
+        fs::write(source.join(format!("{second_pin}.index.json")), &second).unwrap();
+        let mut options = provider.options.clone();
+        options.directory = Some(source.clone());
+        options.offline = true;
+        let mut local = ResourceProvider::new(options);
+        assert_eq!(
+            local.load_resource("circuits/example.json").unwrap(),
+            b"public resource"
+        );
+        local.options.index_sha256 = second_pin.clone();
+        assert_eq!(
+            local.load_resource("circuits/combined.json").unwrap(),
+            b"public resource"
+        );
+        // A forged pin-named index must not fall back to a valid generic index.
+        fs::remove_file(local.object_path(&second_pin, "index.json")).unwrap();
+        fs::write(source.join("index.json"), &second).unwrap();
+        fs::write(source.join(format!("{second_pin}.index.json")), b"forged").unwrap();
+        assert!(local.load_resource("circuits/combined.json").is_err());
+        fs::write(source.join(format!("{second_pin}.index.json")), &second).unwrap();
+        // Explicit per-set mirror placeholder; arbitrary source URLs are unchanged.
+        for (pin, index) in [
+            (&provider.options.index_sha256, &first),
+            (&second_pin, &second),
+        ] {
+            let set = dir.path("mirror").join(pin);
+            fs::create_dir_all(&set).unwrap();
+            fs::write(set.join("index.json"), index).unwrap();
+            fs::copy(
+                source.join(format!("{}.json", sha256(b"public resource"))),
+                set.join(format!("{}.json", sha256(b"public resource"))),
+            )
+            .unwrap();
+        }
+        let mut mirrored = ResourceProvider::new(ResourceOptions {
+            source: format!("{}/{{pin}}", dir.path("mirror").display()),
+            cache: dir.path("mirror-cache"),
+            ..provider.options
+        });
+        assert!(mirrored.load_resource("circuits/example.json").is_ok());
+        mirrored.options.index_sha256 = second_pin;
+        assert!(mirrored.load_resource("circuits/combined.json").is_ok());
+        fs::write(
+            source.join(format!("{}.json", sha256(b"public resource"))),
+            b"tampered",
+        )
+        .unwrap();
+        assert!(local.load_resource("circuits/combined.json").is_err());
+    }
+    #[test]
+    #[ignore = "requires both fixed-hash resource sets via INVISI_TEST_RESOURCE_SOURCE"]
+    fn real_two_pinned_sets_load_with_one_cold_offline_provider() {
+        let dir = PrivateDir::new().unwrap();
+        let source =
+            std::env::var_os("INVISI_TEST_RESOURCE_SOURCE").expect("fixed-hash resources required");
+        let provider = ResourceProvider::new(ResourceOptions {
+            directory: Some(PathBuf::from(source)),
+            cache: dir.path("cold-cache"),
+            offline: true,
+            ..ResourceOptions::default()
+        });
+        for (name, width) in [
+            ("transact_user_slots1", 20),
+            ("create_credit_initial_payment", 18),
+        ] {
+            let statement = statement(name, "evm", vec![B256::ZERO; width]).unwrap();
+            let (artifact, key) = provider.load(&statement).unwrap();
+            validate_assets(&statement, &artifact, &key).unwrap();
+        }
+    }
+    #[test]
     fn resource_cache_is_authenticated_and_offline() {
         let (dir, provider) = fixture();
         assert_eq!(
@@ -1285,6 +1412,11 @@ mod resource_tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         provider.options.source = format!("http://{}", listener.local_addr().unwrap());
         let source = dir.path("source");
+        fs::copy(
+            source.join("index.json"),
+            source.join(format!("{}.index.json", provider.options.index_sha256)),
+        )
+        .unwrap();
         let server = std::thread::spawn(move || {
             // Exactly index + object + repaired object. More requests cannot complete.
             for stream in listener.incoming().take(3) {

@@ -130,9 +130,17 @@ fn initial_payment_adapter_adds_actual_fee_and_rejects_invalid_fee_or_overflow()
             0,
             fee,
             |_| panic!("payment"),
-            |c| Ok(c.initial_payment.unwrap().amount),
+            |c| {
+                let payment = c.initial_payment.unwrap();
+                assert_eq!(payment.net_amount, Some(U256::from(5)));
+                Ok(payment.amount)
+            },
         )
     };
+    assert_eq!(
+        prepare(invisi_sdk::sdk::Fee::default()).unwrap(),
+        U256::from(5)
+    );
     assert_eq!(
         prepare(invisi_sdk::sdk::Fee {
             recipient: Address::repeat_byte(4),

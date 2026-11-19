@@ -35,6 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     value
                         .parse::<U256>()
                         .map(|amount| sdk::InitialCreditPayment {
+                            net_amount: None,
                             amount,
                             payload: Vec::new(),
                         })

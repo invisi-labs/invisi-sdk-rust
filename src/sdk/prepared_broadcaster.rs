@@ -1596,16 +1596,12 @@ fn replay_sources(
         if *consumed > cap.budgets.max_total_leaves {
             return Err("source total replay leaf budget exceeded".into());
         }
-        let anchor = CanonicalBlock {
-            number: source_number(&c.confirmed_block_number)?,
-            hash: B256::from(source_word(&c.confirmed_block_hash)?.to_be_bytes::<32>()),
-            parent_hash: B256::ZERO,
-            timestamp: 0,
-        };
-        chain.canonical(&anchor)?;
+        let number = source_number(&c.confirmed_block_number)?;
+        let hash = B256::from(source_word(&c.confirmed_block_hash)?.to_be_bytes::<32>());
+        chain.canonical_anchor(number, hash)?;
         let id_root = format!("{}:{}", c.chain_generation, c.root_sequence);
         let tree = cap.client.sync_recognized_tree(&id_root, c, count.max(1))?;
-        chain.canonical(&anchor)?;
+        chain.canonical_anchor(number, hash)?;
         trees.insert(*id, tree);
     }
     Ok(())

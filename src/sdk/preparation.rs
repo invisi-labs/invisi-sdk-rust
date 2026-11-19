@@ -152,6 +152,9 @@ impl ChainState for PreparationChain {
     fn canonical(&self, b: &CanonicalBlock) -> Result<()> {
         self.upstream.canonical(b)
     }
+    fn canonical_anchor(&self, number: u64, hash: B256) -> Result<()> {
+        self.upstream.canonical_anchor(number, hash)
+    }
     fn finality(&self) -> crate::rpc::ChainFinality {
         self.upstream.finality()
     }

@@ -672,6 +672,13 @@ pub trait ChainState: Send + Sync {
     fn context(&self) -> ProtocolContext;
     fn snapshot(&self) -> Result<CanonicalBlock>;
     fn canonical(&self, block: &CanonicalBlock) -> Result<()>;
+    fn canonical_anchor(&self, number: u64, hash: B256) -> Result<()> {
+        let block = self.snapshot()?;
+        if block.number != number || block.hash != hash {
+            return Err("historical canonical anchor reader required".into());
+        }
+        self.canonical(&block)
+    }
     fn known_root(&self, tree_id: u64, root: B256, block: &CanonicalBlock) -> Result<bool>;
     fn nullifier_spent(&self, nullifier: B256, block: &CanonicalBlock) -> Result<bool>;
     fn credit_revoked(
@@ -791,6 +798,13 @@ impl<C: CanonicalHead> ChainState for RpcChainState<C> {
     }
     fn canonical(&self, block: &CanonicalBlock) -> Result<()> {
         if self.chain.block(block.number).map_err(|e| e.to_string())? != *block {
+            return Err("chain reorganization".into());
+        }
+        Ok(())
+    }
+    fn canonical_anchor(&self, number: u64, hash: B256) -> Result<()> {
+        let block = self.chain.block(number).map_err(|e| e.to_string())?;
+        if block.number != number || block.hash != hash {
             return Err("chain reorganization".into());
         }
         Ok(())
@@ -3722,3 +3736,7 @@ mod credit_requests;
 pub use credit_requests::*;
 mod disclosure_verifier;
 pub use disclosure_verifier::*;
+
+#[cfg(test)]
+#[path = "sdk/canonical_anchor_tests.rs"]
+mod canonical_anchor_tests;

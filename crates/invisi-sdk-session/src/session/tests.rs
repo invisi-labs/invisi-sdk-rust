@@ -97,15 +97,18 @@ impl ChainState for Chain {
     fn canonical(&self, b: &CanonicalBlock) -> Result<()> {
         self.online()?;
         let expected = block(b.number);
-        let source_anchor = self.source_anchors.load(Ordering::SeqCst)
-            && b.parent_hash == B256::ZERO
-            && b.timestamp == 0
-            && b.number == expected.number
-            && b.hash == expected.hash;
-        if self.reorg.load(Ordering::SeqCst) || (*b != expected && !source_anchor) {
+        if self.reorg.load(Ordering::SeqCst) || *b != expected {
             return Err("chain reorg".into());
         }
         Ok(())
+    }
+    fn canonical_anchor(&self, number: u64, hash: B256) -> Result<()> {
+        self.online()?;
+        let expected = block(number);
+        if !self.source_anchors.load(Ordering::SeqCst) || expected.hash != hash {
+            return Err("source anchor mismatch".into());
+        }
+        self.canonical(&expected)
     }
     fn known_root(&self, _: u64, root: B256, _: &CanonicalBlock) -> Result<bool> {
         self.online()?;

@@ -17,7 +17,7 @@ directory. It builds a local directory source for the unpublished sibling versio
 then runs `cargo package --locked --offline` with Cargo's verification enabled for
 primitives, protocol, prover, RPC, SDK, Session, FFI, and IPP in that order.
 Each actual archive replaces its bootstrap directory entry before downstream checks.
-The script separately unpacks each archive and runs its tests with all features,
+The script separately unpacks each archive and compiles all targets with all features,
 resolving siblings as registry packages from the local source rather than workspace
 paths. It rejects generated/private artifact paths. It does not invoke publishing,
 create tags, push branches, or modify a remote registry. An existing `cargo vendor
@@ -57,7 +57,7 @@ The eight packages retain the `invisi-sdk` names and version `1.2.9`.
 Publishing runs in [Release Rust SDK](https://github.com/invisi-labs/invisi-sdk-rust/actions/workflows/release.yml)
 on a pushed `vMAJOR.MINOR.PATCH` tag, or a manual dispatch naming an existing tag.
 If GitHub has not registered a newly added release workflow yet, manually dispatch
-the existing [Rust SDK workflow](https://github.com/invisi-labs/invisi-sdk-rust/actions/workflows/ci.yml)
+the [Release Rust SDK workflow](https://github.com/invisi-labs/invisi-sdk-rust/actions/workflows/release.yml)
 from the release feature branch with the same `tag` input. It invokes the reusable
 release job, which checks out the immutable tag rather than publishing branch source.
 The checked-out commit must match that tag; all eight public package versions and
@@ -75,9 +75,8 @@ move the tag or change its source to bypass a registry conflict. Rust intentiona
 skipped 1.2.1; the 1.2.2 changelog records capabilities added since 1.2.0.
 
 Before the first registry write, the workflow runs release-helper regression
-tests, English and module-boundary checks, formatting, clippy, debug/release
-workspace tests, native export validation, an example, and isolated package/archive
-tests. External native Noir/BB cases still require their explicit assets and are
+tests, English and module-boundary checks, formatting, clippy, debug workspace tests, native export validation, an example, and isolated package/archive
+compilation checks. External native Noir/BB cases still require their explicit assets and are
 not silently represented as CI coverage.
 
 The publishing helper packages each crate from the clean **tagged checkout** with
@@ -102,3 +101,7 @@ current entry (all public package entries for TypeScript) into the GitHub Releas
 body. Missing, duplicate, empty or link-only entries fail validation before
 publication. Historical entries are retained locally; a release body includes only
 its matching version. Release retries update the same body from the same source.
+
+### CI reuse
+
+Branch and pull-request CI use the shared `verify.yml` workflow. Tag pushes only trigger release. A release reuses successful push CI for the exact tagged commit; when none exists, it runs shared verification before publishing. In-progress CI is not accepted as success. Compilation dependencies are cached; isolated archive sources remain fresh. Release-mode native exports are still checked, while workspace tests run once in debug mode. Package verification compiles all archive targets instead of repeating the workspace test suite. Registry publication continues to validate clean tag identity, exact sibling versions, immutable archive checksums, and registry propagation.

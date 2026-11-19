@@ -21,14 +21,42 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: rust-release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
+  previous:
+    runs-on: ubuntu-latest
+    outputs:
+      verified: ${{ steps.lookup.outputs.verified }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
+      - id: lookup
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          commit=$(git rev-parse HEAD)
+          count=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$commit&status=success&event=push&per_page=100" --jq '.workflow_runs | length')
+          if [ "$count" -gt 0 ]; then
+            echo 'verified=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'verified=false' >> "$GITHUB_OUTPUT"
+          fi
+  verify:
+    needs: previous
+    if: needs.previous.outputs.verified != 'true'
+    uses: ./.github/workflows/verify.yml
+    with:
+      ref: ${{ inputs.tag || github.ref }}
   release:
-    if: github.repository == 'invisi-labs/invisi-sdk-rust'
+    needs: [previous, verify]
+    if: always() && needs.previous.result == 'success' && (needs.verify.result == 'success' || (needs.verify.result == 'skipped' && needs.previous.outputs.verified == 'true')) && github.repository == 'invisi-labs/invisi-sdk-rust'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -54,7 +82,6 @@ jobs:
         run: python3 scripts/publish-release.py --tag "$RELEASE_TAG" --validate-only
       - name: Validate complete versioned release notes
         run: |
-          python3 scripts/test_release_notes.py
           python3 scripts/release-notes.py "$RELEASE_TAG" --output "$RUNNER_TEMP/release-notes.md"
       - name: Check registry credential configuration
         env:
@@ -64,34 +91,16 @@ jobs:
             echo '::error::Missing CARGO_REGISTRY_TOKEN repository Actions secret. Configure https://github.com/invisi-labs/invisi-sdk-rust/settings/secrets/actions/new before rerunning this tag.'
             exit 1
           fi
-      - name: Test release safety and module boundaries
-        run: |
-          python3 scripts/test_publish_release.py
-          python3 scripts/check-english.py
-          python3 scripts/check-boundaries.py
-          cargo fmt --all --check
-          cargo clippy --locked --workspace --all-features --all-targets
-      - name: Test workspace
-        run: |
-          cargo test --locked --workspace --all-features
-          cargo test --locked --workspace --all-features --release
-      - name: Verify native adapter and example
-        run: |
-          cargo build --locked -p invisi-sdk-ffi --release
-          python3 scripts/check-native-exports.py target/release/libinvisi_sdk_ffi.so
-          cargo run --locked -p invisi-sdk-examples --bin note-output
-      - name: Verify and test all distributable archives with fresh sources
-        run: python3 scripts/check-release.py --work-dir "$RUNNER_TEMP/invisi-release-validation"
-      - name: Reclaim validated build artifacts before publishing
-        run: |
-          rm -rf "$GITHUB_WORKSPACE/target" "$RUNNER_TEMP/invisi-release-validation"
-          df -h "$RUNNER_TEMP"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: publish
+          workspaces: . -> target
       - name: Publish exact tagged archives in dependency order
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           python3 scripts/publish-release.py --tag "$RELEASE_TAG" \
-            --target-dir "$RUNNER_TEMP/invisi-release-publish" \
+            --target-dir "$GITHUB_WORKSPACE/target" \
             --report "$RUNNER_TEMP/invisi-release-checksums.json"
       - name: Retain registry integrity report
         uses: actions/upload-artifact@v4
@@ -110,5 +119,5 @@ jobs:
             gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
               --title "Rust SDK $RELEASE_TAG" --notes-file "$RUNNER_TEMP/release-notes.md" \
               "$RUNNER_TEMP/invisi-release-checksums.json" \
-              "$RUNNER_TEMP"/invisi-release-publish/package/invisi-sdk*-*.crate
+              "$GITHUB_WORKSPACE"/target/package/invisi-sdk*-*.crate
           fi

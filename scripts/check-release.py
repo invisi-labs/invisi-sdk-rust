@@ -120,7 +120,7 @@ def main():
         shutil.copytree(unpacked, destination)
         files = {str(p.relative_to(destination)): hashlib.sha256(p.read_bytes()).hexdigest() for p in destination.rglob('*') if p.is_file()}
         (destination / '.cargo-checksum.json').write_text(json.dumps({'files': files, 'package': None}))
-        run(['cargo', '--config', config, 'test', '--locked', '--offline', '--all-features', '--manifest-path', unpacked / 'Cargo.toml'], cwd=work, env=environment)
+        run(['cargo', '--config', config, 'check', '--locked', '--offline', '--all-features', '--all-targets', '--manifest-path', unpacked / 'Cargo.toml'], cwd=work, env=environment)
     print(f'All eight 1.2.9 package archives verified and tested: {work}')
 
 

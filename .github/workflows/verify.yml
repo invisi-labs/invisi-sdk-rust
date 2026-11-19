@@ -1,0 +1,38 @@
+name: Verify Rust SDK
+on:
+  workflow_call:
+    inputs:
+      ref:
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.94.0'
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: false
+      - run: python3 scripts/test_publish_release.py
+      - run: python3 scripts/test_release_notes.py
+      - run: python3 scripts/check-english.py
+      - run: python3 scripts/check-boundaries.py
+      - run: cargo clippy --locked --workspace --all-features --all-targets
+      - run: cargo fmt --all --check
+      - run: cargo test --locked --workspace --all-features
+      - run: cargo build --locked -p invisi-sdk-ffi --release
+      - run: python3 scripts/check-native-exports.py target/release/libinvisi_sdk_ffi.so
+      - run: cargo run --locked -p invisi-sdk-examples --bin note-output
+      - run: python3 scripts/check-release.py --work-dir "${{ runner.temp }}/invisi-release"

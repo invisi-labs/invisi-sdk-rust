@@ -5,11 +5,30 @@ on:
   pull_request:
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: rust-ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 jobs:
+  previous:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      verified: ${{ steps.lookup.outputs.verified }}
+    steps:
+      - id: lookup
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          count=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&status=success&event=push&branch=develop&per_page=100" --jq '.workflow_runs | length')
+          if [ "$count" -gt 0 ]; then
+            echo 'verified=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'verified=false' >> "$GITHUB_OUTPUT"
+          fi
   verify:
+    needs: previous
+    if: "!cancelled() && (needs.previous.result == 'success' || needs.previous.result == 'skipped') && needs.previous.outputs.verified != 'true'"
     uses: ./.github/workflows/verify.yml
     with:
       ref: ${{ github.sha }}

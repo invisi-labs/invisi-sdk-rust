@@ -105,3 +105,5 @@ its matching version. Release retries update the same body from the same source.
 ### CI reuse
 
 Push CI runs only on `develop` and `main`; pull-request CI remains enabled. These checks use the shared `verify.yml` workflow. Tag pushes only trigger release. A release reuses successful `develop` or `main` push CI for the exact tagged commit; when none exists, it runs shared verification before publishing. In-progress CI is not accepted as success. Compilation dependencies are cached; isolated archive sources remain fresh. Release-mode native exports are still checked, while workspace tests run once in debug mode. Package verification compiles all archive targets instead of repeating the workspace test suite. Registry publication continues to validate clean tag identity, exact sibling versions, immutable archive checksums, and registry propagation.
+
+A `main` push skips verification when the identical commit SHA already has successful `develop` push CI. A new merge commit is checked independently. Lookup failures block reuse; skipped or running checks do not count as success.

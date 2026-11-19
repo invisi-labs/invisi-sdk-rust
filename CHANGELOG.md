@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.9
+
+- Validate Provenance certificate anchors without requiring synthetic headers.
+
 ## 1.2.8
 
 - Add native receiving-key registration and recovery preparation, including registration state queries and externally authorized calls.

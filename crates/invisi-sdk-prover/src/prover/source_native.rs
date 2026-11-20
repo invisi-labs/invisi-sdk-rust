@@ -169,7 +169,7 @@ mod tests {
     #[ignore = "requires pinned source assets and local Noir/BB executables"]
     fn real_local_source_proof_is_independently_verified() -> Result<()> {
         let root = PathBuf::from(
-            std::env::var("INVISI_PROTOCOL_ROOT").map_err(|_| "protocol root required")?,
+            std::env::var("INVISI_PERIPHERY_ROOT").map_err(|_| "periphery root required")?,
         );
         let golden: Value = serde_json::from_slice(
             &fs::read(root.join("circuits/provenance/golden-vectors.json")).unwrap(),

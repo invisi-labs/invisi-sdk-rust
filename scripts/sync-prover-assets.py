@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Authenticate a Core prover-assets release and seed the SDK's external disk cache.
+"""Authenticate an independently pinned Core or Provenance release and seed the SDK's external disk cache.
 
 No heavy resources are copied into any crate. Update the reviewed trust anchor
-with --update-pin only when accepting a new Core public-resource release.
+with --update-pin only when accepting a new public-resource release.
 """
 import argparse
 import hashlib
@@ -20,9 +20,15 @@ def main():
     parser.add_argument('release_directory', type=Path)
     parser.add_argument('--cache', type=Path, default=ROOT / '.cache/prover-assets')
     parser.add_argument('--update-pin', action='store_true')
-    parser.add_argument('--initial-payment', action='store_true', help='Authenticate the separate combined Credit circuit set')
+    parser.add_argument('--set',choices=['core','provenance','legacy','legacy-initial-payment'],default='core')
+    parser.add_argument('--initial-payment', action='store_true', help='Compatibility alias for --set core (initial-payment is a Core circuit)')
     args = parser.parse_args()
-    pin_path = PIN.with_name('initial-payment-resource-release.json') if args.initial_payment else PIN
+    if args.initial_payment and args.set != 'core':
+        parser.error('--initial-payment cannot be combined with another --set')
+    selected = 'core' if args.initial_payment else args.set
+    pin_path = PIN.with_name({'core':'resource-release.json','provenance':'provenance-resource-release.json','legacy':'legacy-resource-release.json','legacy-initial-payment':'initial-payment-resource-release.json'}[selected])
+    if args.update_pin and selected.startswith('legacy'):
+        parser.error('Historical legacy pins are fixed; --update-pin is only for core or provenance')
     raw = (args.release_directory / 'index.json').read_bytes()
     digest = hashlib.sha256(raw).hexdigest()
     index = json.loads(raw)
@@ -30,6 +36,10 @@ def main():
         raise SystemExit('Unsupported resource index')
     if not args.update_pin and json.loads(pin_path.read_bytes())['indexSha256'] != digest:
         raise SystemExit('Untrusted index: review the release before updating its pin')
+    if selected in ('core','provenance'):
+        prefix = 'circuits/' if selected=='core' else 'provenance/'
+        if not index['files'] or not all(name.startswith(prefix) for name in index['files']):
+            raise SystemExit('Resource capability namespace mismatch')
     objects = {}
     for logical, entry in index['files'].items():
         if not all(p and p not in ('.', '..') for p in logical.split('/')) or logical.startswith('/') or '\\' in logical:

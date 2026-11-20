@@ -27,3 +27,9 @@ so Node, Go and Rust can share the same verified disk cache. Offline mode defaul
 Local directories support `<pin>.index.json` before `index.json`. For per-set mirrors,
 `ResourceOptions.source` accepts an explicit `{pin}` placeholder; it is resolved for
 each trusted circuit set. A flat mirror can host pin-named indices and hashed objects.
+
+## Capability-specific catalogs
+
+`ResourceProvider` selects the independent Core catalog for all Core circuits (including initial-payment) and the Provenance catalog for `provenance/` resources. `ResourceOptions` provides `provenance_source`, `provenance_directory` and `provenance_index_sha256` separately from Core. Cache and offline settings are shared. A static Core source is not reused for Provenance; a `{pin}` template explicitly allows a shared mirror.
+
+Provision with `python3 scripts/sync-prover-assets.py CORE_OUTPUT --set core --cache CACHE` and the same command with `PROVENANCE_OUTPUT --set provenance`. The two verified catalogs can share one cache. `legacy_combined: true` selects historical combined snapshots; provision those with `--set legacy` and `--set legacy-initial-payment`. No missing/corrupt catalog automatically downgrades to legacy. New split catalogs require independent publication before SDK release.

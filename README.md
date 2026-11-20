@@ -102,9 +102,7 @@ and always sets `InitialCreditPayment.net_amount`. This optional pin requires in
 `amount == net_amount + fee.amount`, survives saved journals, and makes quotation
 rebuild gross debit, grant usage and deliveries while keeping the merchant Note fixed.
 Without a net pin, `amount` stays gross and the fee reduces the Note.
-The creation example accepts `INITIAL_PAYMENT_GROSS`. Combined circuit resources use a
-separate authenticated pin and the existing lazy cache, explicit directory and offline
-settings; no circuit assets are bundled. `legacy_create_credit_call` retains explicit
+The creation example accepts `INITIAL_PAYMENT_GROSS`. Combined circuit resources use the same independent Core catalog and the existing lazy cache, explicit directory and offline settings; the historical separate pin is used only in explicit legacy mode. No circuit assets are bundled. `legacy_create_credit_call` retains explicit
 encoding for pure creation against legacy deployments.
 
 Notes use envelope `0x01`. Credit uses `0x82`, finite `availableCredit`, a canonical
@@ -141,8 +139,7 @@ Only public resource GET requests leave the host. Witness execution and proofs r
 
 Set `INVISI_PROVER_CACHE_DIR` to choose the disk cache, `INVISI_PROVER_SOURCE` for an HTTPS
 mirror or a directory of Core release objects, and `INVISI_PROVER_OFFLINE=1` to require
-cached resources. `INVISI_PROVER_ASSETS` selects a logical resource directory containing
-`<pin>.index.json` (with `index.json` fallback), `circuits/` and `provenance/`.
+cached resources. `INVISI_PROVER_ASSETS` selects the Core object directory with its index and hashed objects. Set `INVISI_PROVENANCE_ASSETS` for a separate Provenance object directory and `INVISI_PROVENANCE_SOURCE` for its source. The cache is shared and uses `<pin>.index.json`; a producer directory can also contain its single `index.json`.
 For a mirror serving separate release sets, use an explicit `{pin}` placeholder in
 `INVISI_PROVER_SOURCE` (for example `https://mirror.example/prover/sets/{pin}`).
 A flat mirror may instead serve both pin-named indices and content-addressed objects. `ResourceOptions` configures these explicitly.
@@ -248,6 +245,12 @@ for the trust model and public APIs.
 
 Open a focused GitHub issue or pull request describing the problem, scope, and validation. Run `cargo fmt --all --check`, `cargo test --workspace --all-features`, and `python3 scripts/check-release.py` for your change. Never include private keys, credentials, or private witnesses in issues, pull requests, logs, or fixtures.
 
-## Periphery resource ownership
+## Independent proving resource sets
 
-Independent Provenance circuits and `scripts/provenance-*` tools now live in `invisi-periphery`, alongside Payment Router contracts. Core continues to own protocol contracts and Transact/Credit circuits. SDK packages stay in this workspace. Use the Periphery checkout as the positional source for `scripts/sync-provenance.py`. Historical resource URLs and production pins are unchanged. New unified catalogs require explicitly pinned Core and Periphery inputs via Periphery's `scripts/combine-prover-assets.mjs`; do not point a unified SDK loader at a Core-only or Provenance-only catalog.
+Core (Transact/Credit, including initial-payment) and Provenance use separate immutable catalogs. The default Core index is `36f58bac1a0f70c6f8422b47f7cc35a30416a20f8a0f30038d23db0832e2bc93`; the Provenance index is `8d5a3e60e3e5cbe315150511207d7aff67f4e2924148d396b67d82017ecd1f1c`. Public objects retain their existing bytes and logical names. Downloads use `/prover/sets/<index-hash>/`, and verified objects share the same content-addressed cache.
+
+Core operations do not require the Provenance catalog; Provenance operations do not load Core. Missing or corrupt split resources fail without a legacy downgrade. Historical catalogs remain available through explicit legacy configuration.
+
+**Release prerequisite:** these split catalogs have been built and verified locally but are not claimed published. Publish each producer's authenticated CI artifact before releasing SDKs with these new defaults. Until then, provision matching local catalogs or select legacy mode explicitly. No production pins are fetched from an untrusted URL or inferred from a failed download.
+
+`ResourceOptions` accepts `legacy_combined: true` for historical compatibility. Core uses `source`, `directory` and `index_sha256`; Provenance uses `provenance_source`, `provenance_directory` and `provenance_index_sha256`. The source may contain an explicit `{pin}` placeholder for a shared mirror. Prefer struct literals with `..ResourceOptions::default()`. Cache and offline settings remain shared.

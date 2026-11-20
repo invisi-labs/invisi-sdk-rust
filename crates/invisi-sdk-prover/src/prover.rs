@@ -182,16 +182,28 @@ pub trait Assets: Send + Sync {
 /// Configuration for public circuit resources. Witnesses never enter this transport.
 #[derive(Clone, Debug)]
 pub struct ResourceOptions {
+    /// Explicit historical combined-release compatibility; never selected after a failed load.
+    pub legacy_combined: bool,
+    pub provenance_source: Option<String>,
+    pub provenance_directory: Option<PathBuf>,
+    pub provenance_index_sha256: String,
+
     /// HTTPS base URL or directory containing pin-named indices and content-addressed objects.
     /// An explicit `{pin}` placeholder selects per-set mirrors for both circuit families.
     pub source: String,
     pub cache: PathBuf,
-    /// Optional published object directory; logical layouts remain supported.
+    /// Optional Core object directory. Split Provenance uses provenance_directory.
     pub directory: Option<PathBuf>,
     pub offline: bool,
     pub timeout: Duration,
     /// Trust anchor, configured independently from the download source.
     pub index_sha256: String,
+}
+fn reviewed_resource_pin(text: &str) -> String {
+    serde_json::from_str::<Value>(text).expect("reviewed resource release")["indexSha256"]
+        .as_str()
+        .expect("resource pin")
+        .to_owned()
 }
 fn resource_release_source(pin: &str) -> String {
     format!("https://assets.invisipay.fi/prover/sets/{pin}/")
@@ -223,6 +235,12 @@ impl Default for ResourceOptions {
                     .join("invisi/prover-assets")
             });
         Self {
+            legacy_combined: false,
+            provenance_source: std::env::var("INVISI_PROVENANCE_SOURCE").ok(),
+            provenance_directory: std::env::var_os("INVISI_PROVENANCE_ASSETS").map(PathBuf::from),
+            provenance_index_sha256: reviewed_resource_pin(include_str!(
+                "../assets/prover/provenance-resource-release.json"
+            )),
             source: std::env::var("INVISI_PROVER_SOURCE")
                 .unwrap_or_else(|_| resource_release_source(&pin)),
             cache,
@@ -380,7 +398,51 @@ impl ResourceProvider {
         let _ = fs::remove_file(temporary);
         Ok(result?)
     }
+    fn selected_provider(&self, logical: &str) -> Self {
+        let mut selected = self.clone();
+        let provenance = logical.starts_with("provenance/");
+        let pin = if self.options.legacy_combined {
+            if logical.starts_with("circuits/create_credit_initial_payment.") {
+                reviewed_resource_pin(include_str!(
+                    "../assets/prover/initial-payment-resource-release.json"
+                ))
+            } else {
+                reviewed_resource_pin(include_str!(
+                    "../assets/prover/legacy-resource-release.json"
+                ))
+            }
+        } else if provenance {
+            self.options.provenance_index_sha256.clone()
+        } else {
+            self.options.index_sha256.clone()
+        };
+        if provenance {
+            selected.options.source = self.options.provenance_source.clone().unwrap_or_else(|| {
+                if self.options.legacy_combined || self.options.source.contains("{pin}") {
+                    self.options.source.clone()
+                } else {
+                    resource_release_source(&pin)
+                }
+            });
+            selected.options.directory = self.options.provenance_directory.clone().or_else(|| {
+                if self.options.legacy_combined {
+                    self.options.directory.clone()
+                } else {
+                    None
+                }
+            });
+        }
+        if selected.options.source == resource_release_source(&self.options.index_sha256) {
+            selected.options.source = resource_release_source(&pin);
+        }
+        selected.options.index_sha256 = pin;
+        selected
+    }
     pub fn load_resource(&self, logical: &str) -> Result<Vec<u8>> {
+        self.selected_provider(logical)
+            .load_pinned_resource(logical)
+    }
+    fn load_pinned_resource(&self, logical: &str) -> Result<Vec<u8>> {
         if !resource_path(logical) || !resource_digest(&self.options.index_sha256) {
             return Err("invalid resource identity".into());
         }
@@ -473,20 +535,7 @@ impl Assets for ResourceProvider {
         if statement(&s.circuit_name, &s.target, s.expected_public_inputs.clone())? != *s {
             return Err("untrusted circuit metadata".into());
         }
-        let mut provider = self.clone();
-        if s.circuit_name == "create_credit_initial_payment" {
-            let release: Value = serde_json::from_str(include_str!(
-                "../assets/prover/initial-payment-resource-release.json"
-            ))
-            .map_err(|_| "invalid combined circuit resource pin")?;
-            let pin = release["indexSha256"]
-                .as_str()
-                .ok_or("missing combined circuit resource pin")?;
-            if provider.options.source == resource_release_source(&provider.options.index_sha256) {
-                provider.options.source = resource_release_source(pin);
-            }
-            provider.options.index_sha256 = pin.into();
-        }
+        let provider = self;
         let artifact = provider.load_resource(&format!("circuits/{}.json", s.circuit_name))?;
         let key =
             provider.load_resource(&format!("circuits/{}.{}.vk", s.circuit_name, s.target))?;
@@ -1122,11 +1171,15 @@ mod native_tests {
             statement: expected.clone(),
             witness: LocalWitness::new(fixture["witness"].clone()).unwrap(),
         };
-        let assets = DirectoryAssets {
-            directory: std::env::var_os("INVISI_PROVER_ASSETS")
-                .expect("explicit pinned assets required")
-                .into(),
-        };
+        let assets = ResourceProvider::new(ResourceOptions {
+            directory: Some(
+                std::env::var_os("INVISI_PROVER_ASSETS")
+                    .expect("explicit pinned assets required")
+                    .into(),
+            ),
+            offline: true,
+            ..ResourceOptions::default()
+        });
         let executor: Arc<dyn WitnessExecutor> =
             if let Some(path) = std::env::var_os("INVISI_TEST_WITNESS_DIR") {
                 struct FixtureExecutor(Vec<u8>);
@@ -1204,6 +1257,7 @@ mod resource_tests {
             offline: false,
             timeout: Duration::from_secs(3),
             index_sha256: sha256(&index),
+            ..ResourceOptions::default()
         });
         (dir, provider)
     }
@@ -1288,8 +1342,8 @@ mod resource_tests {
         assert!(local.load_resource("circuits/combined.json").is_err());
     }
     #[test]
-    #[ignore = "requires both fixed-hash resource sets via INVISI_TEST_RESOURCE_SOURCE"]
-    fn real_two_pinned_sets_load_with_one_cold_offline_provider() {
+    #[ignore = "requires independent Core catalog via INVISI_TEST_RESOURCE_SOURCE"]
+    fn real_all_core_circuits_use_one_cold_offline_catalog() {
         let dir = PrivateDir::new().unwrap();
         let source =
             std::env::var_os("INVISI_TEST_RESOURCE_SOURCE").expect("fixed-hash resources required");
@@ -1366,6 +1420,9 @@ mod resource_tests {
         let dir = PrivateDir::new().unwrap();
         let provider = ResourceProvider::new(ResourceOptions {
             source: directory,
+            provenance_source: std::env::var("INVISI_TEST_PROVENANCE_SOURCE").ok(),
+            provenance_directory: std::env::var_os("INVISI_TEST_PROVENANCE_SOURCE")
+                .map(PathBuf::from),
             cache: dir.path("cache"),
             ..ResourceOptions::default()
         });
@@ -1565,5 +1622,161 @@ mod executable_artifact_tests {
         )
         .unwrap();
         assert_eq!(output["hash"], json!(123));
+    }
+}
+
+#[cfg(test)]
+mod split_resource_tests {
+    use super::*;
+    #[test]
+    fn capability_catalogs_are_isolated_offline_and_legacy_is_explicit() {
+        let dir = PrivateDir::new().unwrap();
+        let core = dir.path("core");
+        let prov = dir.path("provenance");
+        fs::create_dir(&core).unwrap();
+        fs::create_dir(&prov).unwrap();
+        let core_index = include_bytes!("../testdata/resources/core.index.json");
+        let prov_index = include_bytes!("../testdata/resources/provenance.index.json");
+        fs::write(core.join("index.json"), core_index).unwrap();
+        fs::write(prov.join("index.json"), prov_index).unwrap();
+        let ci: Value = serde_json::from_slice(core_index).unwrap();
+        let key = ci["files"]["circuits/transact_user_slots2.evm.vk"]["sha256"]
+            .as_str()
+            .unwrap();
+        fs::write(
+            core.join(format!("{key}.vk")),
+            include_bytes!("../testdata/resources/core.vk"),
+        )
+        .unwrap();
+        let manifest = include_bytes!("../provenance/manifest.json");
+        fs::write(prov.join(format!("{}.json", sha256(manifest))), manifest).unwrap();
+        let provider = ResourceProvider::new(ResourceOptions {
+            directory: Some(core),
+            provenance_directory: Some(prov),
+            cache: dir.path("cache"),
+            offline: true,
+            ..ResourceOptions::default()
+        });
+        assert_eq!(
+            provider.options.index_sha256,
+            "36f58bac1a0f70c6f8422b47f7cc35a30416a20f8a0f30038d23db0832e2bc93"
+        );
+        assert_eq!(
+            provider
+                .load_resource("circuits/transact_user_slots2.evm.vk")
+                .unwrap(),
+            include_bytes!("../testdata/resources/core.vk")
+        );
+        assert_eq!(
+            provider.load_resource("provenance/manifest.json").unwrap(),
+            manifest
+        );
+        let mut legacy = provider.clone();
+        legacy.options.legacy_combined = true;
+        assert_eq!(
+            legacy
+                .selected_provider("provenance/manifest.json")
+                .options
+                .index_sha256,
+            "ca3ee827c620b1e25d87d1b880549f8cec4be4970f26ea0ab5993dc2db4c827c"
+        );
+        assert_eq!(
+            provider
+                .selected_provider("circuits/create_credit_initial_payment.json")
+                .options
+                .index_sha256,
+            provider.options.index_sha256
+        );
+    }
+    #[test]
+    fn provenance_source_is_not_inherited_from_a_core_only_mirror() {
+        let provider = ResourceProvider::new(ResourceOptions {
+            source: "https://core.invalid/".into(),
+            provenance_source: Some("https://prov.invalid/{pin}/".into()),
+            ..ResourceOptions::default()
+        });
+        let selected = provider.selected_provider("provenance/manifest.json");
+        assert_eq!(selected.options.source, "https://prov.invalid/{pin}/");
+        assert_eq!(
+            selected.options.index_sha256,
+            "8d5a3e60e3e5cbe315150511207d7aff67f4e2924148d396b67d82017ecd1f1c"
+        );
+        let missing = ResourceProvider::new(ResourceOptions {
+            source: "/no-core".into(),
+            offline: true,
+            cache: PrivateDir::new().unwrap().path("cache"),
+            ..ResourceOptions::default()
+        });
+        assert!(missing.load_resource("provenance/manifest.json").is_err());
+        assert_ne!(
+            missing
+                .selected_provider("provenance/manifest.json")
+                .options
+                .source,
+            "/no-core"
+        );
+    }
+}
+
+#[cfg(test)]
+mod legacy_resource_tests {
+    use super::*;
+    #[test]
+    #[ignore = "requires retained authenticated legacy catalogs via INVISI_TEST_LEGACY_RESOURCES"]
+    fn real_retained_legacy_catalogs_are_explicitly_loadable() {
+        let dir = PrivateDir::new().unwrap();
+        let provider = ResourceProvider::new(ResourceOptions {
+            legacy_combined: true,
+            directory: Some(
+                std::env::var_os("INVISI_TEST_LEGACY_RESOURCES")
+                    .expect("legacy catalogs required")
+                    .into(),
+            ),
+            cache: dir.path("cache"),
+            offline: true,
+            ..ResourceOptions::default()
+        });
+        for path in [
+            "circuits/transact_user_slots2.evm.vk",
+            "circuits/create_credit_initial_payment.evm.vk",
+            "provenance/manifest.json",
+        ] {
+            assert!(!provider.load_resource(path).unwrap().is_empty());
+        }
+    }
+}
+
+#[cfg(test)]
+mod mixed_resource_location_tests {
+    use super::*;
+    #[test]
+    fn core_directory_does_not_shadow_explicit_provenance_source() {
+        let dir = PrivateDir::new().unwrap();
+        let core = dir.path("core");
+        let prov = dir.path("prov-source");
+        fs::create_dir(&core).unwrap();
+        fs::create_dir(&prov).unwrap();
+        fs::write(
+            core.join("index.json"),
+            include_bytes!("../testdata/resources/core.index.json"),
+        )
+        .unwrap();
+        fs::write(
+            prov.join("index.json"),
+            include_bytes!("../testdata/resources/provenance.index.json"),
+        )
+        .unwrap();
+        let manifest = include_bytes!("../provenance/manifest.json");
+        fs::write(prov.join(format!("{}.json", sha256(manifest))), manifest).unwrap();
+        let provider = ResourceProvider::new(ResourceOptions {
+            directory: Some(core),
+            provenance_source: Some(prov.to_string_lossy().into()),
+            cache: dir.path("cache"),
+            ..ResourceOptions::default()
+        });
+        assert_eq!(
+            provider.load_resource("provenance/manifest.json").unwrap(),
+            manifest
+        );
     }
 }

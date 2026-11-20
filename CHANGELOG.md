@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Add the optional `invisi-sdk-payment-router` crate for detached Router-funded Note preparation, native ETH exact-output V3 and registry-verified 0x quotes, canonical transaction construction and full-call simulation. Adds detached `PreparedTransaction::export_transaction` with existing phase/proof bindings so atomic callers need no pre-swap token balance or allowance. Includes explicit async RPC and 0x HTTP transports, deployment and reorg authentication, and cross-language parity fixtures.
+
+
 ## 1.3.1
 
 - Accept unified CreditDraw events in indexed Credit RPC responses, including post-debit state deliveries.

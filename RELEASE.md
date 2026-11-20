@@ -1,6 +1,6 @@
 # Rust SDK 1.3.0 local release validation
 
-All eight public crates use version `1.3.0`. Workspace sibling dependencies carry both
+All nine public crates use version `1.3.0`. Workspace sibling dependencies carry both
 the development path and exact registry version `=1.3.0`. The examples package remains private at `0.1.0` and consumes SDK
 `1.3.0`. This release does not change the C ABI version.
 
@@ -15,7 +15,7 @@ python3 scripts/check-release.py --work-dir /tmp/invisi-rust-release-1.3.0
 The release check vendors locked third-party dependencies into its temporary working
 directory. It builds a local directory source for the unpublished sibling versions,
 then runs `cargo package --locked --offline` with Cargo's verification enabled for
-primitives, protocol, prover, RPC, SDK, Session, FFI, and IPP in that order.
+primitives, protocol, prover, RPC, SDK, Session, FFI, IPP, and Payment Router in that order.
 Each actual archive replaces its bootstrap directory entry before downstream checks.
 The script separately unpacks each archive and compiles all targets with all features,
 resolving siblings as registry packages from the local source rather than workspace
@@ -53,18 +53,18 @@ order and wait for each preceding registry version to become available.
 
 ## Publish from GitHub Actions
 
-The eight packages retain the `invisi-sdk` names and version `1.3.0`.
+The nine packages retain the `invisi-sdk` names and version `1.3.0`.
 Publishing runs in [Release Rust SDK](https://github.com/invisi-labs/invisi-sdk-rust/actions/workflows/release.yml)
 on a pushed `vMAJOR.MINOR.PATCH` tag, or a manual dispatch naming an existing tag.
 If GitHub has not registered a newly added release workflow yet, manually dispatch
 the [Release Rust SDK workflow](https://github.com/invisi-labs/invisi-sdk-rust/actions/workflows/release.yml)
 from the release feature branch with the same `tag` input. It invokes the reusable
 release job, which checks out the immutable tag rather than publishing branch source.
-The checked-out commit must match that tag; all eight public package versions and
+The checked-out commit must match that tag; all nine public package versions and
 exact sibling requirements must match it. Fork repositories and dirty checkouts
 are rejected. Rust/Cargo is pinned to 1.94.0 so retries produce the same archive format.
 
-The repository's existing `CARGO_REGISTRY_TOKEN` Actions secret publishes the eight
+The repository's existing `CARGO_REGISTRY_TOKEN` Actions secret publishes the nine
 registered crates. Never put the token in source, workflow inputs, logs, or chat.
 No local `cargo login` or local `cargo publish` is required. The workflow checks
 for the secret before expensive validation.
@@ -82,14 +82,14 @@ not silently represented as CI coverage.
 The publishing helper packages each crate from the clean **tagged checkout** with
 normal Cargo verification, authenticates its `.cargo_vcs_info.json` commit and
 package identity, and publishes in dependency order: primitives, protocol, prover,
-RPC, SDK, Session, FFI, IPP. It checks crates.io metadata, the sparse index, and the
+RPC, SDK, Session, FFI, IPP, and Payment Router. It checks crates.io metadata, the sparse index, and the
 downloaded archive against the exact tagged local archive's SHA-256 before moving
 to the next crate. HTTP 429/transient failures and indexing delays use bounded
 retries. It never overwrites or yanks a version, and skips an existing version only
 when it is not yanked and its checksum matches exactly. A conflict fails the job.
 Archives from earlier local `/tmp` validation runs are never used as release identity.
 
-Only after all eight registrations verify does the workflow create the GitHub
+Only after all nine registrations verify does the workflow create the GitHub
 release, attaching the exact archives and `invisi-release-checksums.json`. The
 report is also retained as a workflow artifact. An already-existing GitHub release
 is preserved on retry. A partial registry release can be resumed from the same tag;

@@ -13,7 +13,7 @@ Contract bindings follow the current `invisi-core` compiler artifacts: `InvisiCo
 The public crates share version **1.3.0**. See [local release validation](RELEASE.md)
 for packaging checks and the required publication order.
 
-Version 1.3.0 exposes six common modules, the independent IPP crate and the separate native FFI adapter.
+Version 1.3.0 exposes six common modules, the independent IPP crate, the separate native FFI adapter and the optional Payment Router crate.
 Replace `invisi-sdk-core` dependencies/imports with `invisi-sdk-primitives`.
 Use `invisi_sdk::sdk` for stateless operations and `invisi_sdk_session::session`
 for managed wallets; enable `sqlite` on `invisi-sdk-session` when needed.
@@ -254,3 +254,7 @@ Core operations do not require the Provenance catalog; Provenance operations do 
 **Release prerequisite:** these split catalogs have been built and verified locally but are not claimed published. Publish each producer's authenticated CI artifact before releasing SDKs with these new defaults. Until then, provision matching local catalogs or select legacy mode explicitly. No production pins are fetched from an untrusted URL or inferred from a failed download.
 
 `ResourceOptions` accepts `legacy_combined: true` for historical compatibility. Core uses `source`, `directory` and `index_sha256`; Provenance uses `provenance_source`, `provenance_directory` and `provenance_index_sha256`. The source may contain an explicit `{pin}` placeholder for a shared mirror. Prefer struct literals with `..ResourceOptions::default()`. Cache and offline settings remain shared.
+
+### Optional Payment Router
+
+`invisi-sdk-payment-router` composes the existing SDK proof lifecycle with native ETH payments through an explicitly configured Payment Router. It provides V3 exact-output routes, registry-verified native 0x quotes, deployment authentication, canonical calldata construction and full payable-call simulation. Signing and broadcasting stay with your application. See [the crate guide](crates/invisi-sdk-payment-router/README.md).

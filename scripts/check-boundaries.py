@@ -15,6 +15,7 @@ expected = {
     'invisi-sdk-session': {'invisi-sdk', 'invisi-sdk-primitives', 'invisi-sdk-rpc', 'invisi-sdk-protocol'},
     'invisi-sdk-ipp': {'invisi-sdk-primitives', 'invisi-sdk'},
     'invisi-sdk-ffi': {'invisi-sdk-primitives'},
+    'invisi-sdk-payment-router': {'invisi-sdk', 'invisi-sdk-protocol'},
 }
 found = {}
 for manifest in [root / 'Cargo.toml', *sorted((root / 'crates').glob('*/Cargo.toml'))]:
@@ -48,4 +49,4 @@ assert 'pub use invisi_sdk_primitives::*' not in (root / 'crates/invisi-sdk-prot
 public = json.loads((root / 'crates/invisi-sdk-protocol/assets/circuit-statements.json').read_text())
 witness = json.loads((root / 'crates/invisi-sdk-prover/assets/prover/witness-layouts.json').read_text())
 assert public == {name: {key: layout[key] for key in ('artifactSha256', 'keys', 'publicInputCount')} for name, layout in witness.items()}, 'Public statement catalog drifted from witness layouts'
-print('Eight public crates and six-module production boundaries verified')
+print('Nine public crates and six-module production boundaries verified')

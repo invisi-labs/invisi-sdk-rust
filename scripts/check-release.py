@@ -13,7 +13,7 @@ import tempfile
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
-ORDER = ['invisi-sdk-primitives', 'invisi-sdk-protocol', 'invisi-sdk-prover', 'invisi-sdk-rpc', 'invisi-sdk', 'invisi-sdk-session', 'invisi-sdk-ffi', 'invisi-sdk-ipp']
+ORDER = ['invisi-sdk-primitives', 'invisi-sdk-protocol', 'invisi-sdk-prover', 'invisi-sdk-rpc', 'invisi-sdk', 'invisi-sdk-session', 'invisi-sdk-ffi', 'invisi-sdk-ipp', 'invisi-sdk-payment-router']
 
 
 def run(args, **kwargs):
@@ -121,7 +121,7 @@ def main():
         files = {str(p.relative_to(destination)): hashlib.sha256(p.read_bytes()).hexdigest() for p in destination.rglob('*') if p.is_file()}
         (destination / '.cargo-checksum.json').write_text(json.dumps({'files': files, 'package': None}))
         run(['cargo', '--config', config, 'check', '--locked', '--offline', '--all-features', '--all-targets', '--manifest-path', unpacked / 'Cargo.toml'], cwd=work, env=environment)
-    print(f'All eight 1.3.1 package archives verified and tested: {work}')
+    print(f'All nine 1.3.1 package archives verified and tested: {work}')
 
 
 if __name__ == '__main__':

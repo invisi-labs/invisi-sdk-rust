@@ -1870,6 +1870,25 @@ impl PreparedTransaction {
             }
         })?;
         self.validate_public_funding(chain, &anchor)?;
+        self.encode_operation_call(caller, allow_recursive, anchor.timestamp)
+    }
+    /// Export the ready unsigned call without live balance, allowance, nonce or chain reads.
+    /// The host must simulate the complete execution path or use `calldata` for live validation.
+    /// This supports atomic callers that acquire funding immediately before invoking Core.
+    pub fn export_transaction(&self) -> Result<TransactionCall> {
+        let caller = if self.funding().signature.is_empty() {
+            self.funding().payer
+        } else {
+            Address::ZERO
+        };
+        self.encode_operation_call(caller, false, self.anchor.timestamp)
+    }
+    fn encode_operation_call(
+        &self,
+        caller: Address,
+        allow_recursive: bool,
+        now: u64,
+    ) -> Result<TransactionCall> {
         let contract =
             protocol::ProtocolContract::new(word_address(self.context.protocol_address)?)?;
         match &self.plan {
@@ -1881,7 +1900,7 @@ impl PreparedTransaction {
                 if self.phase != Phase::Ready {
                     return Err("shield must be ready".into());
                 }
-                validate_submission(funding, caller, anchor.timestamp, params.deadline)?;
+                validate_submission(funding, caller, now, params.deadline)?;
                 Ok(contract.call(&InvisiCore::shieldCall {
                     p: params.clone(),
                     _1: outputs
@@ -1910,7 +1929,7 @@ impl PreparedTransaction {
                             .into(),
                     );
                 }
-                validate_submission(funding, caller, anchor.timestamp, params.deadline)?;
+                validate_submission(funding, caller, now, params.deadline)?;
                 let proof = self.proof.as_ref().ok_or("proof required")?;
                 let s = prover::statement(
                     &proof.circuit_name,

@@ -21,6 +21,10 @@ pub trait SessionSource: Send + Sync {
         self.indexed_head()
     }
     fn block(&self, number: u64) -> Result<CanonicalBlock>;
+    /// Optional authenticated bulk-header reader; failures must not fall back to unverified data.
+    fn blocks(&self, _numbers: &[u64]) -> Option<Result<Vec<CanonicalBlock>>> {
+        None
+    }
     fn discover(&self, from: u64, to: u64) -> Result<Vec<B256>>;
     fn receipt(&self, hash: B256) -> Result<Option<CanonicalReceipt>>;
     fn transaction(&self, hash: B256) -> Result<Option<CanonicalTransaction>>;
@@ -83,10 +87,14 @@ impl<T: RpcTransport, C: CanonicalHead + ChainReceipts + ChainTransactions> Sess
     fn block(&self, number: u64) -> Result<CanonicalBlock> {
         self.chain.block(number).map_err(|e| e.to_string())
     }
+    fn blocks(&self, numbers: &[u64]) -> Option<Result<Vec<CanonicalBlock>>> {
+        self.chain
+            .blocks(numbers)
+            .map(|r| r.map_err(|e| e.to_string()))
+    }
     fn discover(&self, from: u64, to: u64) -> Result<Vec<B256>> {
-        let notes = self.get_note_updates(from, to).map_err(|e| e.to_string())?;
-        let credits = self
-            .get_credit_transitions(from, to)
+        let (notes, credits) = self
+            .get_history_updates(from, to)
             .map_err(|e| e.to_string())?;
         if notes.block != credits.block {
             return Err("indexed discovery anchor mismatch".into());
@@ -150,6 +158,64 @@ enum ApplyState {
     Applying,
     Applied,
 }
+// Values are scoped to one numeric block and hash, and this object never outlives
+// a scan/replay call. Canonical fences deliberately bypass these read caches.
+struct ScanReadSnapshot {
+    block: CanonicalBlock,
+    consumed: Mutex<BTreeMap<B256, bool>>,
+    revoked: Mutex<BTreeMap<(Address, Address, u64, u16), bool>>,
+}
+impl ScanReadSnapshot {
+    fn new(block: CanonicalBlock) -> Self {
+        Self {
+            block,
+            consumed: Mutex::new(BTreeMap::new()),
+            revoked: Mutex::new(BTreeMap::new()),
+        }
+    }
+    fn consumed(&self, session: &WalletSession, nullifier: B256) -> Result<bool> {
+        let mut values = self
+            .consumed
+            .lock()
+            .map_err(|_| "scan consumption cache poisoned")?;
+        if let Some(value) = values.get(&nullifier) {
+            return Ok(*value);
+        }
+        let value = session
+            .invisi
+            .chain
+            .nullifier_spent(nullifier, &self.block)?;
+        if values.len() < 8192 {
+            values.insert(nullifier, value);
+        }
+        Ok(value)
+    }
+    fn revoked(
+        &self,
+        session: &WalletSession,
+        owner: Address,
+        token: Address,
+        shard: u64,
+        slot: u16,
+    ) -> Result<bool> {
+        let mut values = self
+            .revoked
+            .lock()
+            .map_err(|_| "scan revocation cache poisoned")?;
+        let key = (owner, token, shard, slot);
+        if let Some(value) = values.get(&key) {
+            return Ok(*value);
+        }
+        let value = session
+            .invisi
+            .chain
+            .credit_revoked(owner, token, shard, slot, &self.block)?;
+        if values.len() < 8192 {
+            values.insert(key, value);
+        }
+        Ok(value)
+    }
+}
 pub struct PendingWalletRefresh {
     session: WalletSession,
     base: WalletState,
@@ -166,6 +232,7 @@ pub struct PendingWalletRefresh {
     cancellation: Option<crate::public_history::CancellationToken>,
     pub(super) offline: bool,
     memberships: Vec<crate::public_history::CachedMembership>,
+    read_snapshot: Option<Arc<ScanReadSnapshot>>,
 }
 impl std::fmt::Debug for PendingWalletRefresh {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -177,6 +244,16 @@ impl std::fmt::Debug for PendingWalletRefresh {
 }
 impl WalletSession {
     pub fn refresh(&self, options: RefreshOptions) -> Result<PendingWalletRefresh> {
+        let head = self.source.indexed_head()?;
+        self.refresh_at_head(options, &head)
+    }
+    // The indexed snapshot is immutable for this scan only. Every private commit
+    // still performs independent live canonical and consumption/revocation checks.
+    fn refresh_at_head(
+        &self,
+        options: RefreshOptions,
+        head: &CanonicalBlock,
+    ) -> Result<PendingWalletRefresh> {
         let mut base = self.snapshot()?;
         if let Some(history) = &self.public_history {
             let generation = history.snapshot()?.generation;
@@ -207,7 +284,6 @@ impl WalletSession {
         {
             return Err("invalid refresh range or page size".into());
         }
-        let head = self.source.indexed_head()?;
         let to = options.to_block.unwrap_or(head.number);
         if to < options.from_block || to > head.number {
             return Err("refresh outside indexed history".into());
@@ -332,6 +408,7 @@ impl WalletSession {
             cancellation: None,
             offline: false,
             memberships: vec![],
+            read_snapshot: None,
             anchor,
             receipts,
             candidates,
@@ -614,6 +691,7 @@ impl PendingWalletRefresh {
         let mut fresh_roots = BTreeSet::new();
         let mut note_count = 0;
         let mut credit_count = 0;
+        let mut fresh_credit_from: Option<u64> = None;
         for (candidate, value) in decoded {
             match (candidate, value) {
                 (Candidate::Note(output), Decoded::Note(note)) => {
@@ -670,6 +748,15 @@ impl PendingWalletRefresh {
                     note_count += 1;
                 }
                 (Candidate::Credit(output, role), Decoded::Credit(delivery)) => {
+                    if !next
+                        .credits
+                        .contains_key(&credit_key(output.leaf.commitment, role))
+                    {
+                        fresh_credit_from =
+                            Some(fresh_credit_from.map_or(output.leaf.block.number, |n| {
+                                n.min(output.leaf.block.number)
+                            }));
+                    }
                     insert_credit(
                         session,
                         &mut next,
@@ -693,6 +780,15 @@ impl PendingWalletRefresh {
                 _ => return Err("decoded wallet result mismatch".into()),
             }
         }
+        // One nullifier can belong to both roles. Index keys rather than copying
+        // secret-bearing records, and extend the index as successors are recovered.
+        let mut credit_parents: BTreeMap<B256, Vec<String>> = BTreeMap::new();
+        for (key, record) in &next.credits {
+            credit_parents
+                .entry(record.nullifier)
+                .or_default()
+                .push(key.clone());
+        }
         // A canonical draw can recover an owned successor using its authenticated predecessor shared key.
         for receipt in &self.receipts {
             if !receipt.success {
@@ -703,13 +799,14 @@ impl PendingWalletRefresh {
             for (log_index, event) in records.events {
                 if let P::InvisiCoreEvents::CreditStateTransition(event) = event {
                     for (i, nullifier) in event.state.nullifiers.iter().enumerate() {
-                        let predecessors = next
-                            .credits
-                            .values()
-                            .filter(|record| record.nullifier == *nullifier)
-                            .cloned()
-                            .collect::<Vec<_>>();
-                        for previous in predecessors {
+                        let predecessors =
+                            credit_parents.get(nullifier).cloned().unwrap_or_default();
+                        for previous_key in predecessors {
+                            let previous = next
+                                .credits
+                                .get(&previous_key)
+                                .ok_or("Credit predecessor disappeared")?
+                                .clone();
                             let commitment = event.state.creditCommitments[i];
                             let key = credit_key(commitment, previous.role);
                             if next.credits.contains_key(&key) {
@@ -758,6 +855,16 @@ impl PendingWalletRefresh {
                                     None
                                 },
                             )?;
+                            let recovered =
+                                next.credits.get(&key).ok_or("recovered Credit missing")?;
+                            credit_parents
+                                .entry(recovered.nullifier)
+                                .or_default()
+                                .push(key);
+                            fresh_credit_from = Some(
+                                fresh_credit_from
+                                    .map_or(leaf.block.number, |n| n.min(leaf.block.number)),
+                            );
                             credit_count += 1;
                         }
                     }
@@ -766,30 +873,63 @@ impl PendingWalletRefresh {
         }
         let observation = if self.offline {
             self.anchor.clone()
+        } else if let Some(reads) = &self.read_snapshot {
+            reads.block.clone()
         } else {
             session.invisi.chain.snapshot()?
         };
         if !self.offline {
+            if next
+                .notes
+                .values()
+                .any(|n| n.block.number > observation.number)
+                || next
+                    .credits
+                    .values()
+                    .any(|c| c.block.number > observation.number)
+            {
+                return Err("primary observation predates wallet inventory".into());
+            }
             session.invisi.chain.canonical(&observation)?;
             for note in next.notes.values_mut() {
-                note.spent = session
-                    .invisi
-                    .chain
-                    .nullifier_spent(note.nullifier, &observation)?;
+                note.spent = if let Some(reads) = &self.read_snapshot {
+                    reads.consumed(session, note.nullifier)?
+                } else {
+                    session
+                        .invisi
+                        .chain
+                        .nullifier_spent(note.nullifier, &observation)?
+                };
             }
             for credit in next.credits.values_mut() {
-                credit.consumed = session
-                    .invisi
-                    .chain
-                    .nullifier_spent(credit.nullifier, &observation)?;
+                credit.consumed = if let Some(reads) = &self.read_snapshot {
+                    reads.consumed(session, credit.nullifier)?
+                } else {
+                    session
+                        .invisi
+                        .chain
+                        .nullifier_spent(credit.nullifier, &observation)?
+                };
                 let state = &credit.delivery.note;
-                credit.revoked = session.invisi.chain.credit_revoked(
-                    sdk::word_address(state.owner_wallet_identity)?,
-                    sdk::word_address(state.token_address)?,
-                    state.revocation_shard,
-                    state.revocation_slot,
-                    &observation,
-                )?;
+                let owner = sdk::word_address(state.owner_wallet_identity)?;
+                let token = sdk::word_address(state.token_address)?;
+                credit.revoked = if let Some(reads) = &self.read_snapshot {
+                    reads.revoked(
+                        session,
+                        owner,
+                        token,
+                        state.revocation_shard,
+                        state.revocation_slot,
+                    )?
+                } else {
+                    session.invisi.chain.credit_revoked(
+                        owner,
+                        token,
+                        state.revocation_shard,
+                        state.revocation_slot,
+                        &observation,
+                    )?
+                };
             }
         }
         let mut completions = self.completion.clone().unwrap_or_default();
@@ -912,25 +1052,15 @@ impl PendingWalletRefresh {
                     .map_or(self.options.from_block, |v| v),
             );
         }
-        if self.queue_credit_replay && credit_count > 0 {
-            next.credit_replay_from = Some(
-                next.credit_replay_from
-                    .map_or(self.options.from_block, |n| n.min(self.options.from_block)),
-            );
-            let maximum = next
-                .discovery_ranges
-                .last()
-                .map_or(self.anchor.number, |r| r.block.number)
-                .max(self.anchor.number);
-            next.credit_replay_target = Some(
-                next.credit_replay_target
-                    .map_or(maximum, |n| n.max(maximum)),
-            );
-            next.credit_replay_through = None;
-            next.credit_replay_revision = next
-                .credit_replay_revision
-                .checked_add(1)
-                .ok_or("credit replay revision exhausted")?;
+        if self.queue_credit_replay {
+            if let Some(from) = fresh_credit_from {
+                let maximum = next
+                    .discovery_ranges
+                    .last()
+                    .map_or(self.anchor.number, |r| r.block.number)
+                    .max(self.anchor.number);
+                schedule_credit_replay(&mut next, from, maximum)?;
+            }
         }
         if let Some((through, revision, required)) = self.replay_advance {
             if next.credit_replay_revision == revision {
@@ -987,6 +1117,20 @@ impl PendingWalletRefresh {
         })
     }
 }
+fn schedule_credit_replay(state: &mut WalletState, from: u64, target: u64) -> Result<()> {
+    if state.credit_replay_from.is_none() || state.credit_replay_through.is_some_and(|n| from <= n)
+    {
+        state.credit_replay_through = None;
+    }
+    state.credit_replay_from = Some(state.credit_replay_from.map_or(from, |n| n.min(from)));
+    state.credit_replay_target = Some(state.credit_replay_target.map_or(target, |n| n.max(target)));
+    state.credit_replay_revision = state
+        .credit_replay_revision
+        .checked_add(1)
+        .ok_or("credit replay revision exhausted")?;
+    Ok(())
+}
+
 fn reservation_for(state: &WalletState, input: &str) -> Option<String> {
     state
         .operations
@@ -1200,7 +1344,12 @@ impl WalletSession {
         if !options.offline {
             self.invisi.chain.canonical(&known)?;
         }
+        let read_snapshot =
+            (!options.offline).then(|| Arc::new(ScanReadSnapshot::new(known.clone())));
         let target = options.to_block.unwrap_or(indexed.number);
+        if !options.offline && known.number < target {
+            return Err("primary observation is behind scan target".into());
+        }
         let lower = options.from_block.unwrap_or(self.source.deployment_start());
         if target > indexed.number || lower < self.source.deployment_start() || lower > target {
             return Err("scan outside indexed history".into());
@@ -1212,6 +1361,19 @@ impl WalletSession {
                     .note_head(&history.scope, indexed.clone(), known)?;
             }
         }
+        let target_anchor = if options.offline {
+            self.public_history
+                .as_ref()
+                .ok_or("offline public history unavailable")?
+                .acquire_offline(target, target)?
+                .0
+                .block
+        } else {
+            self.source.block(target)?
+        };
+        if target_anchor.number != target {
+            return Err("wrong scan target block".into());
+        }
         let synthetic = crate::public_history::PublicHistorySnapshot {
             revision: 0,
             generation: 1,
@@ -1220,7 +1382,7 @@ impl WalletSession {
             pages: vec![],
             through: None,
             indexed_head: Some(indexed.clone()),
-            known_head: Some(indexed),
+            known_head: Some(indexed.clone()),
             reorg_from: None,
         };
         let history = if let Some(h) = &self.public_history {
@@ -1288,22 +1450,14 @@ impl WalletSession {
                 pending.memberships = page.memberships;
                 pending
             } else {
-                self.refresh(settings)?
+                self.refresh_at_head(settings, &indexed)?
             };
             pending.cancellation = Some(cancel.clone());
+            pending.read_snapshot = read_snapshot.clone();
             pending.queue_credit_replay =
                 range.direction == "backward" || state.discovery_through.is_none();
             pending.base.recovery_boundary = Some(state.recovery_boundary.unwrap_or(boundary));
-            pending.anchor = if options.offline {
-                self.public_history
-                    .as_ref()
-                    .ok_or("offline public history unavailable")?
-                    .acquire_offline(target, target)?
-                    .0
-                    .block
-            } else {
-                self.source.block(target)?
-            };
+            pending.anchor = target_anchor.clone();
             cancel.check()?;
             let result = pending.decrypt(decryptor)?;
             notes += result.notes;
@@ -1317,16 +1471,7 @@ impl WalletSession {
         }
         if first {
             let state = self.snapshot()?;
-            let anchor = if options.offline {
-                self.public_history
-                    .as_ref()
-                    .ok_or("offline public history unavailable")?
-                    .acquire_offline(target, target)?
-                    .0
-                    .block
-            } else {
-                self.source.block(target)?
-            };
+            let anchor = target_anchor.clone();
             let mut pending = self.stage_refresh(
                 state,
                 anchor.clone(),
@@ -1340,10 +1485,18 @@ impl WalletSession {
                 Some(vec![]),
             )?;
             pending.offline = options.offline;
+            pending.read_snapshot = read_snapshot.clone();
             last = Some(pending.decrypt(decryptor)?);
         }
         if !options.offline {
-            credits += self.replay_credits(decryptor, target, options.page_size, cancel)?;
+            credits += self.replay_credits_at(
+                decryptor,
+                &target_anchor,
+                &indexed,
+                options.page_size,
+                cancel,
+                read_snapshot,
+            )?;
         }
         let mut result = last.ok_or("no scan result")?;
         result.notes = notes;
@@ -1361,6 +1514,35 @@ impl WalletSession {
         if size == 0 || size > 256 {
             return Err("invalid credit replay page size".into());
         }
+        if self.snapshot()?.credit_replay_from.is_none() {
+            return Ok(0);
+        }
+        let indexed = self.source.indexed_head()?;
+        let anchor = self.source.block(target)?;
+        let observation = self.invisi.chain.snapshot()?;
+        if observation.number < target {
+            return Err("primary observation is behind replay target".into());
+        }
+        let read_snapshot = Arc::new(ScanReadSnapshot::new(observation));
+        self.replay_credits_at(
+            decryptor,
+            &anchor,
+            &indexed,
+            size,
+            cancel,
+            Some(read_snapshot),
+        )
+    }
+    fn replay_credits_at(
+        &self,
+        decryptor: &dyn crate::delivery::DeliveryDecryptor,
+        anchor: &CanonicalBlock,
+        indexed: &CanonicalBlock,
+        size: u64,
+        cancel: &crate::public_history::CancellationToken,
+        read_snapshot: Option<Arc<ScanReadSnapshot>>,
+    ) -> Result<usize> {
+        let target = anchor.number;
         let state = self.snapshot()?;
         let Some(from) = state.credit_replay_from else {
             return Ok(0);
@@ -1379,16 +1561,20 @@ impl WalletSession {
         while start <= target {
             cancel.check()?;
             let end = start.saturating_add(size - 1).min(target);
-            let mut pending = self.refresh(RefreshOptions {
-                from_block: start,
-                to_block: Some(end),
-                page_size: size,
-                reset: false,
-            })?;
+            let mut pending = self.refresh_at_head(
+                RefreshOptions {
+                    from_block: start,
+                    to_block: Some(end),
+                    page_size: size,
+                    reset: false,
+                },
+                indexed,
+            )?;
             pending.candidates.clear();
             pending.completion = Some(vec![]);
-            pending.anchor = self.source.block(target)?;
+            pending.anchor = anchor.clone();
             pending.replay_advance = Some((end, revision, required));
+            pending.read_snapshot = read_snapshot.clone();
             pending.cancellation = Some(cancel.clone());
             cancel.check()?;
             count += pending.decrypt(decryptor)?.credits;
@@ -1430,5 +1616,23 @@ fn membership_for(
         Ok((proof.root, proof.path))
     } else {
         session.verified_membership(leaf, anchor)
+    }
+}
+
+#[cfg(test)]
+mod replay_schedule_tests {
+    use super::*;
+    #[test]
+    fn later_grant_preserves_committed_replay_progress_but_earlier_parent_rewinds() {
+        let mut state = WalletState::default();
+        schedule_credit_replay(&mut state, 10, 100).unwrap();
+        state.credit_replay_through = Some(50);
+        schedule_credit_replay(&mut state, 70, 120).unwrap();
+        assert_eq!(state.credit_replay_through, Some(50));
+        assert_eq!(state.credit_replay_target, Some(120));
+        schedule_credit_replay(&mut state, 20, 110).unwrap();
+        assert_eq!(state.credit_replay_through, None);
+        assert_eq!(state.credit_replay_from, Some(10));
+        assert_eq!(state.credit_replay_target, Some(120));
     }
 }

@@ -28,16 +28,24 @@ struct TrustedTransport<T: RpcTransport> {
 impl<T: RpcTransport> TrustedTransport<T> {
     fn read(&self, request: Value) -> Result<Value> {
         let value = self.rpc.call("invisi_readChainState", json!([request]))?;
+        self.validate_read(&value)?;
+        Ok(value)
+    }
+    fn validate_read(&self, value: &Value) -> Result<()> {
         if value["apiVersion"] != "v1"
             || value["protocolVersion"] != "1"
             || ProtocolDeployment::parse(&value["deployment"])? != self.deployment
         {
             return Err(Error::Invalid("trusted deployment or version mismatch"));
         }
-        Ok(value)
+        Ok(())
     }
     fn header(&self, block: &Value) -> Result<Value> {
         let response = self.read(json!({"kind":"header", "block":block}))?;
+        self.validate_header(&response, block)
+    }
+    fn validate_header(&self, response: &Value, block: &Value) -> Result<Value> {
+        self.validate_read(response)?;
         let value = response["header"].clone();
         if value.is_null() {
             return Err(Error::Invalid("trusted header missing"));
@@ -116,6 +124,37 @@ impl<T: RpcTransport> RpcTransport for TrustedTransport<T> {
     }
 }
 impl<T: RpcTransport> CanonicalChain for TrustedProvider<T> {
+    fn blocks(&self, numbers: &[u64]) -> Option<Result<Vec<CanonicalBlock>>> {
+        Some((|| {
+            if numbers.is_empty() || numbers.len() > 256 {
+                return Err(Error::Invalid("header range must contain 1..256 numbers"));
+            }
+            let transport = &self.ethereum.rpc.transport;
+            let mut headers = Vec::with_capacity(numbers.len());
+            for chunk in numbers.chunks(20) {
+                let requests = chunk
+                    .iter()
+                    .map(|n| {
+                        (
+                            "invisi_readChainState",
+                            json!([{"kind":"header","block":format!("0x{n:x}")}]),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let responses = transport.rpc.batch(&requests)?;
+                for (n, response) in chunk.iter().zip(responses) {
+                    let v = transport.validate_header(&response, &json!(format!("0x{n:x}")))?;
+                    headers.push(CanonicalBlock {
+                        number: super::client::quantity(&v["number"])?,
+                        timestamp: super::client::quantity(&v["timestamp"])?,
+                        hash: invisi_sdk_protocol::interfaces::hash(&v["hash"])?,
+                        parent_hash: invisi_sdk_protocol::interfaces::hash(&v["parentHash"])?,
+                    });
+                }
+            }
+            Ok(headers)
+        })())
+    }
     fn chain_id(&self) -> Result<u64> {
         self.ethereum.chain_id()
     }

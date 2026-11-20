@@ -111,6 +111,51 @@ impl<T: RpcTransport> JsonRpc<T> {
             sequence: AtomicU64::new(0),
         }
     }
+    /// Send a bounded JSON-RPC batch and restore request order after validating every envelope.
+    /// A partial, duplicate, unknown or errored response rejects the complete batch.
+    pub fn batch(&self, requests: &[(&str, Value)]) -> Result<Vec<Value>> {
+        if requests.is_empty() || requests.len() > 20 {
+            return Err(Error::Invalid("JSON-RPC batch must contain 1..20 requests"));
+        }
+        let mut ids = Vec::with_capacity(requests.len());
+        let mut envelopes = Vec::with_capacity(requests.len());
+        for (method, params) in requests {
+            let id = self
+                .sequence
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_add(1))
+                .map_err(|_| Error::Invalid("request id exhausted"))?
+                + 1;
+            ids.push(id);
+            envelopes.push(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}));
+        }
+        let response = self.transport.send(&Value::Array(envelopes))?;
+        let rows = response
+            .as_array()
+            .filter(|v| v.len() == ids.len())
+            .ok_or(Error::Invalid("JSON-RPC batch response count mismatch"))?;
+        let mut ordered = std::collections::BTreeMap::new();
+        for row in rows {
+            let id = row["id"]
+                .as_u64()
+                .ok_or(Error::Invalid("JSON-RPC batch id missing"))?;
+            if row["jsonrpc"] != "2.0" || !ids.contains(&id) || ordered.contains_key(&id) {
+                return Err(Error::Invalid(
+                    "JSON-RPC batch response correlation mismatch",
+                ));
+            }
+            // Use the single-call parser so valid remote errors retain retry codes/data.
+            // Failed or malformed batches never fall back to unchecked single requests.
+            let result = Self::response_result(row)?;
+            ordered.insert(id, result);
+        }
+        ids.into_iter()
+            .map(|id| {
+                ordered
+                    .remove(&id)
+                    .ok_or(Error::Invalid("missing JSON-RPC batch member"))
+            })
+            .collect()
+    }
     pub fn call(&self, method: &str, params: Value) -> Result<Value> {
         let id = self
             .sequence
@@ -126,6 +171,9 @@ impl<T: RpcTransport> JsonRpc<T> {
         {
             return Err(Error::Invalid("JSON-RPC response envelope mismatch"));
         }
+        Self::response_result(&response)
+    }
+    fn response_result(response: &Value) -> Result<Value> {
         if response.get("error").is_some() && response.get("result").is_some() {
             return Err(Error::Invalid("ambiguous JSON-RPC response"));
         }

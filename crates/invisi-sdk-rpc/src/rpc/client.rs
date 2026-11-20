@@ -6,6 +6,10 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 
 pub trait CanonicalChain: Send + Sync {
+    /// Optional bounded bulk header capability. None preserves the existing single-header path.
+    fn blocks(&self, _numbers: &[u64]) -> Option<Result<Vec<CanonicalBlock>>> {
+        None
+    }
     fn block_by_tag(&self, _tag: FinalityTag) -> Result<Option<CanonicalBlock>> {
         Err(Error::FinalityUnsupported)
     }
@@ -347,7 +351,7 @@ impl RootAnchor {
     }
 }
 impl<T: RpcTransport, C: CanonicalChain> ProtocolRpcClient<T, C> {
-    fn update_page(&self, from: u64, to: u64, method: &str) -> Result<(CanonicalBlock, Value)> {
+    fn validate_update_range(&self, from: u64, to: u64) -> Result<()> {
         if from < self.deployment.protocol.from_block
             || to < from
             || to - from >= MAX_UPDATE_BLOCKS
@@ -357,9 +361,24 @@ impl<T: RpcTransport, C: CanonicalChain> ProtocolRpcClient<T, C> {
                 "updates require at most 10000 deployment blocks",
             ));
         }
+        Ok(())
+    }
+    fn update_page(&self, from: u64, to: u64, method: &str) -> Result<(CanonicalBlock, Value)> {
+        self.validate_update_range(from, to)?;
         let status = self.read_status_metadata()?;
+        self.update_page_with_status(from, to, method, &status)
+    }
+    fn update_page_with_status(
+        &self,
+        from: u64,
+        to: u64,
+        method: &str,
+        status: &ProtocolStatus,
+    ) -> Result<(CanonicalBlock, Value)> {
+        self.validate_update_range(from, to)?;
         let head = status
             .indexed_head
+            .as_ref()
             .ok_or(Error::Invalid("index has no head"))?;
         if head.number < to {
             return Err(Error::Invalid("index is behind requested range"));
@@ -368,7 +387,7 @@ impl<T: RpcTransport, C: CanonicalChain> ProtocolRpcClient<T, C> {
         if block.number != to {
             return Err(Error::Invalid("incorrect update anchor number"));
         }
-        if head.number == block.number && head != block {
+        if head.number == block.number && *head != block {
             return Err(Error::Invalid(
                 "indexed head disagrees with requested canonical block",
             ));
@@ -436,6 +455,43 @@ impl<T: RpcTransport, C: CanonicalChain> ProtocolRpcClient<T, C> {
             }
         }
         Ok(out)
+    }
+    /// Discover both public histories against one call-local authenticated status.
+    /// Every response and row still receives the normal canonical/binding checks;
+    /// status is never shared across operations or used as a mutable-state cache.
+    pub fn get_history_updates(
+        &self,
+        from: u64,
+        to: u64,
+    ) -> Result<(UpdatePage<NoteOutput>, UpdatePage<CreditTransition>)> {
+        self.validate_update_range(from, to)?;
+        let status = self.read_status_metadata()?;
+        let (note_block, notes) =
+            self.update_page_with_status(from, to, "invisi_getNoteUpdates", &status)?;
+        let note_rows = list_or_null(
+            notes
+                .get("notes")
+                .ok_or(Error::Invalid("Note list required"))?,
+        )?;
+        let note_items = self.leaf_rows(note_rows, from, to, NoteOutput::parse)?;
+        self.canonical(&note_block)?;
+        let (credit_block, credits) =
+            self.update_page_with_status(from, to, "invisi_getCreditTransitions", &status)?;
+        let credit_items = self.transitions(list_or_null(&credits)?, from, to)?;
+        self.canonical(&credit_block)?;
+        if note_block != credit_block {
+            return Err(Error::Invalid("history update anchor mismatch"));
+        }
+        Ok((
+            UpdatePage {
+                block: note_block,
+                items: note_items,
+            },
+            UpdatePage {
+                block: credit_block,
+                items: credit_items,
+            },
+        ))
     }
     pub fn get_note_updates(&self, from: u64, to: u64) -> Result<UpdatePage<NoteOutput>> {
         let (block, v) = self.update_page(from, to, "invisi_getNoteUpdates")?;

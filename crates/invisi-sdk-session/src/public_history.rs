@@ -531,6 +531,31 @@ impl PublicHistory {
         to: u64,
         cancel: &CancellationToken,
     ) -> Result<Vec<CanonicalBlock>> {
+        let numbers = (from..=to).collect::<Vec<_>>();
+        let mut bulk = Vec::with_capacity(numbers.len());
+        for chunk in numbers.chunks(20) {
+            cancel.check()?;
+            match self.source.blocks(chunk) {
+                Some(result) => {
+                    let headers = result?;
+                    cancel.check()?;
+                    if headers.len() != chunk.len()
+                        || headers.iter().zip(chunk).any(|(h, n)| h.number != *n)
+                    {
+                        return Err("invalid public bulk headers".into());
+                    }
+                    bulk.extend(headers);
+                }
+                None if bulk.is_empty() => break,
+                None => return Err("public bulk header capability changed".into()),
+            }
+        }
+        if !bulk.is_empty() {
+            if bulk.windows(2).any(|p| p[1].parent_hash != p[0].hash) {
+                return Err("noncontiguous public bulk headers".into());
+            }
+            return Ok(bulk);
+        }
         let count = (to - from + 1) as usize;
         let workers = count.min(8);
         // Reuse bounded workers across the page, rather than spawning per block.
@@ -602,7 +627,12 @@ impl PublicHistory {
         let mut memberships = vec![];
         let mut cursor = from;
         while cursor <= to {
-            if let Some(page) = self.store.page_at(&self.scope, cursor)? {
+            if let Some(reference) = before
+                .pages
+                .iter()
+                .find(|p| p.from_block <= cursor && p.block.number >= cursor)
+            {
+                let page = self.store.read(reference)?;
                 for h in page
                     .headers
                     .iter()
@@ -632,15 +662,18 @@ impl PublicHistory {
                 .min()
                 .unwrap_or(to)
                 .min(to);
+            let downloaded_headers = self.read_headers(cursor, end, cancel)?;
             let mut page = PublicHistoryPage {
                 from_block: cursor,
-                block: self.source.block(end)?,
-                headers: vec![],
+                block: downloaded_headers
+                    .last()
+                    .cloned()
+                    .ok_or("empty public headers")?,
+                headers: downloaded_headers,
                 receipts: vec![],
                 verified_positions: vec![],
                 memberships: vec![],
             };
-            page.headers = self.read_headers(cursor, end, cancel)?;
             let hashes = self
                 .source
                 .discover(cursor, end)?
@@ -749,6 +782,9 @@ impl PublicHistory {
         let block = headers.last().cloned().ok_or("empty public page")?;
         if self.source.block(to)? != block {
             return Err("public anchor changed".into());
+        }
+        if self.snapshot()?.generation != before.generation {
+            return Err("public history generation changed during acquisition".into());
         }
         let mut receipts = receipts.into_values().collect::<Vec<_>>();
         receipts.sort_by_key(|r| (r.block.number, r.logs.first().map_or(0, |l| l.log_index)));
@@ -940,6 +976,9 @@ mod parallel_header_tests {
         peak: AtomicUsize,
         broken: bool,
         failed: bool,
+        batch: bool,
+        batch_cancel: Option<CancellationToken>,
+        batch_calls: AtomicUsize,
     }
     impl SessionSource for Source {
         fn context(&self) -> ProtocolContext {
@@ -973,6 +1012,17 @@ mod parallel_header_tests {
                 timestamp: n,
             })
         }
+        fn blocks(&self, numbers: &[u64]) -> Option<Result<Vec<CanonicalBlock>>> {
+            self.batch.then(|| {
+                assert!(numbers.len() <= 20);
+                self.batch_calls.fetch_add(1, Ordering::SeqCst);
+                let result = numbers.iter().map(|n| self.block(*n)).collect();
+                if let Some(cancel) = &self.batch_cancel {
+                    cancel.cancel();
+                }
+                result
+            })
+        }
         fn discover(&self, _: u64, _: u64) -> Result<Vec<B256>> {
             Ok(vec![])
         }
@@ -989,12 +1039,22 @@ mod parallel_header_tests {
 
     #[test]
     fn parallel_headers_are_bounded_ordered_and_never_commit_failed_pages() {
-        for mode in ["ordered", "broken", "failed"] {
+        for mode in [
+            "ordered",
+            "broken",
+            "failed",
+            "batch",
+            "batch-broken",
+            "batch-failed",
+        ] {
             let source = Arc::new(Source {
                 active: AtomicUsize::new(0),
                 peak: AtomicUsize::new(0),
-                broken: mode == "broken",
-                failed: mode == "failed",
+                broken: mode.ends_with("broken"),
+                failed: mode.ends_with("failed"),
+                batch: mode.starts_with("batch"),
+                batch_cancel: None,
+                batch_calls: AtomicUsize::new(0),
             });
             let history = PublicHistory::new(
                 Arc::new(
@@ -1014,10 +1074,12 @@ mod parallel_header_tests {
             )
             .unwrap();
             let result = history.acquire(100, 115, &CancellationToken::default());
-            if mode == "ordered" {
+            if mode == "ordered" || mode == "batch" {
                 let (page, _) = result.unwrap();
                 let peak = source.peak.load(Ordering::SeqCst);
-                assert!((2..=8).contains(&peak), "parallel reads: {peak}");
+                if mode == "ordered" {
+                    assert!((2..=8).contains(&peak), "parallel reads: {peak}");
+                }
                 assert_eq!(
                     page.headers.iter().map(|h| h.number).collect::<Vec<_>>(),
                     (100..=115).collect::<Vec<_>>()
@@ -1029,5 +1091,39 @@ mod parallel_header_tests {
             }
             assert_eq!(source.active.load(Ordering::SeqCst), 0);
         }
+    }
+    #[test]
+    fn cancelled_bulk_headers_stop_after_one_chunk_and_never_commit_partial_page() {
+        let token = CancellationToken::default();
+        let source = Arc::new(Source {
+            active: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+            broken: false,
+            failed: false,
+            batch: true,
+            batch_cancel: Some(token.clone()),
+            batch_calls: AtomicUsize::new(0),
+        });
+        let history = PublicHistory::new(
+            Arc::new(
+                PublicHistoryStore::new(
+                    Arc::new(MemoryAtomicRecords::default()),
+                    Retention::default(),
+                )
+                .unwrap(),
+            ),
+            PublicHistoryScope {
+                chain_id: 97,
+                protocol_address: Address::with_last_byte(1),
+                runtime_code_hash: B256::with_last_byte(42),
+                deployment_block: 100,
+            },
+            source.clone(),
+        )
+        .unwrap();
+        assert!(history.acquire(100, 147, &token).is_err());
+        assert_eq!(source.batch_calls.load(Ordering::SeqCst), 1);
+        let state = history.snapshot().unwrap();
+        assert!(state.pages.is_empty() && state.coverage.is_empty());
     }
 }

@@ -62,6 +62,8 @@ struct Chain {
     reorg: AtomicBool,
     source_anchors: AtomicBool,
     spent: Mutex<BTreeSet<B256>>,
+    nullifier_reads: std::sync::atomic::AtomicUsize,
+    revocation_reads: std::sync::atomic::AtomicUsize,
     roots: Mutex<BTreeSet<B256>>,
 }
 impl Chain {
@@ -115,6 +117,7 @@ impl ChainState for Chain {
         Ok(self.roots.lock().unwrap().contains(&root))
     }
     fn nullifier_spent(&self, n: B256, _: &CanonicalBlock) -> Result<bool> {
+        self.nullifier_reads.fetch_add(1, Ordering::SeqCst);
         self.online()?;
         Ok(self.spent.lock().unwrap().contains(&n))
     }
@@ -126,6 +129,7 @@ impl ChainState for Chain {
         _: u16,
         _: &CanonicalBlock,
     ) -> Result<bool> {
+        self.revocation_reads.fetch_add(1, Ordering::SeqCst);
         self.online()?;
         Ok(self.revoked.load(Ordering::SeqCst))
     }
@@ -163,6 +167,9 @@ struct Source {
     runtime_hash: Mutex<Option<B256>>,
     extra_receipts: Mutex<Vec<CanonicalReceipt>>,
     indexed_height: std::sync::atomic::AtomicU64,
+    indexed_reads: std::sync::atomic::AtomicUsize,
+    block_reads: std::sync::atomic::AtomicUsize,
+    read_latency_ms: std::sync::atomic::AtomicU64,
     membership_reads: std::sync::atomic::AtomicUsize,
     receipt_reads: std::sync::atomic::AtomicUsize,
     discovery_reads: std::sync::atomic::AtomicUsize,
@@ -182,9 +189,14 @@ impl SessionSource for Source {
         *self.runtime_hash.lock().unwrap()
     }
     fn indexed_head(&self) -> Result<CanonicalBlock> {
+        self.indexed_reads.fetch_add(1, Ordering::SeqCst);
         self.block(self.indexed_height.load(Ordering::SeqCst))
     }
     fn block(&self, n: u64) -> Result<CanonicalBlock> {
+        self.block_reads.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(
+            self.read_latency_ms.load(Ordering::SeqCst),
+        ));
         self.chain.online()?;
         if self.fork.load(Ordering::SeqCst) {
             let mut b = block(n);
@@ -353,6 +365,9 @@ fn harness() -> Harness {
         runtime_hash: Default::default(),
         extra_receipts: Default::default(),
         indexed_height: std::sync::atomic::AtomicU64::new(10),
+        indexed_reads: Default::default(),
+        block_reads: Default::default(),
+        read_latency_ms: Default::default(),
         membership_reads: Default::default(),
         receipt_reads: Default::default(),
         discovery_reads: Default::default(),
@@ -1979,10 +1994,19 @@ fn cancelled_priority_scan_resumes_only_actual_gaps() {
 
 #[test]
 fn reverse_discovery_replays_credit_successor_after_late_parent() {
+    for same_wallet in [false, true] {
+        reverse_credit_discovery_case(same_wallet, false);
+    }
+}
+fn reverse_credit_discovery_case(same_wallet: bool, benchmark: bool) {
     use crate::credit::{CreditPolicy, CreditState, CreditUsage};
     let h = harness();
+    if benchmark {
+        h.source.indexed_height.store(127, Ordering::SeqCst);
+        h.chain.height.store(127, Ordering::SeqCst);
+    }
     let alice = wallet(1);
-    let bob = wallet(2);
+    let bob = wallet(if same_wallet { 1 } else { 2 });
     let state = CreditDeliveryState {
         note: CreditState {
             context: context(),
@@ -2060,7 +2084,11 @@ fn reverse_discovery_replays_credit_successor_after_late_parent() {
     let mut parent_receipt = h.source.receipt.lock().unwrap().clone();
     parent_receipt.block = block(4);
     h.source.extra_receipts.lock().unwrap().push(parent_receipt);
-    let parent_cipher = created.deliveries[0].ciphertext.to_vec();
+    let parent_ciphers = created
+        .deliveries
+        .iter()
+        .map(|d| d.ciphertext.to_vec())
+        .collect::<Vec<_>>();
     let transition =
         crate::credit::derive_credit_state(&state.note, U256::from(30), block(10).timestamp)
             .unwrap();
@@ -2175,7 +2203,7 @@ fn reverse_discovery_replays_credit_successor_after_late_parent() {
         receipt.transaction_hash = B256::with_last_byte(8);
         receipt.logs = vec![log(&insertion, 2), log(&transition_event, 3), log(&draw, 4)];
     }
-    struct ParentOnly(Vec<u8>);
+    struct ParentOnly(Vec<Vec<u8>>);
     impl crate::delivery::DeliveryDecryptor for ParentOnly {
         fn decrypt_note(
             &self,
@@ -2192,21 +2220,63 @@ fn reverse_discovery_replays_credit_successor_after_late_parent() {
             r: CreditRole,
             o: U256,
         ) -> Result<Option<Vec<u8>>> {
-            if e == self.0 {
+            if self.0.iter().any(|cipher| e == cipher) {
                 AppDecryptor::default().decrypt_credit(e, c, r, o)
             } else {
                 Ok(None)
             }
         }
     }
-    let decryptor = ParentOnly(parent_cipher);
+    let decryptor = ParentOnly(parent_ciphers);
+    if !benchmark {
+        let unmatched = WalletSession::connect(
+            Invisi::new(h.chain.clone()),
+            h.session.wallet.clone(),
+            h.store.clone(),
+            h.source.clone(),
+            "unmatched",
+        )
+        .unwrap();
+        unmatched
+            .scan(
+                &AppDecryptor {
+                    nonrecipient: true,
+                    ..Default::default()
+                },
+                ScanOptions {
+                    page_size: 3,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let state = unmatched.snapshot().unwrap();
+        assert!(state.credits.is_empty());
+        assert!(state.credit_replay_from.is_none());
+        assert_eq!(
+            state.credit_replay_revision, 0,
+            "nonrecipient Credit events cannot schedule replay"
+        );
+    }
     let result = h
         .session
-        .scan(
+        .scan_with_progress(
             &decryptor,
             ScanOptions {
                 page_size: 3,
                 ..Default::default()
+            },
+            &crate::public_history::CancellationToken::default(),
+            |_| {
+                if benchmark {
+                    return Ok(());
+                }
+                if let Some(from) = h.session.snapshot()?.credit_replay_from {
+                    assert_eq!(
+                        from, 4,
+                        "replay starts at actual newly owned parent, not page boundary"
+                    );
+                }
+                Ok(())
             },
         )
         .unwrap();
@@ -2217,8 +2287,85 @@ fn reverse_discovery_replays_credit_successor_after_late_parent() {
     assert!(after
         .credits
         .contains_key(&credit_key(credit_commitment, CreditRole::Owner)));
+    if same_wallet {
+        assert!(after
+            .credits
+            .contains_key(&credit_key(credit_commitment, CreditRole::Spender)));
+    }
     assert!(result.credits >= 2);
+    assert!(after.credits[&credit_key(commitment, CreditRole::Owner)].consumed);
+    assert!(!after.credits[&credit_key(credit_commitment, CreditRole::Owner)].consumed);
     assert!(after.credit_replay_from.is_none());
+    if benchmark {
+        // Re-present a formerly unresolved delivery after its state is already
+        // authenticated (for example another restore path supplied the opening).
+        let receipt = h.source.extra_receipts.lock().unwrap()[0].clone();
+        let candidate = format!("{}:2:0:Owner", receipt.transaction_hash);
+        let mut state = h.session.snapshot().unwrap();
+        state.unresolved_deliveries.insert(
+            candidate.clone(),
+            UnresolvedDelivery {
+                receipt,
+                key: candidate,
+            },
+        );
+        h.session.commit(state).unwrap();
+        let before = h.session.snapshot().unwrap();
+        let headers = h.source.block_reads.load(Ordering::SeqCst);
+        let indexed = h.source.indexed_reads.load(Ordering::SeqCst);
+        let discovery = h.source.discovery_reads.load(Ordering::SeqCst);
+        let start = std::time::Instant::now();
+        h.session.retry_unresolved(&decryptor).unwrap();
+        h.session
+            .replay_credits(
+                &decryptor,
+                127,
+                3,
+                &crate::public_history::CancellationToken::default(),
+            )
+            .unwrap();
+        let state = h.session.snapshot().unwrap();
+        assert!(state.credit_replay_from.is_none());
+        assert!(state.unresolved_deliveries.is_empty());
+        assert!(state.credits[&credit_key(commitment, CreditRole::Owner)].consumed);
+        assert!(!state.credits[&credit_key(credit_commitment, CreditRole::Owner)].consumed);
+        println!("credit_replay duplicate_owned elapsed_us={} indexed_reads={} block_reads={} discovery_pages={} private_commits={}", start.elapsed().as_micros(),h.source.indexed_reads.load(Ordering::SeqCst)-indexed,h.source.block_reads.load(Ordering::SeqCst)-headers,h.source.discovery_reads.load(Ordering::SeqCst)-discovery,state.revision-before.revision);
+        return;
+    }
+    h.chain.revoked.store(true, Ordering::SeqCst);
+    h.session.scan(&decryptor, ScanOptions::default()).unwrap();
+    assert!(h
+        .session
+        .snapshot()
+        .unwrap()
+        .credits
+        .values()
+        .all(|c| c.revoked));
+    // Re-importing an already authenticated owned delivery must not force old
+    // discovery coverage to be replayed again.
+    let mut again = h.session.snapshot().unwrap();
+    again.discovery_ranges.clear();
+    again.discovery_through = None;
+    h.session.commit(again).unwrap();
+    h.session
+        .scan_with_progress(
+            &decryptor,
+            ScanOptions {
+                from_block: Some(4),
+                to_block: Some(4),
+                page_size: 1,
+                ..Default::default()
+            },
+            &crate::public_history::CancellationToken::default(),
+            |_| {
+                assert!(
+                    h.session.snapshot()?.credit_replay_from.is_none(),
+                    "existing delivery scheduled replay"
+                );
+                Ok(())
+            },
+        )
+        .unwrap();
 }
 
 #[test]
@@ -2329,6 +2476,7 @@ fn archived_externalized_journal_restores_its_input_lock_before_rebuild() {
 fn replaying_earlier_snapshot_cannot_clear_later_credit_obligation() {
     let h = synced();
     h.source.indexed_height.store(16, Ordering::SeqCst);
+    h.chain.height.store(16, Ordering::SeqCst);
     let mut state = h.session.snapshot().unwrap();
     state.credit_replay_from = Some(0);
     state.credit_replay_target = Some(16);
@@ -4617,4 +4765,153 @@ fn shield_receipt_logs(
         log(&insertion, 2),
         log(&outputs, 3),
     ]
+}
+
+#[test]
+#[ignore = "deterministic pipeline benchmark; run explicitly with --ignored --nocapture"]
+fn benchmark_wallet_history_pipeline() {
+    for use_public in [false, true] {
+        for note_block in [10, 120] {
+            let h = harness();
+            h.source.indexed_height.store(127, Ordering::SeqCst);
+            h.chain.height.store(127, Ordering::SeqCst);
+            h.source.receipt.lock().unwrap().block = block(note_block);
+            h.source.read_latency_ms.store(2, Ordering::SeqCst);
+            let session = if use_public {
+                use crate::public_history::*;
+                h.session
+                    .clone()
+                    .with_public_history(Arc::new(
+                        PublicHistory::new(
+                            Arc::new(
+                                PublicHistoryStore::new(
+                                    Arc::new(MemoryAtomicRecords::default()),
+                                    Retention::default(),
+                                )
+                                .unwrap(),
+                            ),
+                            PublicHistoryScope {
+                                chain_id: context().chain_id,
+                                protocol_address: sdk::word_address(context().protocol_address)
+                                    .unwrap(),
+                                runtime_code_hash: B256::with_last_byte(42),
+                                deployment_block: 0,
+                            },
+                            h.source.clone(),
+                        )
+                        .unwrap(),
+                    ))
+                    .unwrap()
+            } else {
+                h.session.clone()
+            };
+            for label in ["cold", "warm"] {
+                let indexed = h.source.indexed_reads.load(Ordering::SeqCst);
+                let headers = h.source.block_reads.load(Ordering::SeqCst);
+                let discovery = h.source.discovery_reads.load(Ordering::SeqCst);
+                let receipts = h.source.receipt_reads.load(Ordering::SeqCst);
+                let membership = h.source.membership_reads.load(Ordering::SeqCst);
+                let consumption = h.chain.nullifier_reads.load(Ordering::SeqCst);
+                let revision = session.snapshot().unwrap().revision;
+                let start = std::time::Instant::now();
+                session
+                    .scan(
+                        &AppDecryptor::default(),
+                        ScanOptions {
+                            page_size: 16,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                let state = session.snapshot().unwrap();
+                assert!(state.credit_replay_from.is_none());
+                assert_eq!(state.discovery_through.as_ref().unwrap().number, 127);
+                assert!(state.notes.contains_key(&h.commitment));
+                println!("wallet_history public={use_public} note_block={note_block} {label} elapsed_us={} indexed_reads={} block_reads={} discovery_reads={} receipt_reads={} membership_reads={} consumption_reads={} private_commits={}",
+                    start.elapsed().as_micros(),h.source.indexed_reads.load(Ordering::SeqCst)-indexed,
+                    h.source.block_reads.load(Ordering::SeqCst)-headers,h.source.discovery_reads.load(Ordering::SeqCst)-discovery,
+                    h.source.receipt_reads.load(Ordering::SeqCst)-receipts,h.source.membership_reads.load(Ordering::SeqCst)-membership,
+                    h.chain.nullifier_reads.load(Ordering::SeqCst)-consumption,state.revision-revision);
+            }
+        }
+    }
+}
+
+#[test]
+fn repeated_complete_scan_has_no_history_download_or_credit_replay_and_still_checks_consumption() {
+    let h = harness();
+    h.session
+        .scan(&AppDecryptor::default(), ScanOptions::default())
+        .unwrap();
+    let before = h.source.discovery_reads.load(Ordering::SeqCst);
+    let nf = h.session.snapshot().unwrap().notes[&h.commitment].nullifier;
+    h.chain.spent.lock().unwrap().insert(nf);
+    h.session
+        .scan(&AppDecryptor::default(), ScanOptions::default())
+        .unwrap();
+    let state = h.session.snapshot().unwrap();
+    assert_eq!(h.source.discovery_reads.load(Ordering::SeqCst), before);
+    assert!(state.credit_replay_from.is_none());
+    assert!(state.notes[&h.commitment].spent);
+}
+
+#[test]
+fn scan_state_reads_are_hash_scoped_and_never_reused_across_invocations() {
+    let h = harness();
+    h.source.indexed_height.store(127, Ordering::SeqCst);
+    h.chain.height.store(127, Ordering::SeqCst);
+    h.source.receipt.lock().unwrap().block = block(120);
+    let before = h.chain.nullifier_reads.load(Ordering::SeqCst);
+    h.session
+        .scan(
+            &AppDecryptor::default(),
+            ScanOptions {
+                page_size: 16,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        h.chain.nullifier_reads.load(Ordering::SeqCst) - before,
+        1,
+        "one immutable numeric-block state read per scan"
+    );
+    let state = h.session.snapshot().unwrap();
+    assert_eq!(state.observed_through, Some(block(127)));
+    let nf = state.notes[&h.commitment].nullifier;
+    h.chain.spent.lock().unwrap().insert(nf);
+    h.session
+        .scan(&AppDecryptor::default(), ScanOptions::default())
+        .unwrap();
+    assert!(h.session.snapshot().unwrap().notes[&h.commitment].spent);
+    assert_eq!(
+        h.chain.nullifier_reads.load(Ordering::SeqCst) - before,
+        2,
+        "a new scan reads consumption again"
+    );
+    h.source.fork.store(true, Ordering::SeqCst);
+    assert!(
+        h.session
+            .scan(&AppDecryptor::default(), ScanOptions::default())
+            .is_err(),
+        "same-height fork cannot reuse numeric reads"
+    );
+}
+
+#[test]
+fn scan_rejects_observation_behind_discovery_target_before_private_commit() {
+    let h = harness();
+    h.source.indexed_height.store(20, Ordering::SeqCst);
+    let before = h.session.snapshot().unwrap().revision;
+    assert!(h
+        .session
+        .scan(&AppDecryptor::default(), ScanOptions::default())
+        .is_err());
+    assert_eq!(h.session.snapshot().unwrap().revision, before);
+}
+
+#[test]
+#[ignore = "credit replay pipeline benchmark; run explicitly with --ignored --nocapture"]
+fn benchmark_credit_replay_pipeline() {
+    reverse_credit_discovery_case(false, true);
 }

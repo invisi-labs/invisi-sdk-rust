@@ -1,6 +1,6 @@
 [package]
 name = "invisi-sdk-rpc"
-version = "1.3.1"
+version = "1.3.2"
 edition = "2021"
 license = "Apache-2.0"
 description = "Invisi SDK rpc capabilities"
@@ -10,8 +10,8 @@ repository = "https://github.com/invisi-labs/invisi-sdk-rust"
 include = ["Cargo.toml", "README.md", "LICENSE", "NOTICE", "src/**", "assets/**", "provenance/**", "testdata/**", "tests/**", "include/**"]
 
 [dependencies]
-invisi-sdk-primitives = { path = "../invisi-sdk-primitives", version = "=1.3.1" }
-invisi-sdk-protocol = { path = "../invisi-sdk-protocol", version = "=1.3.1" }
+invisi-sdk-primitives = { path = "../invisi-sdk-primitives", version = "=1.3.2" }
+invisi-sdk-protocol = { path = "../invisi-sdk-protocol", version = "=1.3.2" }
 alloy-primitives = { version = "=1.5.7", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

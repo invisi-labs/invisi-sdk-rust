@@ -79,7 +79,7 @@ def require_token():
 def request_bytes(url, attempts=6):
     for attempt in range(attempts):
         try:
-            request = urllib.request.Request(url, headers={'User-Agent': 'invisi-sdk-release/1.3.0 (+https://github.com/invisi-labs/invisi-sdk-rust)'})
+            request = urllib.request.Request(url, headers={'User-Agent': 'invisi-sdk-release/1.3.2 (+https://github.com/invisi-labs/invisi-sdk-rust)'})
             with urllib.request.urlopen(request, timeout=30) as response:
                 return response.read()
         except urllib.error.HTTPError as error:

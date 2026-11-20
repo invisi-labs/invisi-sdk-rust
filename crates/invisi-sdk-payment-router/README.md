@@ -4,7 +4,7 @@ Optional native ETH payment orchestration for the reviewed Invisi Payment Router
 
 ```toml
 [dependencies]
-invisi-sdk-payment-router = "=1.3.1"
+invisi-sdk-payment-router = "=1.3.2"
 ```
 
 The core SDK does not depend on this crate. Applications explicitly opt in and provide a trusted deployment, an async Ethereum provider and their existing SDK/wallet capabilities. Alloy `Address`, `U256` and `B256` types enforce address and integer representations. Chain IDs and deadlines are `u64`; amounts are checked against their protocol bounds.

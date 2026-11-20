@@ -247,3 +247,7 @@ for the trust model and public APIs.
 ## Contributing
 
 Open a focused GitHub issue or pull request describing the problem, scope, and validation. Run `cargo fmt --all --check`, `cargo test --workspace --all-features`, and `python3 scripts/check-release.py` for your change. Never include private keys, credentials, or private witnesses in issues, pull requests, logs, or fixtures.
+
+## Periphery resource ownership
+
+Independent Provenance circuits and `scripts/provenance-*` tools now live in `invisi-periphery`, alongside Payment Router contracts. Core continues to own protocol contracts and Transact/Credit circuits. SDK packages stay in this workspace. Use the Periphery checkout as the positional source for `scripts/sync-provenance.py`. Historical resource URLs and production pins are unchanged. New unified catalogs require explicitly pinned Core and Periphery inputs via Periphery's `scripts/combine-prover-assets.mjs`; do not point a unified SDK loader at a Core-only or Provenance-only catalog.

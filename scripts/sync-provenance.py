@@ -7,10 +7,10 @@ from pathlib import Path
 
 PIN = "6107789c5c0d24c4130bff05da6d389336feb5ccb247c4030eae5198ab05d762"
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("protocol_root", type=Path)
+parser.add_argument("periphery_root", type=Path)
 parser.add_argument("--output", type=Path, default=Path(__file__).resolve().parents[1] / ".cache" / "provenance")
 args = parser.parse_args()
-source = args.protocol_root.resolve()
+source = args.periphery_root.resolve()
 manifest_bytes = (source / "circuits/provenance/manifest.json").read_bytes()
 if hashlib.sha256(manifest_bytes).hexdigest() != PIN:
     raise SystemExit("Untrusted provenance manifest; review and explicitly update the release pin")

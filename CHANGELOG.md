@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased (planned 1.3.3)
+
+- Refresh compiler-derived Core and Factory ABI bindings after removal of address screening. Core construction now takes the protocol parameters and address registry; Factory deployment and address prediction take five arguments without a screener.
+- Preserve settlement calls, protocol events, circuit resources and the 1.3.2 crate versions while preparing the next release.
+
 ## 1.3.2
 
 - Add the optional `invisi-sdk-payment-router` crate for detached Router-funded Note preparation, native ETH exact-output V3 and registry-verified 0x quotes, canonical transaction construction and full-call simulation. Adds detached `PreparedTransaction::export_transaction` with existing phase/proof bindings so atomic callers need no pre-swap token balance or allowance. Includes explicit async RPC and 0x HTTP transports, deployment and reorg authentication, and cross-language parity fixtures.

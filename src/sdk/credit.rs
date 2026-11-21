@@ -977,6 +977,30 @@ impl PreparedCredit {
         self.proof.as_ref()
     }
 
+    pub(super) fn validate_usage_timestamp(&self, timestamp: u64) -> Result<()> {
+        let period_bound = matches!(&self.plan, CreditPlan::Draw { .. })
+            || matches!(&self.plan, CreditPlan::Create { params, .. } if params.hasInitialPayment);
+        if period_bound
+            && crate::credit::credit_periods(timestamp)
+                != crate::credit::credit_periods(self.constructed_at)
+        {
+            return Err(format!("{CREDIT_PERIOD_CHANGED}: Credit UTC usage period changed; reauthorize and regenerate proof"));
+        }
+        Ok(())
+    }
+    /// Recheck the proof's frozen UTC usage period against a fresh live chain snapshot.
+    /// This gate is for first submission; reconciliation of an attempted send bypasses it.
+    pub fn validate_usage_period(&self, chain: &dyn ChainState) -> Result<()> {
+        if chain.historical_preparation() {
+            return Err("live chain required for submission validation".into());
+        }
+        if chain.context() != self.context {
+            return Err("Credit deployment mismatch".into());
+        }
+        let block = chain.snapshot()?;
+        self.validate_usage_timestamp(block.timestamp)?;
+        chain.canonical(&block)
+    }
     pub fn validate_submission(&self, chain: &dyn ChainState, caller: Address) -> Result<()> {
         if chain.historical_preparation() {
             return Err("live chain required for submission validation".into());
@@ -1019,12 +1043,8 @@ impl PreparedCredit {
         };
         let call: Result<TransactionCall> = match &self.plan {
             CreditPlan::Create { params: p, .. } => {
-                if p.hasInitialPayment
-                    && !chain.historical_preparation()
-                    && crate::credit::credit_periods(block.timestamp)
-                        != crate::credit::credit_periods(self.constructed_at)
-                {
-                    return Err("initial payment Credit usage period changed".into());
+                if !chain.historical_preparation() {
+                    self.validate_usage_timestamp(block.timestamp)?;
                 }
                 if p.deadline < U256::from(block.timestamp)
                     || chain.credit_status(p.owner, p.token, p.grantId, &block)? != 0
@@ -1060,14 +1080,11 @@ impl PreparedCredit {
                 }))
             }
             CreditPlan::Draw { params: p, .. } => {
-                if p.deadline < U256::from(block.timestamp)
-                    || !chain.historical_preparation()
-                        && crate::credit::credit_periods(block.timestamp)
-                            != crate::credit::credit_periods(self.constructed_at)
-                {
-                    return Err(
-                        "Credit draw crossed deadline or UTC usage period; prepare again".into(),
-                    );
+                if !chain.historical_preparation() {
+                    self.validate_usage_timestamp(block.timestamp)?;
+                }
+                if p.deadline < U256::from(block.timestamp) {
+                    return Err("Credit draw deadline expired".into());
                 }
                 map_preparation(p.payers.len(), |i| {
                     let payer = &p.payers[i];
@@ -1448,6 +1465,219 @@ mod lifecycle_tests {
         }
         let intent = authorized.clone().broadcaster_intent();
         assert!(intent.is_err());
+    }
+    // Removing either period guard must allow a stale, otherwise valid proof through these tests.
+    fn period_operation(
+        kind: &str,
+        timestamp: u64,
+    ) -> (
+        Arc<super::super::test_support::FixtureChain>,
+        PreparedCredit,
+    ) {
+        let chain = chain();
+        chain.block.lock().unwrap().timestamp = timestamp;
+        let runtime = Invisi::new(chain.clone());
+        let state = initial(chain.as_ref());
+        let deadline = timestamp + 172800;
+        let prepared = if kind == "initial" {
+            runtime
+                .prepare_create_credit_with_initial_payment(
+                    &wallet(1),
+                    state,
+                    Some(InitialCreditPayment {
+                        net_amount: None,
+                        amount: U256::from(7),
+                        payload: vec![],
+                    }),
+                    deadline,
+                    Fee::default(),
+                )
+                .unwrap()
+        } else {
+            chain.credit_statuses.lock().unwrap().insert(
+                (wallet(1).owner_address, Address::repeat_byte(0x22), 1001),
+                1,
+            );
+            runtime
+                .prepare_draw_credit_explicit(
+                    &wallet(2),
+                    vec![input(state, "credit_draw_slots1")],
+                    &wallet(91),
+                    deadline,
+                    Fee::default(),
+                    vec![],
+                )
+                .unwrap()
+        };
+        (chain, prepared)
+    }
+    fn prove_period_operation(prepared: PreparedCredit, kind: &str) -> PreparedCredit {
+        let request = prepared.export_wallet_request("period-consent").unwrap();
+        let response: WalletResponse = serde_json::from_value(
+            crate::wallet::execute(
+                &secret(if kind == "initial" { 1 } else { 2 }),
+                &request.as_value(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        prepared
+            .with_wallet_response(&request, &response)
+            .unwrap()
+            .prove(&SyntheticCreditBackend)
+            .unwrap()
+    }
+    #[test]
+    fn period_changes_have_stable_code_for_initial_payment_and_draw() {
+        // UTC midnight, Jan -> Feb, Dec -> Jan (2025/2026).
+        for midnight in [1_738_195_200u64, 1_738_368_000, 1_767_225_600] {
+            for kind in ["initial", "draw"] {
+                let (chain, prepared) = period_operation(kind, midnight - 60);
+                let proved = prove_period_operation(prepared, kind);
+                chain.block.lock().unwrap().timestamp = midnight - 1;
+                proved
+                    .validate_submission(chain.as_ref(), Address::ZERO)
+                    .unwrap();
+                chain.block.lock().unwrap().timestamp = midnight;
+                let error = proved
+                    .validate_submission(chain.as_ref(), Address::ZERO)
+                    .unwrap_err();
+                assert!(
+                    error.starts_with("CREDIT_PERIOD_CHANGED:"),
+                    "{kind}: {error}"
+                );
+                assert!(error.contains("reauthorize and regenerate proof"));
+            }
+        }
+    }
+    #[test]
+    fn credit_deadline_remains_distinct_from_period_change() {
+        for kind in ["initial", "draw"] {
+            let (chain, mut prepared) = period_operation(kind, 1_738_368_010);
+            match &mut prepared.plan {
+                CreditPlan::Create { params, .. } => params.deadline = U256::from(1_738_368_020u64),
+                CreditPlan::Draw { params, .. } => params.deadline = U256::from(1_738_368_020u64),
+                _ => unreachable!(),
+            }
+            let proved = prove_period_operation(prepared, kind);
+            chain.block.lock().unwrap().timestamp = 1_738_368_021;
+            let error = proved
+                .validate_submission(chain.as_ref(), Address::ZERO)
+                .unwrap_err();
+            assert!(!error.starts_with("CREDIT_PERIOD_CHANGED:"));
+            assert!(error.contains("deadline") || error.contains("expired"));
+        }
+    }
+    #[test]
+    fn credit_future_period_schedule_is_rejected_before_relay_quote() {
+        for kind in ["initial", "draw"] {
+            let (chain, prepared) = period_operation(kind, 1_738_367_940);
+            let relay = Arc::new(CreditRelay {
+                fees: Default::default(),
+                submits: Default::default(),
+            });
+            for (publish_after, execute_before) in [
+                (1_738_368_000, 1_738_368_060),
+                (1_738_367_950, 1_738_368_001),
+            ] {
+                let error = prepared
+                    .quote_for_broadcaster(
+                        chain.clone(),
+                        relay.clone(),
+                        &BroadcasterOptions {
+                            max_fee_amount: Some(U256::from(100)),
+                            schedule: Some(BroadcasterSchedule {
+                                publish_after,
+                                execute_before,
+                            }),
+                            ..Default::default()
+                        },
+                    )
+                    .err()
+                    .unwrap();
+                assert!(
+                    error.starts_with("CREDIT_PERIOD_CHANGED:"),
+                    "{kind}: {error}"
+                );
+                assert_eq!(relay.fees.load(std::sync::atomic::Ordering::SeqCst), 0);
+            }
+        }
+    }
+    #[test]
+    fn direct_credit_submission_blocks_rollover_before_transport_and_retry() {
+        for kind in ["initial", "draw"] {
+            let (chain, prepared) = period_operation(kind, 2_000_000_000);
+            let relay = Arc::new(CreditRelay {
+                fees: Default::default(),
+                submits: Default::default(),
+            });
+            let quoted = prepared
+                .quote_for_broadcaster(
+                    chain.clone(),
+                    relay.clone(),
+                    &BroadcasterOptions {
+                        max_fee_amount: Some(U256::from(100)),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let mut proved = prove_period_operation(quoted, kind);
+            chain.block.lock().unwrap().timestamp = 2_000_073_600;
+            for _ in 0..2 {
+                let error = proved
+                    .submit_for_broadcaster(chain.as_ref(), relay.as_ref())
+                    .unwrap_err();
+                assert!(
+                    error.starts_with("CREDIT_PERIOD_CHANGED:"),
+                    "{kind}: {error}"
+                );
+                assert!(!proved.broadcaster_state().unwrap().attempted);
+            }
+            assert_eq!(relay.submits.load(std::sync::atomic::Ordering::SeqCst), 0);
+        }
+    }
+    #[test]
+    fn direct_credit_submission_rejects_historical_chain_before_transport() {
+        for kind in ["initial", "draw"] {
+            let (chain, prepared) = period_operation(kind, 2_000_000_000);
+            let relay = Arc::new(CreditRelay {
+                fees: Default::default(),
+                submits: Default::default(),
+            });
+            let quoted = prepared
+                .quote_for_broadcaster(
+                    chain.clone(),
+                    relay.clone(),
+                    &BroadcasterOptions {
+                        max_fee_amount: Some(U256::from(100)),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let mut proved = prove_period_operation(quoted, kind);
+            let block = chain.snapshot().unwrap();
+            let mut historical = PreparationSnapshot::new(chain.context(), block);
+            historical.credit_statuses.push((
+                wallet(1).owner_address,
+                Address::repeat_byte(0x22),
+                1001,
+                if kind == "initial" { 0 } else { 1 },
+            ));
+            for input in proved.credit_inputs() {
+                historical
+                    .roots
+                    .push((input.tree_id, field_word(input.root), true));
+                historical
+                    .spent
+                    .push((field_word(input.delivery.note.nullifier().unwrap()), false));
+            }
+            let error = proved
+                .submit_for_broadcaster(&historical, relay.as_ref())
+                .unwrap_err();
+            assert!(error.contains("live chain"), "{kind}: {error}");
+            assert!(!proved.broadcaster_state().unwrap().attempted);
+            assert_eq!(relay.submits.load(std::sync::atomic::Ordering::SeqCst), 0);
+        }
     }
     #[test]
     fn combined_creation_rejects_submission_after_utc_rollover() {
@@ -2424,6 +2654,9 @@ mod lifecycle_tests {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(invisi_sdk_rpc::broadcaster::Status {
                 confirmation: None,
+                reason_code: None,
+                publish_after: None,
+                execute_before: None,
                 id: "server-owned".into(),
                 state: invisi_sdk_rpc::broadcaster::StatusState::Pending,
                 transaction_hash: None,

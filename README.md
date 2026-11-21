@@ -104,6 +104,11 @@ rebuild gross debit, grant usage and deliveries while keeping the merchant Note 
 Without a net pin, `amount` stays gross and the fee reduces the Note.
 The creation example accepts `INITIAL_PAYMENT_GROSS`. Combined circuit resources use the same independent Core catalog and the existing lazy cache, explicit directory and offline settings; the historical separate pin is used only in explicit legacy mode. No circuit assets are bundled. Historical catalogs cannot prove current Credit statements.
 
+Credit draws and creation with an initial payment freeze the UTC day/month used by their authorized proof. First submission checks a fresh live chain timestamp, including after relay preflight. If that period changed, the legacy `Result<T, String>` error starts with the public `sdk::CREDIT_PERIOD_CHANGED` constant followed by `:` and says `reauthorize and regenerate proof`. Converting that string with `sdk::InvisiError::from(error)` exposes `InvisiErrorCode::CreditPeriodChanged`, serialized as `CREDIT_PERIOD_CHANGED`. Request-deadline expiry is a separate error. Prepare again, obtain fresh wallet authorization and regenerate the proof; extending the request deadline cannot extend the proof's usage period. Historical/offline calldata export does not authorize a live submission. Already attempted or uncertain relay submissions retain exact-request reconciliation across rollover.
+
+A scheduled Credit draw or initial payment must publish within its frozen UTC day and have exclusive `execute_before` no later than the next UTC midnight. Preparing today's proof for tomorrow is rejected locally with `CREDIT_PERIOD_CHANGED`. Chain execution can still cross a boundary after the last SDK check; the contract's execution-time period check remains authoritative. Broadcaster `Status` also preserves optional `reason_code`, `publish_after` and `execute_before` from the service; a scheduled rollover rejection reports `status.reason_code.as_deref() == Some("CREDIT_PERIOD_CHANGED")`. These relay fields are advisory; canonical reconciliation still controls reservation release.
+
+
 Notes use envelope `0x01`. Credit uses `0x84` (minimum 491 bytes), finite `availableCredit`, a canonical
 `unlimited` flag, three limits and gross usage counters. Create/update/revoke fees are
 pulled from the owner allowance; draw collects gross amounts, deducts its fee and issues

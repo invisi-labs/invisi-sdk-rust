@@ -2491,6 +2491,9 @@ mod tests {
         }
         fn lookup_status(&self, _: &str) -> Result<Option<RelayStatus>> {
             Ok(self.lookup.as_ref().map(|id| RelayStatus {
+                reason_code: None,
+                publish_after: None,
+                execute_before: None,
                 confirmation: None,
                 id: id.clone(),
                 state: invisi_sdk_rpc::broadcaster::StatusState::Pending,
@@ -2519,6 +2522,9 @@ mod tests {
             assert_eq!(data, self.data);
             assert_eq!(serde_json::to_value(sidecars).unwrap(), self.sidecars);
             Ok(RelayStatus {
+                reason_code: None,
+                publish_after: None,
+                execute_before: None,
                 confirmation: None,
                 id: self.response.clone(),
                 state: invisi_sdk_rpc::broadcaster::StatusState::Pending,

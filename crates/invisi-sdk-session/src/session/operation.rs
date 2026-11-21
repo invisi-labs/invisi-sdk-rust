@@ -246,6 +246,9 @@ impl Operation {
         if record.broadcaster_cancelled {
             let status = record.broadcaster_cancellation_status.clone().unwrap_or(
                 invisi_sdk_rpc::broadcaster::Status {
+                    reason_code: None,
+                    publish_after: None,
+                    execute_before: None,
                     id: submission_id.to_owned(),
                     state: invisi_sdk_rpc::broadcaster::StatusState::Cancelled,
                     transaction_hash: None,
@@ -317,6 +320,8 @@ impl Operation {
             .operations
             .get(&self.id)
             .ok_or("operation not found")?;
+        let previously_externalized = record.externalized;
+        let previous_status = record.status;
         let saved = self
             .broadcaster_state()
             .ok_or("saved broadcaster context required")?;
@@ -465,7 +470,7 @@ impl Operation {
         let generation = record.generation;
         self.session.commit(state)?;
         self.generation = generation;
-        let status = match &mut self.prepared {
+        let result = match &mut self.prepared {
             ManagedPrepared::Funds(v) => {
                 crate::broadcaster::BroadcasterSubmitTarget::submit_for_client(
                     v,
@@ -480,7 +485,24 @@ impl Operation {
                     relay,
                 )
             }
-        }?;
+        };
+        // A rejected preflight never reached transport. Do not let its durable retry
+        // marker bypass live validation on resume. Transport uncertainty retains it.
+        if result.is_err()
+            && matches!(&self.prepared, ManagedPrepared::Credit(v)
+                if v.broadcaster_state().is_some_and(|saved| !saved.attempted))
+        {
+            let mut next = self.current()?;
+            let record = next
+                .operations
+                .get_mut(&self.id)
+                .ok_or("operation not found")?;
+            record.broadcaster_id = None;
+            record.externalized = previously_externalized;
+            record.status = previous_status;
+            self.session.commit(next)?;
+        }
+        let status = result?;
         let mut next = self.current()?;
         let call = next
             .operations

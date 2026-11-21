@@ -75,6 +75,11 @@ impl PreparedCredit {
         {
             return Err("Credit relay requires unsigned preparation and matching chain".into());
         }
+        if let Some(schedule) = &options.schedule {
+            self.validate_usage_timestamp(schedule.publish_after)?;
+            // execute_before is exclusive: equality with next midnight is safe.
+            self.validate_usage_timestamp(schedule.execute_before.saturating_sub(1))?;
+        }
         let config = relay.configuration();
         config.validate().map_err(|e| e.to_string())?;
         if let Some(cap) = &self.provenance {
@@ -297,6 +302,7 @@ impl PreparedCredit {
             self.broadcaster.as_mut().unwrap().submission_id = Some(result.id.clone());
             return Ok(result);
         }
+        self.validate_usage_period(chain)?;
         let data = self.calldata(chain, Address::ZERO)?.data;
         if request_hash(&data).map_err(|e| e.to_string())? != state.intent_hash {
             return Err("frozen Credit relay intent mismatch".into());
@@ -316,6 +322,7 @@ impl PreparedCredit {
         .map_err(|e| e.to_string())?;
         relay.submission_requirements(&quote)?;
         chain.canonical(&block)?;
+        self.validate_usage_period(chain)?;
         let state = self.broadcaster.as_mut().unwrap();
         state.attempted = true;
         state.submitted_data = data.clone();

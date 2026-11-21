@@ -560,6 +560,24 @@ pub struct Status {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_status_reason"
+    )]
+    pub reason_code: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_status_time"
+    )]
+    pub publish_after: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_status_time"
+    )]
+    pub execute_before: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
         deserialize_with = "optional_confirmation"
     )]
     pub confirmation: Option<Confirmation>,
@@ -567,6 +585,29 @@ pub struct Status {
     pub state: StatusState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transaction_hash: Option<B256>,
+}
+fn optional_status_reason<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    let value = String::deserialize(deserializer)?;
+    if value.is_empty() || value.chars().count() > 256 {
+        return Err(serde::de::Error::custom(
+            "invalid broadcaster status reason code",
+        ));
+    }
+    Ok(Some(value))
+}
+fn optional_status_time<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    let value = String::deserialize(deserializer)?;
+    let timestamp = value.parse::<u64>().map_err(serde::de::Error::custom)?;
+    if timestamp == 0 || timestamp > rpc::MAX_SAFE_INTEGER || timestamp.to_string() != value {
+        return Err(serde::de::Error::custom(
+            "noncanonical status schedule timestamp",
+        ));
+    }
+    Ok(Some(value))
 }
 fn optional_confirmation<'de, D: serde::Deserializer<'de>>(
     deserializer: D,

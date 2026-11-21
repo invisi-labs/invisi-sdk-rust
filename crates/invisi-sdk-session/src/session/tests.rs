@@ -1492,6 +1492,9 @@ impl sdk::PreparedBroadcaster for SessionCreditRelay {
         match self.lookup_mode.load(std::sync::atomic::Ordering::SeqCst) {
             0 => Ok(Some(crate::broadcaster::Status {
                 confirmation: None,
+                reason_code: None,
+                publish_after: None,
+                execute_before: None,
                 id: id.into(),
                 state: crate::broadcaster::StatusState::Pending,
                 transaction_hash: None,
@@ -1600,6 +1603,9 @@ impl sdk::PreparedBroadcaster for SessionCreditRelay {
         }
         Ok(crate::broadcaster::Status {
             confirmation: None,
+            reason_code: None,
+            publish_after: None,
+            execute_before: None,
             id: "server-owned".into(),
             state: crate::broadcaster::StatusState::Pending,
             transaction_hash: None,
@@ -3192,6 +3198,9 @@ impl sdk::PreparedBroadcaster for SessionAggregateRelay {
         };
         Ok(Some(crate::broadcaster::Status {
             confirmation: None,
+            reason_code: None,
+            publish_after: None,
+            execute_before: None,
             id: id.into(),
             state,
             transaction_hash: None,
@@ -5354,4 +5363,151 @@ fn empty_scan_fences_private_observation_outside_completed_discovery() {
         serde_json::to_value(h.session.snapshot().unwrap()).unwrap(),
         before
     );
+}
+
+struct PeriodRolloverRelay {
+    base: SessionCreditRelay,
+    chain: Arc<Chain>,
+    requirements: std::sync::atomic::AtomicUsize,
+    cross_before_submit: bool,
+}
+impl sdk::PreparedBroadcaster for PeriodRolloverRelay {
+    fn provenance_mode(&self) -> Option<()> {
+        None
+    }
+    fn configuration(&self) -> crate::broadcaster::Configuration {
+        self.base.configuration()
+    }
+    fn fee(&self, token: Address, data: Option<&[u8]>) -> Result<crate::broadcaster::Fee> {
+        self.base.fee(token, data)
+    }
+    fn quote(
+        &self,
+        data: &[u8],
+        chain_id: u64,
+        protocol: Address,
+        now: u64,
+        sidecars: &[crate::provenance::ProofSidecar],
+    ) -> Result<crate::broadcaster::VerifiedQuote> {
+        self.base.quote(data, chain_id, protocol, now, sidecars)
+    }
+    fn submission_requirements(&self, quote: &crate::broadcaster::VerifiedQuote) -> Result<bool> {
+        let round = self.requirements.fetch_add(1, Ordering::SeqCst);
+        // Session validates once before journaling; direct submission validates again afterward.
+        if self.cross_before_submit && round == 1 {
+            self.chain.height.store(73_600, Ordering::SeqCst);
+        }
+        self.base.submission_requirements(quote)
+    }
+    fn submit(
+        &self,
+        data: &[u8],
+        quote: &crate::broadcaster::VerifiedQuote,
+        sidecars: &[crate::provenance::ProofSidecar],
+    ) -> Result<crate::broadcaster::Status> {
+        self.base.submit(data, quote, sidecars)
+    }
+}
+
+#[test]
+fn credit_period_rejection_cannot_be_retried_as_uncertain_but_transport_loss_can() {
+    for cross_before_submit in [true, false] {
+        let h = harness();
+        let alice = wallet(1);
+        let bob = wallet(2);
+        let delivery = CreditDeliveryState {
+            note: crate::credit::CreditState {
+                context: context(),
+                token_address: h.note.token_address,
+                spender_wallet_identity: sdk::address_word(bob.owner_address()),
+                owner_wallet_identity: sdk::address_word(alice.owner_address()),
+                grant_id: 2,
+                nonce: U256::from(74),
+                expiry: 2_100_000_000,
+                credit_shared_key: U256::from(75),
+                policy: Default::default(),
+                usage: Default::default(),
+                available_credit: U256::from(400),
+                unlimited: false,
+                payload: vec![],
+            },
+            owner_receiving_keys: alice.receiving_keys().clone(),
+            spender_receiving_keys: bob.receiving_keys().clone(),
+        };
+        let prepared = h
+            .session
+            .invisi
+            .prepare_create_credit_with_initial_payment(
+                &alice,
+                delivery,
+                Some(sdk::InitialCreditPayment {
+                    amount: U256::from(7),
+                    net_amount: None,
+                    payload: vec![],
+                }),
+                2_000_172_800,
+                sdk::Fee::default(),
+            )
+            .unwrap();
+        let mut operation = h
+            .session
+            .register(ManagedPrepared::Credit(prepared))
+            .unwrap();
+        let relay = Arc::new(PeriodRolloverRelay {
+            base: SessionCreditRelay {
+                requests: Default::default(),
+                lookup_mode: 0.into(),
+                attempts: 0.into(),
+            },
+            chain: h.chain.clone(),
+            requirements: 0.into(),
+            cross_before_submit,
+        });
+        operation
+            .quote_for_broadcaster(
+                relay.clone(),
+                &sdk::BroadcasterOptions {
+                    max_fee_amount: Some(U256::from(100)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let request = operation.export_wallet_request("period").unwrap();
+        let response =
+            serde_json::from_value(crate::wallet::execute(&key(1), &request.as_value()).unwrap())
+                .unwrap();
+        let mut operation = operation
+            .with_wallet_response(&response)
+            .unwrap()
+            .prove(&Backend, false)
+            .unwrap();
+        let id = operation.id().to_owned();
+        let error = operation
+            .submit_for_broadcaster(relay.as_ref())
+            .unwrap_err();
+        if cross_before_submit {
+            assert!(error.starts_with("CREDIT_PERIOD_CHANGED:"), "{error}");
+        } else {
+            assert!(error.contains("uncertain"), "{error}");
+        }
+        drop(operation);
+        h.chain.height.store(73_600, Ordering::SeqCst);
+        let mut resumed = h.session.resume(&id, Some(&Backend)).unwrap();
+        if cross_before_submit {
+            for _ in 0..2 {
+                assert!(resumed
+                    .submit_for_broadcaster(relay.as_ref())
+                    .unwrap_err()
+                    .starts_with("CREDIT_PERIOD_CHANGED:"));
+            }
+            assert_eq!(relay.base.attempts.load(Ordering::SeqCst), 0);
+            h.session.abandon_operation(&id, None).unwrap();
+        } else {
+            assert_eq!(
+                resumed.submit_for_broadcaster(relay.as_ref()).unwrap().id,
+                "server-owned"
+            );
+            assert_eq!(relay.base.attempts.load(Ordering::SeqCst), 2);
+        }
+    }
 }

@@ -2,6 +2,8 @@
 
 ## Unreleased (planned 1.3.3)
 
+- Document canonical Router relay separately from ordinary Core quotation, including executable proof/signature-first estimates, fee convergence, all four payment modes and compile-checked host integration examples.
+
 - Add built-in canonical native/ERC20 0x exact-buy HTTP and client quote convenience with Router taker/recipient, current-Settler refresh, cancellation and canonical payload normalization.
 - Reject stale EIP-7702 authorization nonces with a block-pinned EOA transaction-count read, including already-delegated accounts whose execution could otherwise succeed after the EVM skips the authorization.
 - Add canonical unversioned PaymentRouter/Account compiler ABIs, four-mode intent/call builders, EIP-712 and ERC-2612 digests, ERC20 approval, same-token/wrap and V3/0x inputs, live nonce/deployment/account checks and complete outer simulation. Add EIP-7702 authorization helpers and exact Broadcaster envelope hashing/quote/submission wire with tamper checks and shared contract/Go vectors. Preserve native-only legacy APIs and 1.3.2 versions.

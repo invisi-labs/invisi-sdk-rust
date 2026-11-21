@@ -215,3 +215,27 @@ Keep operation journals encrypted.
 ## Contributing
 
 See the [contribution guidelines](../README.md#contributing) for issues, pull requests, validation, and handling sensitive material.
+
+### Canonical PaymentRouter integration
+
+The unreleased canonical API (planned 1.3.3; versions remain 1.3.2) has a [compile-checked canonical example](../crates/invisi-sdk-payment-router/examples/canonical.rs)
+for self-submitted ERC20, relayed ERC20, and sponsored native with host-provided
+signing callbacks. Run `cargo check -p invisi-sdk-payment-router --examples` and
+`cargo run -p invisi-sdk-payment-router --example canonical` to check/build it;
+its main only prints guidance and opens no RPC connection. The functions accept
+real prepared/proved Core calls and explicit deployment, payer, route and wallet
+capabilities; they contain no fake proof or automatic broadcast. The existing
+`--example quote` CLI targets the legacy native-only API.
+
+The [Router guide](../crates/invisi-sdk-payment-router/README.md) covers all four
+modes, arbitrary ERC20/native V3 and built-in 0x quotes, and same-token/wrap paths.
+For Router relay, prove Core and sign the exact Router/account envelope before
+`RouterRelayClient::{estimate_quote, get_quote}`. Balances and Router approval or
+permit must already make that outer call executable. A changed Core fee means
+reprepare/reprove/rebuild/resign and requote; changed route terms mean rebuild and
+resign. This differs from ordinary `07-broadcaster` Core quote-before-proving flows.
+Fee pricing uses only the Core output token and exact funding includes the fee.
+Router relay is direct only, without scheduling/aggregation. Native relay uses
+EIP-7702 and zero outer value; the payer's balance supplies principal. Host wallets
+own signing and persistent delegation/revocation, and must track independent Router,
+account action, and EOA transaction/authorization nonces.

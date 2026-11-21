@@ -209,7 +209,9 @@ Preparation and quotation preserve the existing API. Independent Note/Credit che
 
 ### Broadcaster client
 
-Call `client.quote(&mut prepared, chain.clone(), &options)` before authorization or proving.
+For ordinary Core Note/Credit and managed Session relay flows, call
+`client.quote(&mut prepared, chain.clone(), &options)` before authorization or proving.
+Router relay uses the separate proof-and-signature-first envelope flow described below.
 The same client accepts ordinary Note/Credit preparations and managed Session operations.
 Managed quotation commits its final plan, quote and scheduling capability in the encrypted store;
 failed quotation leaves the target unchanged. The independent RPC client remains available through
@@ -257,4 +259,22 @@ Core operations do not require the Provenance catalog; Provenance operations do 
 
 ### Optional Payment Router
 
-`invisi-sdk-payment-router` composes the existing SDK proof lifecycle with native ETH payments through an explicitly configured Payment Router. It provides V3 exact-output routes, registry-verified native 0x quotes, deployment authentication, canonical calldata construction and full payable-call simulation. Signing and broadcasting stay with your application. See [the crate guide](crates/invisi-sdk-payment-router/README.md).
+**Unreleased (planned 1.3.3; versions remain 1.3.2):**
+`invisi-sdk-payment-router` supports the canonical unversioned `PaymentRouter` and
+`PaymentRouterAccount`: self-submitted native/ERC20, signed ERC20 relay, and EIP-7702
+sponsored native. Native or arbitrary ERC20 inputs support V3 and built-in 0x
+exact-buy quoting (`quote_canonical_zeroex`); same-token/wrap payments use an empty
+route. Exact Core funding includes the Broadcaster fee in the Core settlement token.
+ERC20 payers approve the Router or supply an ERC-2612 permit.
+
+`RouterRelayClient` estimates, quotes and submits the complete signed outer envelope
+through the standard Broadcaster RPC methods. It requires the full Core proof,
+Router/account signature, input balance and allowance/permit before quotation.
+Changed fees/routes require rebuilding, reproving when Core changes, and fresh wallet
+signatures. Quotes bind `payment-router-envelope-v1` and direct execution only;
+Router relay supports neither scheduling nor aggregation. Sponsored native relay
+sends zero outer value and spends principal from the payer EOA. Wallet signing,
+persistent delegation/revocation, transaction signing and durable reconciliation
+remain host responsibilities. See [the crate guide](crates/invisi-sdk-payment-router/README.md)
+and [compile-checked integration example](crates/invisi-sdk-payment-router/examples/canonical.rs).
+The existing native-only `quote`/`pay` helpers remain explicitly legacy APIs.

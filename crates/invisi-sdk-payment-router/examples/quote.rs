@@ -1,3 +1,4 @@
+//! Legacy native-only quote CLI (`quote`, not `quote_canonical_v3`/`quote_canonical_zeroex`).
 //! Quote-only CLI. No signing, broadcasting or implicit API credentials.
 use alloy_primitives::{Address, U256};
 use invisi_sdk_payment_router::*;

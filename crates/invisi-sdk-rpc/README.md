@@ -3,7 +3,7 @@
 Version `1.2.3`. ProtocolRPC, broadcaster and Provenance network clients, canonical response validation and transport errors. Depends on primitives and protocol; no local proving or wallet storage.
 
 Wallet-aware quotation is provided by `invisi_sdk::broadcaster::BroadcasterClient::{quote, submit, cancel}`,
-which accepts ordinary preparations and managed Session operations. This module keeps
+which accepts ordinary Core preparations and managed Session operations. This module keeps
 its independent calldata-level `submit_transaction` and `cancel_transaction` APIs;
 access them through `client.rpc()` from the SDK wrapper.
 
@@ -78,3 +78,32 @@ After sending, use `track` and `reconcile`. Recovery uses the original transacti
 hash through `recover`, or a deployment-bound serialized public operation through
 `restore`; it never creates a second registration. Confirmation requires the
 exact transaction, canonical receipt and matching `ReceivingKeysSet` event.
+
+### Optional PaymentRouter relay
+
+The canonical Router API is unreleased (planned 1.3.3; versions remain 1.3.2).
+Use `invisi_sdk_payment_router::RouterRelayClient`, rather than the ordinary Core
+quote verifier, for Router/account envelopes. It calls the same
+`broadcaster_estimateQuote`, `broadcaster_getQuote`, and
+`broadcaster_submitTransaction` methods with `{data, router}`: `data` is the exact
+embedded Core calldata and `router` contains the complete outer `to`, `data`,
+`value: "0"`, and optional EIP-7702 `authorizationList` (Ethereum hex quantities).
+Submit adds `quote`, its separate `signature`, and `proofSidecars: []` for Router
+pure public funding with no foreign Note inputs, even if general service metadata
+reports `provenanceRequired: true`.
+
+Both estimate and signed quote simulate/estimate the complete outer transaction.
+Prepare a real Core proof and obtain all Router/account/authorization signatures
+first; the payer needs executable input balances and Router allowance or permit.
+The ordinary quote-before-proving lifecycle above applies only to Core flows.
+A fee or route change requires rebuilding the payment and resigning; changes to
+Core funding also require a new proof. Fees are denominated only in the embedded
+Core settlement token, including the fee in its exact funding amount. Input-token
+price support is not required. Discover enabled `paymentRouters` through service
+status/token-support responses and configure trusted deployment and quote-signer pins.
+
+Quotes require `requestHashFormat: "payment-router-envelope-v1"`, the exact outer
+envelope hash and `execution: "direct"`. Scheduling and aggregation are rejected.
+Native relay spends the payer EOA's principal with zero outer value; the host owns
+EIP-7702 signing and persistent delegation/revocation. See the
+[Router guide](../invisi-sdk-payment-router/README.md) for nonce and simulation rules.

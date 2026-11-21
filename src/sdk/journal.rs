@@ -179,6 +179,10 @@ impl ManagedPrepared {
         }
         saved.submitted_data = data.to_vec();
         saved.submission_id = Some(id.to_owned());
+        // A failed refusal rollback can leave only the live handle retired while
+        // its durable record remains uncertain. An authoritative accepted ID
+        // resolves that uncertainty and supersedes the ephemeral refusal.
+        saved.pre_send_refusal = None;
         saved.attempted = true;
         Ok(())
     }
@@ -450,6 +454,22 @@ impl PreparedSnapshot {
             || wallet.is_some_and(|w| w.owner_address() != owner_address)
         {
             return Err("operation owner mismatch".into());
+        }
+        if let Some(saved) = &self.broadcaster {
+            if let Some(reason) = &saved.pre_send_refusal {
+                if saved.attempted
+                    || saved.submission_id.is_some()
+                    || saved.submitted_data.is_empty()
+                    || !matches!(
+                        reason.as_str(),
+                        "CREDIT_PERIOD_CHANGED"
+                            | "INSUFFICIENT_EXECUTION_SLACK"
+                            | "CREDIT_PERIOD_ENDING"
+                    )
+                {
+                    return Err("invalid saved Broadcaster pre-send refusal".into());
+                }
+            }
         }
         self.context.validate().map_err(|e| e.to_string())?;
         if self
@@ -991,6 +1011,14 @@ impl PreparedSnapshot {
 }
 
 impl PreparedSnapshot {
+    /// A durable refusal is valid only while no submission has been accepted.
+    pub fn broadcaster_pre_send_refusal(&self) -> Option<&str> {
+        self.broadcaster.as_ref().and_then(|saved| {
+            (!saved.attempted && saved.submission_id.is_none())
+                .then_some(saved.pre_send_refusal.as_deref())
+                .flatten()
+        })
+    }
     pub fn broadcaster_execution(&self) -> Option<invisi_sdk_rpc::broadcaster::Execution> {
         self.broadcaster.as_ref().map(|s| s.quote.quote.execution)
     }

@@ -298,6 +298,9 @@ impl Operation {
                     let saved = v
                         .broadcaster_state()
                         .ok_or("saved broadcaster context required")?;
+                    if let Some(reason) = &saved.pre_send_refusal {
+                        return Err(format!("{reason}: Broadcaster refused before acceptance; abandon and prepare a fresh request"));
+                    }
                     let call = v.calldata(self.session.invisi.chain.as_ref(), Address::ZERO)?;
                     let quote = crate::broadcaster::VerifiedQuote::authenticate(
                         saved.quote.clone(),
@@ -488,19 +491,23 @@ impl Operation {
         };
         // A rejected preflight never reached transport. Do not let its durable retry
         // marker bypass live validation on resume. Transport uncertainty retains it.
-        if result.is_err()
+        if !attempted
+            && result.is_err()
             && matches!(&self.prepared, ManagedPrepared::Credit(v)
-                if v.broadcaster_state().is_some_and(|saved| !saved.attempted))
+                if v.broadcaster_state().is_some_and(|saved| !saved.attempted && saved.submission_id.is_none()))
         {
             let mut next = self.current()?;
             let record = next
                 .operations
                 .get_mut(&self.id)
                 .ok_or("operation not found")?;
-            record.broadcaster_id = None;
-            record.externalized = previously_externalized;
-            record.status = previous_status;
-            self.session.commit(next)?;
+            if record.transaction_hash.is_none() && record.broadcaster_submission_id.is_none() {
+                record.broadcaster_id = None;
+                record.externalized = previously_externalized;
+                record.status = previous_status;
+                record.snapshot = self.prepared.snapshot()?;
+                self.session.commit(next)?;
+            }
         }
         let status = result?;
         let mut next = self.current()?;
@@ -1204,6 +1211,9 @@ impl WalletSession {
         if generation.is_some_and(|v| v != record.generation) {
             return Err("stale operation handle".into());
         }
+        if record.snapshot.broadcaster_pre_send_refusal().is_some() {
+            return self.release_inactive_operation(id, false, true, Some(record.generation));
+        }
         if record.externalized || record.transaction_hash.is_some() {
             return Err(
                 "exported operation requires canonical reconciliation before release".into(),
@@ -1471,18 +1481,27 @@ impl WalletSession {
     }
     /// Release only when canonical post-deadline facts prove the exported input spend cannot execute.
     pub fn expire_operation(&self, id: &str) -> Result<()> {
-        self.release_inactive_operation(id, false)
+        self.release_inactive_operation(id, false, false, None)
     }
     /// Cancellation acknowledges relay custody only; independently reconcile canonical consumption.
     pub(crate) fn reconcile_cancelled_operation(&self, id: &str) -> Result<()> {
-        self.release_inactive_operation(id, true)
+        self.release_inactive_operation(id, true, false, None)
     }
-    fn release_inactive_operation(&self, id: &str, cancelled: bool) -> Result<()> {
+    fn release_inactive_operation(
+        &self,
+        id: &str,
+        cancelled: bool,
+        no_send: bool,
+        generation: Option<u64>,
+    ) -> Result<()> {
         let mut state = self.snapshot()?;
         if state.invalidated {
             return Err("wallet requires canonical resync".into());
         }
         let record = state.operations.get(id).ok_or("operation not found")?;
+        if generation.is_some_and(|expected| expected != record.generation) {
+            return Err("stale operation handle".into());
+        }
         if record.status.terminal() {
             if cancelled
                 && record.broadcaster_cancelled
@@ -1494,12 +1513,29 @@ impl WalletSession {
             }
             return Err("operation is already terminal".into());
         }
+        if no_send
+            && (record.snapshot.broadcaster_pre_send_refusal().is_none()
+                || record.status == OperationStatus::Reorged
+                || record.externalized
+                || record.broadcaster_id.is_some()
+                || record.broadcaster_submission_id.is_some()
+                || record.transaction_hash.is_some())
+        {
+            return Err("unaccepted pre-send refusal required before release".into());
+        }
         let block = self.invisi.chain.snapshot()?;
+        if no_send
+            && (self.invisi.chain.context() != self.scope.context
+                || record.snapshot.context() != self.scope.context
+                || self.invisi.chain.historical_preparation())
+        {
+            return Err("live operation deployment mismatch".into());
+        }
         if cancelled {
             if !record.broadcaster_cancelled || record.transaction_hash.is_some() {
                 return Err("confirmed cancellation without a transaction hash required".into());
             }
-        } else if block.timestamp <= record.deadline {
+        } else if !no_send && block.timestamp <= record.deadline {
             return Err("operation has not expired on chain".into());
         }
         if record.externalized && !record.broadcaster_cancelled {
@@ -1539,7 +1575,7 @@ impl WalletSession {
         }
         self.invisi.chain.canonical(&block)?;
         let record = state.operations.get_mut(id).ok_or("operation not found")?;
-        record.status = if cancelled {
+        record.status = if cancelled || no_send {
             OperationStatus::Failed
         } else {
             OperationStatus::Expired

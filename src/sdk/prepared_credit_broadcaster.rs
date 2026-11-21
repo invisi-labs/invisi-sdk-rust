@@ -240,6 +240,7 @@ impl PreparedCredit {
                 intent_hash: request_hash(&data).map_err(|e| e.to_string())?,
                 sidecars: Vec::new(),
                 attempted: false,
+                pre_send_refusal: None,
                 submission_id: None,
                 submitted_data: Vec::new(),
                 member_proof: None,
@@ -265,7 +266,7 @@ impl PreparedCredit {
         {
             return Err("saved Credit relay context mismatch".into());
         }
-        if state.attempted {
+        if state.attempted || state.submission_id.is_some() {
             let state = state.clone();
             journal::ManagedPrepared::Credit(self.clone())
                 .snapshot()?
@@ -302,6 +303,9 @@ impl PreparedCredit {
             self.broadcaster.as_mut().unwrap().submission_id = Some(result.id.clone());
             return Ok(result);
         }
+        if let Some(reason) = &state.pre_send_refusal {
+            return Err(format!("{reason}: Broadcaster refused before acceptance; abandon and prepare a fresh request"));
+        }
         self.validate_usage_period(chain)?;
         let data = self.calldata(chain, Address::ZERO)?.data;
         if request_hash(&data).map_err(|e| e.to_string())? != state.intent_hash {
@@ -326,7 +330,22 @@ impl PreparedCredit {
         let state = self.broadcaster.as_mut().unwrap();
         state.attempted = true;
         state.submitted_data = data.clone();
-        let result = relay.submit(&data, &quote, &[])?;
+        let result = match relay.submit_classified(&data, &quote, &[]) {
+            Ok(status) => status,
+            Err(error) => {
+                if let Some(reason) = error.pre_send_refusal() {
+                    let saved = self.broadcaster.as_mut().unwrap();
+                    if saved.submission_id.is_none() {
+                        // Keep exact frozen evidence for journal validation while
+                        // restoring the live preflight gate for this known-unsent request.
+                        saved.attempted = false;
+                        saved.pre_send_refusal = Some(reason.into());
+                        return Err(format!("{reason}: Broadcaster refused before acceptance; reauthorize and regenerate proof"));
+                    }
+                }
+                return Err(error.to_string());
+            }
+        };
         self.broadcaster.as_mut().unwrap().submission_id = Some(result.id.clone());
         Ok(result)
     }

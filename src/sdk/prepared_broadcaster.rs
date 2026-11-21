@@ -295,6 +295,9 @@ pub struct PreparedBroadcasterState {
     pub sidecars: Vec<ProofSidecar>,
     #[serde(default)]
     pub attempted: bool,
+    /// A first structured pre-send refusal permanently retires this request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_send_refusal: Option<String>,
     #[serde(default)]
     pub submission_id: Option<String>,
     #[serde(default)]
@@ -343,7 +346,51 @@ impl PreparedBroadcasterState {
         (self.quote.provenance_required == Some(true)).then_some(())
     }
 }
+/// Submission errors retain structured RPC evidence without changing the SDK's
+/// existing String-based Result or custom Broadcaster implementations.
+#[derive(Debug)]
+pub enum BroadcasterSubmitError {
+    Unknown(String),
+    Rpc(invisi_sdk_rpc::rpc::Error),
+}
+impl BroadcasterSubmitError {
+    /// Only these exact structured responses acknowledge a fresh request was
+    /// refused before acceptance. Text from custom transports never proves it.
+    pub fn pre_send_refusal(&self) -> Option<&'static str> {
+        let Self::Rpc(invisi_sdk_rpc::rpc::Error::Remote { code, message, .. }) = self else {
+            return None;
+        };
+        let (token, _) = message.split_once(':')?;
+        match (*code, token) {
+            (-32024, "CREDIT_PERIOD_CHANGED") => Some("CREDIT_PERIOD_CHANGED"),
+            (-32025, "INSUFFICIENT_EXECUTION_SLACK") => Some("INSUFFICIENT_EXECUTION_SLACK"),
+            (-32026, "CREDIT_PERIOD_ENDING") => Some("CREDIT_PERIOD_ENDING"),
+            _ => None,
+        }
+    }
+}
+impl std::fmt::Display for BroadcasterSubmitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unknown(message) => f.write_str(message),
+            Self::Rpc(error) => error.fmt(f),
+        }
+    }
+}
+impl std::error::Error for BroadcasterSubmitError {}
+
 pub trait PreparedBroadcaster: Send + Sync {
+    /// Override only when the transport retains authenticated structured RPC
+    /// errors. The default treats every legacy String error as uncertain.
+    fn submit_classified(
+        &self,
+        data: &[u8],
+        quote: &VerifiedQuote,
+        sidecars: &[ProofSidecar],
+    ) -> std::result::Result<RelayStatus, BroadcasterSubmitError> {
+        self.submit(data, quote, sidecars)
+            .map_err(BroadcasterSubmitError::Unknown)
+    }
     fn cancel(&self, _id: &str, _token: &CancellationToken) -> Result<RelayStatus> {
         Err("broadcaster cancellation capability required".into())
     }
@@ -409,6 +456,15 @@ pub trait PreparedBroadcaster: Send + Sync {
     ) -> Result<RelayStatus>;
 }
 impl<T: RpcTransport + Send + Sync> PreparedBroadcaster for BroadcasterClient<T> {
+    fn submit_classified(
+        &self,
+        data: &[u8],
+        quote: &VerifiedQuote,
+        sidecars: &[ProofSidecar],
+    ) -> std::result::Result<RelayStatus, BroadcasterSubmitError> {
+        self.submit_with_sidecars(data, quote, sidecars)
+            .map_err(BroadcasterSubmitError::Rpc)
+    }
     fn cancel(&self, id: &str, token: &CancellationToken) -> Result<RelayStatus> {
         BroadcasterClient::cancel_transaction(self, id, token.0).map_err(|e| e.to_string())
     }
@@ -479,6 +535,14 @@ impl<T: RpcTransport + Send + Sync> PreparedBroadcaster for BroadcasterClient<T>
 impl<T: RpcTransport + Send + Sync + 'static> PreparedBroadcaster
     for crate::broadcaster::BroadcasterClient<T>
 {
+    fn submit_classified(
+        &self,
+        data: &[u8],
+        quote: &VerifiedQuote,
+        sidecars: &[ProofSidecar],
+    ) -> std::result::Result<RelayStatus, BroadcasterSubmitError> {
+        PreparedBroadcaster::submit_classified(self.rpc(), data, quote, sidecars)
+    }
     fn cancel(&self, id: &str, token: &CancellationToken) -> Result<RelayStatus> {
         PreparedBroadcaster::cancel(self.rpc(), id, token)
     }
@@ -893,6 +957,7 @@ impl PreparedTransaction {
             intent_hash: request_hash(&data).map_err(|e| e.to_string())?,
             sidecars,
             attempted: false,
+            pre_send_refusal: None,
             submission_id: None,
             submitted_data: Vec::new(),
             member_proof: None,
@@ -1837,6 +1902,23 @@ mod tests {
         wrong.public_inputs[0] = "0x01".into();
         *prepared.provenance_packet.lock().unwrap() = Some(wrong);
         assert!(prepared.prove_provenance(chain.as_ref()).is_err());
+    }
+    #[test]
+    fn string_errors_cannot_acknowledge_pre_send_refusal() {
+        for message in [
+            "CREDIT_PERIOD_CHANGED: regenerate",
+            "RPC -32025: INSUFFICIENT_EXECUTION_SLACK: refresh",
+            "CREDIT_PERIOD_ENDING: regenerate",
+        ] {
+            assert!(BroadcasterSubmitError::Unknown(message.into())
+                .pre_send_refusal()
+                .is_none());
+            assert!(
+                BroadcasterSubmitError::Rpc(invisi_sdk_rpc::rpc::Error::Transport(message.into()))
+                    .pre_send_refusal()
+                    .is_none()
+            );
+        }
     }
     struct ClientQuoteTransport {
         context: ProtocolContext,

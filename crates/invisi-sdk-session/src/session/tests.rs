@@ -4440,6 +4440,7 @@ fn client_cancel_persists_ack_before_canonical_release_and_retries_without_relay
         },
         intent_hash: B256::repeat_byte(3),
         sidecars: vec![],
+        pre_send_refusal: None,
         attempted: true,
         submission_id: None,
         submitted_data: vec![],
@@ -5510,4 +5511,526 @@ fn credit_period_rejection_cannot_be_retried_as_uncertain_but_transport_loss_can
             assert_eq!(relay.base.attempts.load(Ordering::SeqCst), 2);
         }
     }
+}
+
+type RefusalReplies = Arc<Mutex<std::collections::VecDeque<serde_json::Value>>>;
+
+struct RefusalRpcTransport {
+    base: ClientQuoteTransport,
+    replies: RefusalReplies,
+    fail_store: Option<Arc<GasGuardStore>>,
+}
+impl crate::rpc::RpcTransport for RefusalRpcTransport {
+    fn send(&self, request: &serde_json::Value) -> crate::rpc::Result<serde_json::Value> {
+        if request["method"] == "broadcaster_submitTransaction"
+            || request["method"] == "broadcaster_getTransactionStatus"
+        {
+            let reply = self
+                .replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("unexpected extra submission");
+            if reply.is_null() {
+                return Err(crate::rpc::Error::Transport("lost RPC response".into()));
+            }
+            if let Some(result) = reply.get("result") {
+                return Ok(serde_json::json!({"jsonrpc":"2.0","id":request["id"],"result":result}));
+            }
+            if let Some(store) = &self.fail_store {
+                store.fail_writes.store(true, Ordering::SeqCst);
+            }
+            return Ok(serde_json::json!({"jsonrpc":"2.0","id":request["id"],"error":reply}));
+        }
+        self.base.send(request)
+    }
+}
+fn refusal_client(
+    h: &Harness,
+    reply: serde_json::Value,
+    fail_store: bool,
+) -> (
+    crate::broadcaster::BroadcasterClient<RefusalRpcTransport>,
+    RefusalReplies,
+) {
+    let relay = Arc::new(SessionCreditRelay {
+        requests: Default::default(),
+        lookup_mode: 0.into(),
+        attempts: 0.into(),
+    });
+    let replies = Arc::new(Mutex::new(std::collections::VecDeque::from([reply])));
+    let client = crate::broadcaster::BroadcasterClient::new(
+        sdk::PreparedBroadcaster::configuration(relay.as_ref()),
+        RefusalRpcTransport {
+            base: ClientQuoteTransport {
+                relay,
+                chain: h.chain.clone(),
+            },
+            replies: replies.clone(),
+            fail_store: fail_store.then(|| h.store.clone()),
+        },
+    )
+    .unwrap();
+    (client, replies)
+}
+fn refusal_credit_operation(h: &Harness, session: &WalletSession, kind: &str) -> Operation {
+    let owner = session.wallet();
+    let deadline = h.chain.snapshot().unwrap().timestamp + 172_800;
+    let delivery = CreditDeliveryState {
+        note: crate::credit::CreditState {
+            context: context(),
+            token_address: h.note.token_address,
+            spender_wallet_identity: sdk::address_word(owner.owner_address()),
+            owner_wallet_identity: sdk::address_word(owner.owner_address()),
+            grant_id: if kind == "initial" { 2 } else { 1 },
+            nonce: U256::from(74),
+            expiry: 2_100_000_000,
+            credit_shared_key: U256::from(75),
+            policy: Default::default(),
+            usage: Default::default(),
+            available_credit: U256::from(400),
+            unlimited: false,
+            payload: vec![],
+        },
+        owner_receiving_keys: owner.receiving_keys().clone(),
+        spender_receiving_keys: owner.receiving_keys().clone(),
+    };
+    let prepared = if kind == "initial" {
+        session
+            .invisi
+            .prepare_create_credit_with_initial_payment(
+                owner,
+                delivery,
+                Some(sdk::InitialCreditPayment {
+                    amount: U256::from(7),
+                    net_amount: None,
+                    payload: vec![],
+                }),
+                deadline,
+                sdk::Fee::default(),
+            )
+            .unwrap()
+    } else {
+        let commitment = sdk::field_word(delivery.note.commitment().unwrap());
+        let nullifier = sdk::field_word(delivery.note.nullifier().unwrap());
+        let path = [U256::ZERO; 16];
+        let root = sdk::merkle_root(delivery.note.commitment().unwrap(), 0, &path).unwrap();
+        h.chain.roots.lock().unwrap().insert(sdk::field_word(root));
+        let mut state = session.snapshot().unwrap();
+        state.credits.insert(
+            credit_key(commitment, CreditRole::Spender),
+            StoredCredit {
+                delivery: delivery.clone(),
+                commitment,
+                nullifier,
+                tree_id: 2,
+                leaf_index: 0,
+                path,
+                root,
+                block: block(10),
+                transaction_hash: B256::repeat_byte(9),
+                role: CreditRole::Spender,
+                consumed: false,
+                status: 1,
+                revoked: false,
+                reserved_by: None,
+            },
+        );
+        session.commit(state).unwrap();
+        session
+            .invisi
+            .prepare_draw_credit_explicit(
+                owner,
+                vec![sdk::CreditInput {
+                    payload: None,
+                    delivery,
+                    tree_id: 2,
+                    leaf_index: 0,
+                    path,
+                    root,
+                    debit: U256::from(7),
+                }],
+                &wallet(2),
+                deadline,
+                sdk::Fee::default(),
+                vec![],
+            )
+            .unwrap()
+    };
+    session.register(ManagedPrepared::Credit(prepared)).unwrap()
+}
+fn quote_and_prove_refusal_operation(
+    h: &Harness,
+    mut operation: Operation,
+    client: &crate::broadcaster::BroadcasterClient<RefusalRpcTransport>,
+) -> Operation {
+    client
+        .quote(
+            &mut operation,
+            h.chain.clone(),
+            &sdk::BroadcasterOptions {
+                max_fee_amount: Some(U256::from(100)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let request = operation.export_wallet_request("refusal-consent").unwrap();
+    let response =
+        serde_json::from_value(crate::wallet::execute(&key(1), &request.as_value()).unwrap())
+            .unwrap();
+    operation
+        .with_wallet_response(&response)
+        .unwrap()
+        .prove(&Backend, false)
+        .unwrap()
+}
+#[test]
+fn structured_first_refusal_restores_managed_credit_across_encrypted_restart() {
+    for kind in ["initial", "draw"] {
+        for (code, reason) in [
+            (-32024, "CREDIT_PERIOD_CHANGED"),
+            (-32025, "INSUFFICIENT_EXECUTION_SLACK"),
+            (-32026, "CREDIT_PERIOD_ENDING"),
+        ] {
+            let h = harness();
+            // Ending-period recovery also crosses a UTC month boundary.
+            if code == -32026 {
+                h.chain.height.store(1_196_740, Ordering::SeqCst);
+            }
+            let store = Arc::new(
+                EncryptedWalletStore::new(Arc::new(MemoryAtomicRecords::default()), [9; 32])
+                    .unwrap(),
+            );
+            let connect = || {
+                WalletSession::connect(
+                    h.session.invisi.clone(),
+                    h.session.wallet().clone(),
+                    store.clone(),
+                    h.source.clone(),
+                    "refusal-restart",
+                )
+                .unwrap()
+            };
+            let session = connect();
+            let (client, replies) = refusal_client(
+                &h,
+                serde_json::json!({"code":code,"message":format!("{reason}: refresh proof")}),
+                false,
+            );
+            let operation = refusal_credit_operation(&h, &session, kind);
+            let mut operation = quote_and_prove_refusal_operation(&h, operation, &client);
+            let id = operation.id().to_owned();
+            let error = client.submit(&mut operation, h.chain.as_ref()).unwrap_err();
+            assert!(error.starts_with(&format!("{reason}:")), "{error}");
+            assert!(!operation.broadcaster_state().unwrap().attempted);
+            let revision = session.snapshot().unwrap().revision;
+            assert!(
+                operation
+                    .calldata(session.wallet().owner_address())
+                    .is_err(),
+                "refused managed request still exports sendable calldata"
+            );
+            assert_eq!(session.snapshot().unwrap().revision, revision);
+            assert!(client
+                .submit(&mut operation, h.chain.as_ref())
+                .unwrap_err()
+                .starts_with(&format!("{reason}:")));
+            assert_eq!(
+                session.snapshot().unwrap().revision,
+                revision,
+                "retired request must not acquire a fresh send marker"
+            );
+            drop(operation);
+            drop(session);
+            h.chain.height.store(
+                if code == -32026 { 1_196_800 } else { 73_600 },
+                Ordering::SeqCst,
+            );
+            let session = connect();
+            let state = session.snapshot().unwrap();
+            let record = &state.operations[&id];
+            assert!(!record.externalized);
+            assert!(record.broadcaster_id.is_none());
+            assert!(record.broadcaster_submission_id.is_none());
+            assert!(record.transaction_hash.is_none());
+            assert!(state
+                .credits
+                .values()
+                .all(|credit| credit.reserved_by.as_deref() == Some(&id)));
+            let mut resumed = session.resume(&id, Some(&Backend)).unwrap();
+            assert!(!resumed.broadcaster_state().unwrap().attempted);
+            assert!(client
+                .submit(&mut resumed, h.chain.as_ref())
+                .unwrap_err()
+                .starts_with(&format!("{reason}:")));
+            assert!(replies.lock().unwrap().is_empty());
+            session.abandon_operation(&id, None).unwrap();
+            assert!(session
+                .snapshot()
+                .unwrap()
+                .credits
+                .values()
+                .all(|credit| credit.reserved_by.is_none()));
+            let fresh = refusal_credit_operation(&h, &session, kind);
+            assert!(fresh.export_wallet_authorization().is_ok());
+        }
+    }
+}
+
+#[test]
+fn acknowledged_refusal_abandon_requires_canonical_unspent_scope_and_generation() {
+    for failure in ["spent", "deployment", "reorg", "invalidated", "generation"] {
+        let h = harness();
+        let (client, _) = refusal_client(
+            &h,
+            serde_json::json!({"code":-32024,"message":"CREDIT_PERIOD_CHANGED: regenerate"}),
+            false,
+        );
+        let operation = refusal_credit_operation(&h, &h.session, "draw");
+        let mut operation = quote_and_prove_refusal_operation(&h, operation, &client);
+        let id = operation.id().to_owned();
+        assert!(client.submit(&mut operation, h.chain.as_ref()).is_err());
+        let state = h.session.snapshot().unwrap();
+        let generation = state.operations[&id].generation;
+        match failure {
+            "spent" => {
+                h.chain
+                    .spent
+                    .lock()
+                    .unwrap()
+                    .insert(state.credits.values().next().unwrap().nullifier);
+            }
+            "deployment" => h.chain.changed_context.store(true, Ordering::SeqCst),
+            "reorg" => h.chain.reorg.store(true, Ordering::SeqCst),
+            "invalidated" => {
+                let mut state = state.clone();
+                state.invalidated = true;
+                h.session.commit(state).unwrap();
+            }
+            _ => {}
+        }
+        let revision = h
+            .store
+            .inner
+            .snapshot(&h.session.scope.key())
+            .unwrap()
+            .revision;
+        assert!(
+            h.session
+                .abandon_operation(
+                    &id,
+                    Some(if failure == "generation" {
+                        generation - 1
+                    } else {
+                        generation
+                    })
+                )
+                .is_err(),
+            "unsafe release for {failure}"
+        );
+        let after = h.store.inner.snapshot(&h.session.scope.key()).unwrap();
+        assert_eq!(after.revision, revision);
+        assert!(after
+            .credits
+            .values()
+            .all(|credit| credit.reserved_by.as_deref() == Some(&id)));
+    }
+}
+
+#[test]
+fn later_exact_refusal_never_releases_unknown_or_failed_rollback_submission() {
+    for fail_rollback in [false, true] {
+        let h = harness();
+        let refusal =
+            serde_json::json!({"code":-32024,"message":"CREDIT_PERIOD_CHANGED: regenerate"});
+        let (client, replies) = refusal_client(
+            &h,
+            if fail_rollback {
+                refusal.clone()
+            } else {
+                serde_json::Value::Null
+            },
+            fail_rollback,
+        );
+        let operation = refusal_credit_operation(&h, &h.session, "initial");
+        let mut operation = quote_and_prove_refusal_operation(&h, operation, &client);
+        let id = operation.id().to_owned();
+        let first = client.submit(&mut operation, h.chain.as_ref()).unwrap_err();
+        assert!(
+            first.contains(if fail_rollback {
+                "save failure"
+            } else {
+                "lost RPC response"
+            }),
+            "{first}"
+        );
+        h.store.fail_writes.store(false, Ordering::SeqCst);
+        let before = h.session.snapshot().unwrap();
+        assert!(before.operations[&id].externalized);
+        assert!(before.operations[&id].broadcaster_id.is_some());
+        drop(operation);
+        h.chain.height.store(73_600, Ordering::SeqCst);
+        let mut resumed = h.session.resume(&id, Some(&Backend)).unwrap();
+        // A later explicit refusal cannot prove the earlier uncertain attempt was unsent.
+        replies.lock().unwrap().push_back(refusal);
+        let replay = client.submit(&mut resumed, h.chain.as_ref()).unwrap_err();
+        assert!(replay.contains("CREDIT_PERIOD_CHANGED"), "{replay}");
+        let after = h.session.snapshot().unwrap();
+        assert!(after.operations[&id].externalized);
+        assert!(after.operations[&id].broadcaster_id.is_some());
+        assert!(after.operations[&id]
+            .snapshot
+            .broadcaster_pre_send_refusal()
+            .is_none());
+        assert!(h.session.abandon_operation(&id, None).is_err());
+    }
+}
+
+struct SupersedingRefusalTransport {
+    base: RefusalRpcTransport,
+    session: WalletSession,
+    operation_id: Arc<Mutex<String>>,
+}
+impl crate::rpc::RpcTransport for SupersedingRefusalTransport {
+    fn send(&self, request: &serde_json::Value) -> crate::rpc::Result<serde_json::Value> {
+        if request["method"] == "broadcaster_submitTransaction" {
+            self.session
+                .resume(&self.operation_id.lock().unwrap(), Some(&Backend))
+                .unwrap();
+        }
+        self.base.send(request)
+    }
+}
+#[test]
+fn stale_worker_cannot_commit_refusal_rollback_or_release() {
+    let h = harness();
+    let relay = Arc::new(SessionCreditRelay {
+        requests: Default::default(),
+        lookup_mode: 0.into(),
+        attempts: 0.into(),
+    });
+    let operation_id = Arc::new(Mutex::new(String::new()));
+    let client=crate::broadcaster::BroadcasterClient::new(sdk::PreparedBroadcaster::configuration(relay.as_ref()),SupersedingRefusalTransport{
+        base:RefusalRpcTransport{base:ClientQuoteTransport{relay,chain:h.chain.clone()},replies:Arc::new(Mutex::new(std::collections::VecDeque::from([serde_json::json!({"code":-32024,"message":"CREDIT_PERIOD_CHANGED: regenerate"})]))),fail_store:None},
+        session:h.session.clone(),operation_id:operation_id.clone(),
+    }).unwrap();
+    let operation = refusal_credit_operation(&h, &h.session, "initial");
+    let mut operation = operation;
+    client
+        .quote(
+            &mut operation,
+            h.chain.clone(),
+            &sdk::BroadcasterOptions {
+                max_fee_amount: Some(U256::from(100)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let request = operation.export_wallet_request("lease-consent").unwrap();
+    let response =
+        serde_json::from_value(crate::wallet::execute(&key(1), &request.as_value()).unwrap())
+            .unwrap();
+    let mut operation = operation
+        .with_wallet_response(&response)
+        .unwrap()
+        .prove(&Backend, false)
+        .unwrap();
+    let id = operation.id().to_owned();
+    *operation_id.lock().unwrap() = id.clone();
+    assert!(client
+        .submit(&mut operation, h.chain.as_ref())
+        .unwrap_err()
+        .contains("stale operation"));
+    let state = h.session.snapshot().unwrap();
+    assert!(state.operations[&id].externalized);
+    assert!(state.operations[&id].broadcaster_id.is_some());
+    assert!(state.operations[&id]
+        .snapshot
+        .broadcaster_pre_send_refusal()
+        .is_none());
+    assert!(operation.abandon().is_err());
+    assert!(h.session.abandon_operation(&id, None).is_err());
+}
+
+#[test]
+fn known_submission_and_transaction_evidence_survives_later_refusal() {
+    for has_hash in [false, true] {
+        let h = harness();
+        let hash = B256::repeat_byte(8);
+        let mut accepted = serde_json::json!({"id":"accepted-server-id","state":"pending"});
+        if has_hash {
+            accepted["transactionHash"] = serde_json::json!(hash);
+        }
+        let (client, replies) = refusal_client(&h, serde_json::json!({"result":accepted}), false);
+        let operation = refusal_credit_operation(&h, &h.session, "initial");
+        let mut operation = quote_and_prove_refusal_operation(&h, operation, &client);
+        let id = operation.id().to_owned();
+        assert_eq!(
+            client.submit(&mut operation, h.chain.as_ref()).unwrap().id,
+            "accepted-server-id"
+        );
+        replies.lock().unwrap().push_back(
+            serde_json::json!({"code":-32024,"message":"CREDIT_PERIOD_CHANGED: regenerate"}),
+        );
+        assert!(client
+            .submit(&mut operation, h.chain.as_ref())
+            .unwrap_err()
+            .contains("CREDIT_PERIOD_CHANGED"));
+        let state = h.session.snapshot().unwrap();
+        let record = &state.operations[&id];
+        assert!(record.externalized);
+        assert_eq!(
+            record.broadcaster_submission_id.as_deref(),
+            Some("accepted-server-id")
+        );
+        assert_eq!(record.transaction_hash, has_hash.then_some(hash));
+        assert!(record.snapshot.broadcaster_pre_send_refusal().is_none());
+        assert!(h.session.abandon_operation(&id, None).is_err());
+    }
+}
+
+#[test]
+fn same_handle_acceptance_after_failed_refusal_rollback_reloads_cleanly() {
+    let h = harness();
+    let (client, replies) = refusal_client(
+        &h,
+        serde_json::json!({"code":-32024,"message":"CREDIT_PERIOD_CHANGED: regenerate"}),
+        true,
+    );
+    let operation = refusal_credit_operation(&h, &h.session, "initial");
+    let mut operation = quote_and_prove_refusal_operation(&h, operation, &client);
+    let id = operation.id().to_owned();
+    assert!(client
+        .submit(&mut operation, h.chain.as_ref())
+        .unwrap_err()
+        .contains("save failure"));
+    assert!(operation
+        .broadcaster_state()
+        .unwrap()
+        .pre_send_refusal
+        .is_some());
+    h.store.fail_writes.store(false, Ordering::SeqCst);
+    replies.lock().unwrap().push_back(
+        serde_json::json!({"result":{"id":"accepted-after-uncertainty","state":"pending"}}),
+    );
+    assert_eq!(
+        client.submit(&mut operation, h.chain.as_ref()).unwrap().id,
+        "accepted-after-uncertainty"
+    );
+    drop(operation);
+    let resumed = h.session.resume(&id, Some(&Backend)).unwrap();
+    let saved = resumed.broadcaster_state().unwrap();
+    assert!(saved.pre_send_refusal.is_none());
+    assert!(saved.attempted);
+    assert_eq!(
+        saved.submission_id.as_deref(),
+        Some("accepted-after-uncertainty")
+    );
+    let record = h.session.snapshot().unwrap().operations[&id].clone();
+    assert!(record.externalized);
+    assert_eq!(
+        record.broadcaster_submission_id.as_deref(),
+        Some("accepted-after-uncertainty")
+    );
+    assert!(h.session.abandon_operation(&id, None).is_err());
 }

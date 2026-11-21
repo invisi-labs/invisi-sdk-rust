@@ -1008,6 +1008,13 @@ impl PreparedCredit {
         self.calldata(chain, caller).map(|_| ())
     }
     pub fn calldata(&self, chain: &dyn ChainState, caller: Address) -> Result<TransactionCall> {
+        if let Some(reason) = self
+            .broadcaster
+            .as_ref()
+            .and_then(|saved| saved.pre_send_refusal.as_ref())
+        {
+            return Err(format!("{reason}: Broadcaster refused before acceptance; abandon and prepare a fresh request"));
+        }
         let block = chain.snapshot()?;
         if chain.context() != self.context {
             return Err("Credit deployment mismatch".into());
@@ -1601,6 +1608,156 @@ mod lifecycle_tests {
                 );
                 assert_eq!(relay.fees.load(std::sync::atomic::Ordering::SeqCst), 0);
             }
+        }
+    }
+    #[derive(Clone)]
+    struct RefusalTransport {
+        context: ProtocolContext,
+        config: invisi_sdk_rpc::broadcaster::Configuration,
+        code: i64,
+        message: String,
+        unknown_first: bool,
+        attempts: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl invisi_sdk_rpc::rpc::RpcTransport for RefusalTransport {
+        fn send(&self, request: &Value) -> invisi_sdk_rpc::rpc::Result<Value> {
+            if request["method"] == "broadcaster_getStatus" {
+                return Ok(json!({"jsonrpc":"2.0","id":request["id"],"result":{
+                    "apiVersion":"v1","protocolVersion":"1","chainId":self.context.chain_id.to_string(),
+                    "protocol":word_address(self.context.protocol_address).unwrap(),
+                    "sender":self.config.quote_signer,"feeRecipient":self.config.fee_recipient,"submissionHalted":false,
+                    "provenance":{"enabled":true,"requestHashFormat":invisi_sdk_rpc::broadcaster::REQUEST_HASH_FORMAT,"trackingRequired":true,"trackingSupported":true}
+                }}));
+            }
+            assert_eq!(request["method"], "broadcaster_submitTransaction");
+            let round = self
+                .attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.unknown_first && round == 0 {
+                return Err(invisi_sdk_rpc::rpc::Error::Transport(
+                    "response lost".into(),
+                ));
+            }
+            Ok(
+                json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":self.code,"message":self.message}}),
+            )
+        }
+    }
+    fn refusal_preparation(
+        kind: &str,
+    ) -> (
+        Arc<super::super::test_support::FixtureChain>,
+        PreparedCredit,
+        invisi_sdk_rpc::broadcaster::Configuration,
+    ) {
+        let (chain, prepared) = period_operation(kind, 2_000_000_000);
+        let quoting = Arc::new(CreditRelay {
+            fees: Default::default(),
+            submits: Default::default(),
+        });
+        let quoted = prepared
+            .quote_for_broadcaster(
+                chain.clone(),
+                quoting.clone(),
+                &BroadcasterOptions {
+                    max_fee_amount: Some(U256::from(100)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let proved = prove_period_operation(quoted, kind);
+        (chain, proved, quoting.configuration())
+    }
+    #[test]
+    fn first_structured_refusal_preserves_known_unsent_credit_for_fresh_preparation() {
+        for kind in ["initial", "draw"] {
+            let (chain, baseline, config) = refusal_preparation(kind);
+            for (code, reason) in [
+                (-32024, "CREDIT_PERIOD_CHANGED"),
+                (-32025, "INSUFFICIENT_EXECUTION_SLACK"),
+                (-32026, "CREDIT_PERIOD_ENDING"),
+            ] {
+                chain.block.lock().unwrap().timestamp = 2_000_000_000;
+                let mut proved = baseline.clone();
+                let transport = RefusalTransport {
+                    context: chain.context(),
+                    config: config.clone(),
+                    code,
+                    message: format!("{reason}: regenerate"),
+                    unknown_first: false,
+                    attempts: Arc::new(0.into()),
+                };
+                let rpc = invisi_sdk_rpc::broadcaster::BroadcasterClient::new(
+                    config.clone(),
+                    transport.clone(),
+                )
+                .unwrap()
+                .with_provenance_mode();
+                let error = proved
+                    .submit_for_broadcaster(chain.as_ref(), &rpc)
+                    .unwrap_err();
+                assert!(error.starts_with(&format!("{reason}:")), "{kind}: {error}");
+                let saved = proved.broadcaster_state().unwrap();
+                assert!(!saved.attempted);
+                assert_eq!(saved.pre_send_refusal.as_deref(), Some(reason));
+                assert!(saved.submission_id.is_none());
+                assert!(!saved.submitted_data.is_empty());
+                assert!(
+                    proved.calldata(chain.as_ref(), Address::ZERO).is_err(),
+                    "refused request still exports sendable calldata"
+                );
+                // Both an immediate retry and a next-day retry require a fresh request.
+                for timestamp in [2_000_000_000, 2_000_073_600] {
+                    chain.block.lock().unwrap().timestamp = timestamp;
+                    assert!(proved
+                        .submit_for_broadcaster(chain.as_ref(), &rpc)
+                        .unwrap_err()
+                        .starts_with(&format!("{reason}:")));
+                }
+                assert_eq!(
+                    transport.attempts.load(std::sync::atomic::Ordering::SeqCst),
+                    1
+                );
+            }
+            let (_, fresh) = period_operation(kind, 2_000_073_600);
+            assert!(fresh.export_wallet_request("fresh-consent").is_ok());
+        }
+    }
+    #[test]
+    fn malformed_rpc_refusals_and_later_refusals_preserve_uncertain_credit() {
+        let (chain, baseline, config) = refusal_preparation("draw");
+        for (code, message, unknown_first) in [
+            (-32024, "CREDIT_PERIOD_CHANGED", false),
+            (-32024, " CREDIT_PERIOD_CHANGED: regenerate", false),
+            (-32024, "CREDIT_PERIOD_CHANGED_EXTRA: regenerate", false),
+            (-32024, "CREDIT_PERIOD_ENDING: regenerate", false),
+            (-32025, "CREDIT_PERIOD_CHANGED: regenerate", false),
+            (-32026, "INSUFFICIENT_EXECUTION_SLACK: regenerate", false),
+            (-32020, "CREDIT_PERIOD_CHANGED: regenerate", false),
+            (-32024, "CREDIT_PERIOD_CHANGED: regenerate", true),
+        ] {
+            let mut proved = baseline.clone();
+            let transport = RefusalTransport {
+                context: chain.context(),
+                config: config.clone(),
+                code,
+                message: message.into(),
+                unknown_first,
+                attempts: Arc::new(0.into()),
+            };
+            let rpc = invisi_sdk_rpc::broadcaster::BroadcasterClient::new(
+                config.clone(),
+                transport.clone(),
+            )
+            .unwrap()
+            .with_provenance_mode();
+            assert!(proved.submit_for_broadcaster(chain.as_ref(), &rpc).is_err());
+            if unknown_first {
+                assert!(proved.submit_for_broadcaster(chain.as_ref(), &rpc).is_err());
+            }
+            let saved = proved.broadcaster_state().unwrap();
+            assert!(saved.attempted, "{code}: {message}");
+            assert!(saved.pre_send_refusal.is_none());
         }
     }
     #[test]

@@ -884,8 +884,94 @@ async fn canonical_erc20_quotes_bind_input_output_cap_and_registry() {
         .prepare_canonical_zeroex_quote(core.clone(), i.clone(), &body)
         .await
         .unwrap();
+    struct QuoteHttp {
+        body: Value,
+        rotate: Option<Arc<Provider>>,
+    }
+    impl ZeroExHttpBackend for QuoteHttp {
+        fn execute(&self, request: reqwest::Request) -> BoxFuture<'_, Result<ZeroExHttpResponse>> {
+            Box::pin(async move {
+                let query = request
+                    .url()
+                    .query_pairs()
+                    .collect::<std::collections::BTreeMap<_, _>>();
+                assert_eq!(query["sellToken"], format!("{:#x}", a(0x44)));
+                assert_eq!(query["buyAmount"], "100200000");
+                assert_eq!(query["taker"], format!("{:#x}", a(0x33)));
+                assert_eq!(query["recipient"], query["taker"]);
+                if let Some(provider) = &self.rotate {
+                    provider.0.lock().unwrap().settler = Some(a(0xfe));
+                }
+                Ok(ZeroExHttpResponse {
+                    status: 200,
+                    body: serde_json::to_vec(&self.body).unwrap(),
+                })
+            })
+        }
+    }
+    let http = |body: Value, rotate: Option<Arc<Provider>>| {
+        ZeroExHttpTransport::with_backend(
+            "explicit-test-secret",
+            None,
+            Arc::new(QuoteHttp { body, rotate }),
+        )
+        .unwrap()
+    };
+    client
+        .quote_canonical_zeroex(
+            &http(body.clone(), None),
+            core.clone(),
+            i.clone(),
+            Some(50),
+            None,
+        )
+        .await
+        .unwrap();
+    let token = CancellationToken::default();
+    token.cancel();
+    assert!(matches!(
+        client
+            .quote_canonical_zeroex(
+                &http(body.clone(), None),
+                core.clone(),
+                i.clone(),
+                None,
+                Some(token)
+            )
+            .await,
+        Err(Error::Cancelled)
+    ));
+    let mut expired = i.clone();
+    expired.deadline = U256::from(999);
+    assert!(matches!(
+        client
+            .quote_canonical_zeroex(&http(body.clone(), None), core.clone(), expired, None, None)
+            .await,
+        Err(Error::Invalid("quote expired"))
+    ));
     let mut bad = body.clone();
     bad["buyAmount"] = json!("1");
+    assert!(client
+        .quote_canonical_zeroex(
+            &http(bad.clone(), None),
+            core.clone(),
+            i.clone(),
+            None,
+            None
+        )
+        .await
+        .is_err());
+    assert!(client
+        .quote_canonical_zeroex(
+            &http(body.clone(), Some(provider.clone())),
+            core.clone(),
+            i.clone(),
+            None,
+            None
+        )
+        .await
+        .is_err());
+    provider.0.lock().unwrap().settler = None;
     assert!(client
         .prepare_canonical_zeroex_quote(core.clone(), i.clone(), &bad)
         .await
@@ -914,5 +1000,80 @@ async fn canonical_erc20_quotes_bind_input_output_cap_and_registry() {
             .await
             .unwrap(),
         U256::from(60)
+    );
+}
+
+#[tokio::test]
+async fn canonical_native_http_quote_narrows_unsigned_cap_expiry_and_normalizes_alias() {
+    use invisi_sdk_payment_router::canonical::*;
+    struct NativeHttp;
+    impl ZeroExHttpBackend for NativeHttp {
+        fn execute(&self, request: reqwest::Request) -> BoxFuture<'_, Result<ZeroExHttpResponse>> {
+            Box::pin(async move {
+                let query = request
+                    .url()
+                    .query_pairs()
+                    .collect::<std::collections::BTreeMap<_, _>>();
+                assert_eq!(query["sellToken"], format!("{NATIVE_TOKEN:#x}"));
+                assert_eq!(query["buyAmount"], "100200000");
+                let mut payload = abi::executeCall {
+                    slippage: abi::Slippage {
+                        recipient: a(0x33),
+                        buyToken: a(0x22),
+                        minAmountOut: U256::from(100200000),
+                    },
+                    actions: vec![abi::NATIVE_CHECKCall {
+                        deadline: U256::from(1200),
+                        msgValue: U256::from(777),
+                    }
+                    .abi_encode()
+                    .into()],
+                    zid: B256::ZERO,
+                }
+                .abi_encode();
+                payload.extend_from_slice(a(0xaa).as_slice());
+                let body = serde_json::json!({"liquidityAvailable":true,"chainId":31337,"sellToken":NATIVE_TOKEN,"buyToken":a(0x22),"buyAmount":"100200000","maxSellAmount":"777","sellAmount":"700","transaction":{"to":a(0x66),"value":"777","data":format!("0x{}",hex::encode(payload))}});
+                Ok(ZeroExHttpResponse {
+                    status: 200,
+                    body: serde_json::to_vec(&body).unwrap(),
+                })
+            })
+        }
+    }
+    let provider = Provider::new();
+    let client = PaymentRouterClient::new(dep(), provider).unwrap();
+    let v: Value = serde_json::from_str(include_str!("fixtures/intent.json")).unwrap();
+    let c = &v["cases"][0];
+    let x = PaymentRouter::payNativeCall::abi_decode_validate(&data(&c["call"]["data"])).unwrap();
+    let transport =
+        ZeroExHttpTransport::with_backend("explicit-test-secret", None, Arc::new(NativeHttp))
+            .unwrap();
+    let p = client
+        .quote_canonical_zeroex(
+            &transport,
+            TransactionCall {
+                to: a(0x11),
+                data: data(&c["coreCalldata"]),
+                value: U256::ZERO,
+            },
+            x.i,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(p.intent().amountInMaximum, U256::from(777));
+    assert_eq!(p.intent().deadline, U256::from(1200));
+    assert_eq!(
+        p.router_call(Permit::default(), alloy_primitives::Bytes::new())
+            .unwrap()
+            .value,
+        U256::from(777)
+    );
+    assert_eq!(
+        abi::executeCall::abi_decode_validate(&p.route().data)
+            .unwrap()
+            .abi_encode(),
+        p.route().data.as_ref()
     );
 }

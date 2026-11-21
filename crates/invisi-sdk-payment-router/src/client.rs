@@ -1004,3 +1004,96 @@ impl PaymentRouterClient {
         Ok(payment)
     }
 }
+
+impl PaymentRouterClient {
+    /// Fetch and validate a canonical native/ERC20 0x exact-buy quote using the built-in
+    /// explicitly credentialed HTTP transport. Core's full funding amount includes its fee.
+    pub async fn quote_canonical_zeroex(
+        &self,
+        transport: &ZeroExHttpTransport,
+        core: TransactionCall,
+        mut intent: canonical::Intent,
+        slippage_bps: Option<u16>,
+        cancellation: Option<CancellationToken>,
+    ) -> Result<canonical::Payment> {
+        if let Some(token) = &cancellation {
+            token.check()?;
+        }
+        let frame = self.frame(true).await?;
+        let (_, request) = inspect_core_payment(&core, &self.deployment, frame.block.timestamp)?;
+        ensure(
+            self.router_nonce_at(intent.payer, frame.block.number)
+                .await?
+                == intent.nonce,
+            "stale Router nonce",
+        )?;
+        let deadline = u64::try_from(intent.deadline)
+            .map_err(|_| Error::Invalid("invalid intent deadline"))?;
+        let parameters = QuoteParameters {
+            token_out: request.params.token,
+            amount_out: request.funding.amount,
+            max_input: intent.amountInMaximum,
+            deadline,
+            slippage_bps,
+            cancellation,
+        };
+        parameters.check()?;
+        let mut body = transport
+            .fetch_canonical(
+                intent.tokenIn,
+                SwapQuoteRequest {
+                    parameters: parameters.clone(),
+                    deployment: self.deployment.clone(),
+                    now: frame.block.timestamp,
+                    block_number: frame.block.number,
+                    settler_address: frame.settler_address,
+                },
+            )
+            .await?;
+        parameters.check()?;
+        self.assert_frame(&frame).await?;
+        let current = self.frame(true).await?;
+        ensure(
+            current.settler_address == frame.settler_address,
+            "0x Settler changed; refresh quote",
+        )?;
+        parameters.check()?;
+        // The quote narrows an unsigned native intent's cap/expiry; the host signs only
+        // the returned payment. Normalize accepted API sender aliases before binding hashes.
+        if intent.tokenIn.is_zero() {
+            let maximum = invisi_sdk_protocol::interfaces::decimal(&body["maxSellAmount"])
+                .map_err(|_| Error::Invalid("invalid 0x amount"))?;
+            ensure(
+                !maximum.is_zero() && maximum <= intent.amountInMaximum,
+                "0x quote exceeds input cap",
+            )?;
+            let target = invisi_sdk_protocol::interfaces::address(&body["transaction"]["to"])
+                .map_err(|_| Error::Invalid("invalid 0x address"))?;
+            let checked = self.zeroex(
+                target,
+                crate::provider::bytes(&body["transaction"]["data"])?,
+                request.params.token,
+                request.funding.amount,
+                maximum,
+                &current,
+            )?;
+            intent.amountInMaximum = maximum;
+            intent.deadline = intent.deadline.min(checked.native_deadline);
+            body["transaction"]["data"] =
+                serde_json::json!(format!("0x{}", hex::encode(checked.data)));
+        } else {
+            let mut outer = abi::execCall::abi_decode_validate(&crate::provider::bytes(
+                &body["transaction"]["data"],
+            )?)?;
+            let inner = abi::executeCall::abi_decode_validate(&outer.data)?;
+            outer.data = inner.abi_encode().into();
+            body["transaction"]["data"] =
+                serde_json::json!(format!("0x{}", hex::encode(outer.abi_encode())));
+        }
+        let payment = self
+            .prepare_canonical_zeroex_quote(core, intent, &body)
+            .await?;
+        parameters.check()?;
+        Ok(payment)
+    }
+}

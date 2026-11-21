@@ -179,3 +179,59 @@ async fn zeroex_accepts_safe_integer_json_chain_numbers() {
         U256::from(100)
     );
 }
+
+#[tokio::test]
+async fn canonical_http_exact_buy_uses_arbitrary_erc20_and_native_sentinel() {
+    struct GenericHttp;
+    impl ZeroExHttpBackend for GenericHttp {
+        fn execute(&self, request: reqwest::Request) -> BoxFuture<'_, Result<ZeroExHttpResponse>> {
+            Box::pin(async move {
+                let pairs = request
+                    .url()
+                    .query_pairs()
+                    .collect::<std::collections::BTreeMap<_, _>>();
+                assert_eq!(
+                    pairs["sellToken"],
+                    format!("{:#x}", Address::repeat_byte(0xaa))
+                );
+                assert_eq!(pairs["buyAmount"], "10");
+                assert_eq!(
+                    pairs["buyToken"],
+                    format!("{:#x}", Address::repeat_byte(0x22))
+                );
+                assert_eq!(pairs["taker"], format!("{:#x}", Address::repeat_byte(0x33)));
+                assert_eq!(pairs["recipient"], pairs["taker"]);
+                assert_eq!(request.headers()["0x-api-key"], "explicit-test-secret");
+                Ok(ZeroExHttpResponse {
+                    status: 200,
+                    body: br#"{"ok":true}"#.to_vec(),
+                })
+            })
+        }
+    }
+    let transport =
+        ZeroExHttpTransport::with_backend("explicit-test-secret", None, Arc::new(GenericHttp))
+            .unwrap();
+    assert_eq!(
+        transport
+            .fetch_canonical(Address::repeat_byte(0xaa), request())
+            .await
+            .unwrap(),
+        json!({"ok":true})
+    );
+    let url = transport.canonical_request_url(Address::ZERO, &request());
+    assert_eq!(
+        url.query_pairs().find(|(k, _)| k == "sellToken").unwrap().1,
+        format!("{NATIVE_TOKEN:#x}")
+    );
+    let token = CancellationToken::default();
+    token.cancel();
+    let mut cancelled = request();
+    cancelled.parameters.cancellation = Some(token);
+    assert!(matches!(
+        transport
+            .fetch_canonical(Address::repeat_byte(0xaa), cancelled)
+            .await,
+        Err(Error::Cancelled)
+    ));
+}

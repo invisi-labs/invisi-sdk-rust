@@ -336,10 +336,19 @@ impl ZeroExHttpTransport {
     }
     /// Request metadata is public; the explicit API credential is kept outside the URL.
     pub fn request_url(&self, r: &SwapQuoteRequest) -> reqwest::Url {
+        self.canonical_request_url(Address::ZERO, r)
+    }
+    /// Canonical input uses address zero for native ETH; the API receives its native sentinel.
+    pub fn canonical_request_url(&self, token_in: Address, r: &SwapQuoteRequest) -> reqwest::Url {
+        let sell_token = if token_in.is_zero() {
+            NATIVE_TOKEN
+        } else {
+            token_in
+        };
         let mut url = self.endpoint.clone();
         url.query_pairs_mut().extend_pairs([
             ("chainId", r.deployment.chain_id.to_string()),
-            ("sellToken", format!("{NATIVE_TOKEN:#x}")),
+            ("sellToken", format!("{sell_token:#x}")),
             ("buyToken", format!("{:#x}", r.parameters.token_out)),
             ("buyAmount", r.parameters.amount_out.to_string()),
             ("taker", format!("{:#x}", r.deployment.router_address)),
@@ -351,13 +360,22 @@ impl ZeroExHttpTransport {
         ]);
         url
     }
-}
-impl ZeroExQuoteTransport for ZeroExHttpTransport {
-    fn fetch(&self, r: SwapQuoteRequest) -> BoxFuture<'_, Result<Value>> {
+    /// Built-in exact-buy HTTP for native or arbitrary ERC20 input, retaining legacy
+    /// endpoint, credential, redirect, sanitized error and cancellation behavior.
+    pub fn fetch_canonical(
+        &self,
+        token_in: Address,
+        r: SwapQuoteRequest,
+    ) -> BoxFuture<'_, Result<Value>> {
         Box::pin(async move {
             r.parameters.check()?;
+            r.deployment.validate()?;
+            ensure(r.parameters.deadline >= r.now, "quote expired")?;
             let request = async {
-                let mut request = reqwest::Request::new(reqwest::Method::GET, self.request_url(&r));
+                let mut request = reqwest::Request::new(
+                    reqwest::Method::GET,
+                    self.canonical_request_url(token_in, &r),
+                );
                 request.headers_mut().insert("0x-api-key", self.key.clone());
                 request.headers_mut().insert(
                     "0x-version",
@@ -381,5 +399,11 @@ impl ZeroExQuoteTransport for ZeroExHttpTransport {
                 None => request.await,
             }
         })
+    }
+}
+
+impl ZeroExQuoteTransport for ZeroExHttpTransport {
+    fn fetch(&self, r: SwapQuoteRequest) -> BoxFuture<'_, Result<Value>> {
+        self.fetch_canonical(Address::ZERO, r)
     }
 }

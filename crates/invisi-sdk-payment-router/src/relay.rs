@@ -76,13 +76,13 @@ impl<T: RpcTransport> RouterRelayClient<T> {
         let r = p.request();
         let x = &q.quote;
         ensure(
-            q.request_hash_format.as_deref() == Some(ENVELOPE_HASH_FORMAT)
+            q.request_hash_format.as_deref() == Some(ROUTER_INTENT_HASH_FORMAT)
                 && x.schedule.is_none()
                 && x.execution == Execution::Direct,
             "unsupported relay quote format/execution",
         )?;
         ensure(
-            x.request_hash == envelope_hash(self.trust.chain_id, self.trust.protocol, e)?
+            x.request_hash == router_intent_hash(self.trust.chain_id, self.trust.protocol, e)?
                 && x.token == r.params.token
                 && x.fee_recipient == self.fee_recipient
                 && x.fee_recipient == r.params.feeRecipient
@@ -129,6 +129,7 @@ impl<T: RpcTransport> RouterRelayClient<T> {
         now: u64,
         proof_sidecars: &[Value],
     ) -> Result<Value> {
+        p.check_final_envelope(e)?;
         self.verify_quote(p, e, q, now)?;
         let mut params = self.params(p, e)?;
         params["quote"] = json!(q.quote);

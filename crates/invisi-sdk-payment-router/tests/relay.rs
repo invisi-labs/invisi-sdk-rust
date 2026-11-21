@@ -76,7 +76,7 @@ fn relay_wire_quote_validation_and_tampering() {
         fee_amount: p.request().params.feeAmount.to_string(),
         deadline: "1800000000".into(),
         max_gas: "1000000".into(),
-        request_hash: envelope_hash(31337, trust.protocol, &e).unwrap(),
+        request_hash: router_intent_hash(31337, trust.protocol, &e).unwrap(),
     };
     let (sig, id) = key
         .sign_prehash_recoverable(quote_digest(&q, &trust).unwrap().as_slice())
@@ -86,7 +86,7 @@ fn relay_wire_quote_validation_and_tampering() {
     let signed = SignedQuote {
         quote: q,
         signature: format!("0x{}", hex::encode(raw)),
-        request_hash_format: Some(ENVELOPE_HASH_FORMAT.into()),
+        request_hash_format: Some(ROUTER_INTENT_HASH_FORMAT.into()),
         provenance_required: Some(true),
     };
     let requests = Arc::new(Mutex::new(vec![]));
@@ -99,16 +99,62 @@ fn relay_wire_quote_validation_and_tampering() {
         Address::repeat_byte(0xbb),
     )
     .unwrap();
-    client.estimate_quote(&p, &e).unwrap();
-    let q = client.get_quote(&p, &e, 1000).unwrap();
+    let mut draft_call =
+        invisi_sdk_protocol::protocol::InvisiCore::transact_0Call::abi_decode_validate(
+            &p.core().data,
+        )
+        .unwrap();
+    draft_call._0 = Bytes::new();
+    let deployment = PaymentRouterDeployment {
+        chain_id: 31337,
+        core_address: p.core().to,
+        router_address: e.to,
+        weth_address: Address::repeat_byte(0x44),
+        uniswap_router_address: Address::repeat_byte(0x55),
+        runtime_code_hash: None,
+        zero_ex: None,
+    };
+    let draft = Payment::prepare_draft(
+        &deployment,
+        TransactionCall {
+            to: p.core().to,
+            data: draft_call.abi_encode(),
+            value: U256::ZERO,
+        },
+        p.intent().clone(),
+        p.route().clone(),
+        1000,
+        None,
+    )
+    .unwrap();
+    let draft_envelope = draft.draft_relay_envelope(Permit::default()).unwrap();
+    client.estimate_quote(&draft, &draft_envelope).unwrap();
+    let q = client.get_quote(&draft, &draft_envelope, 1000).unwrap();
+    assert!(client
+        .submit_transaction(&draft, &draft_envelope, &q, 1000, &[])
+        .is_err());
     client.submit_transaction(&p, &e, &q, 1000, &[]).unwrap();
     let req = requests.lock().unwrap();
-    for r in req.iter() {
+    for (index, r) in req.iter().enumerate() {
         assert_eq!(
             r["params"][0]["data"],
-            format!("0x{}", hex::encode(&p.core().data))
+            format!(
+                "0x{}",
+                hex::encode(if index < 2 {
+                    &draft.core().data
+                } else {
+                    &p.core().data
+                })
+            )
         );
-        assert_eq!(r["params"][0]["router"], json!(e));
+        assert_eq!(
+            r["params"][0]["router"],
+            if index < 2 {
+                json!(draft_envelope)
+            } else {
+                json!(e)
+            }
+        );
     }
     assert_eq!(req[2]["params"][0]["quote"], json!(q.quote));
     assert_eq!(req[2]["params"][0]["signature"], q.signature);
@@ -139,4 +185,107 @@ fn relay_wire_quote_validation_and_tampering() {
     changed = e.clone();
     changed.value = "1".into();
     assert!(client.verify_quote(&p, &changed, &q, 1000).is_err());
+}
+
+#[test]
+fn native_draft_quote_reused_after_proof_and_account_authorization() {
+    let vectors: Value =
+        serde_json::from_str(include_str!("fixtures/preprove-intent-vectors.json")).unwrap();
+    let v = vectors
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["draftEnvelope"]["authorizationList"].is_array())
+        .unwrap();
+    let build = |prefix: &str| {
+        let envelope: RouterEnvelope =
+            serde_json::from_value(v[format!("{prefix}Envelope")].clone()).unwrap();
+        let action =
+            PaymentRouterAccount::executeNativePaymentCall::abi_decode_validate(&envelope.data)
+                .unwrap();
+        let inner =
+            PaymentRouter::payNativeCall::abi_decode_validate(&action.routerCalldata).unwrap();
+        let deployment = PaymentRouterDeployment {
+            chain_id: 31337,
+            core_address: Address::repeat_byte(0x11),
+            router_address: Address::repeat_byte(0x33),
+            weth_address: Address::repeat_byte(0x44),
+            uniswap_router_address: Address::repeat_byte(0x55),
+            runtime_code_hash: None,
+            zero_ex: None,
+        };
+        let core = TransactionCall {
+            to: deployment.core_address,
+            data: hex::decode(
+                v[format!("{prefix}CoreData")]
+                    .as_str()
+                    .unwrap()
+                    .trim_start_matches("0x"),
+            )
+            .unwrap(),
+            value: U256::ZERO,
+        };
+        let payment =
+            Payment::prepare_draft(&deployment, core, inner.i, inner.route, 1000, None).unwrap();
+        (payment, envelope)
+    };
+    let (draft, draft_envelope) = build("draft");
+    let (payment, envelope) = build("final");
+    let key = SigningKey::from_bytes((&[7u8; 32]).into()).unwrap();
+    let signer = Address::from_slice(
+        &keccak256(&key.verifying_key().to_encoded_point(false).as_bytes()[1..])[12..],
+    );
+    let trust = Trust {
+        chain_id: 31337,
+        protocol: payment.core().to,
+        signer,
+    };
+    let quote = Quote {
+        schedule: None,
+        execution: Execution::Direct,
+        token: payment.request().params.token,
+        fee_recipient: payment.request().params.feeRecipient,
+        fee_amount: payment.request().params.feeAmount.to_string(),
+        deadline: "1800000000".into(),
+        max_gas: "1000000".into(),
+        request_hash: router_intent_hash(31337, trust.protocol, &draft_envelope).unwrap(),
+    };
+    let (sig, id) = key
+        .sign_prehash_recoverable(quote_digest(&quote, &trust).unwrap().as_slice())
+        .unwrap();
+    let mut raw = sig.to_bytes().to_vec();
+    raw.push(id.to_byte() + 27);
+    let signed = SignedQuote {
+        quote,
+        signature: format!("0x{}", hex::encode(raw)),
+        request_hash_format: Some(ROUTER_INTENT_HASH_FORMAT.into()),
+        provenance_required: Some(true),
+    };
+    let requests = Arc::new(Mutex::new(vec![]));
+    let relay = RouterRelayClient::new(
+        Transport {
+            requests: requests.clone(),
+            signed,
+        },
+        trust,
+        Address::repeat_byte(0xbb),
+    )
+    .unwrap();
+    relay.estimate_quote(&draft, &draft_envelope).unwrap();
+    let quote = relay.get_quote(&draft, &draft_envelope, 1000).unwrap();
+    assert!(relay
+        .submit_transaction(&draft, &draft_envelope, &quote, 1000, &[])
+        .is_err());
+    relay
+        .submit_transaction(&payment, &envelope, &quote, 1000, &[])
+        .unwrap();
+    let req = requests.lock().unwrap();
+    assert_eq!(req.len(), 3);
+    assert_eq!(req[1]["params"][0]["router"], json!(draft_envelope));
+    assert_eq!(req[2]["params"][0]["router"], json!(envelope));
+    let mut unsigned = envelope.clone();
+    unsigned.authorization_list[0].r = U256::ZERO;
+    assert!(relay
+        .submit_transaction(&payment, &unsigned, &quote, 1000, &[])
+        .is_err());
 }

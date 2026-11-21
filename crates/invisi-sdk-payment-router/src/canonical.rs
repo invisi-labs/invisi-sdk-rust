@@ -50,6 +50,19 @@ impl Payment {
     pub fn prepare(
         deployment: &PaymentRouterDeployment,
         core: TransactionCall,
+        intent: Intent,
+        route: Route,
+        now: u64,
+        settler: Option<Address>,
+    ) -> Result<Self> {
+        crate::inspect_core_payment(&core, deployment, now)?;
+        Self::prepare_draft(deployment, core, intent, route, now, settler)
+    }
+    /// Prepare finalized business fields before generating a proof or wallet signatures.
+    /// Rebuild using `prepare` after proving; semantic quote identity is unchanged.
+    pub fn prepare_draft(
+        deployment: &PaymentRouterDeployment,
+        core: TransactionCall,
         mut intent: Intent,
         route: Route,
         now: u64,
@@ -57,7 +70,7 @@ impl Payment {
     ) -> Result<Self> {
         deployment.validate()?;
         let router = deployment.router_address;
-        let (proof, r) = crate::inspect_core_payment(&core, deployment, now)?;
+        let (proof, r) = crate::client::inspect_core_draft(&core, deployment, now)?;
         let request = TransactRequest::abi_decode_validate(&r.abi_encode())?;
         nonzero(intent.payer)?;
         nonzero(intent.refundRecipient)?;
@@ -178,6 +191,15 @@ impl Payment {
     }
     /// For sponsored native payments this is the inner payable call to the Router.
     pub fn router_call(&self, permit: Permit, signature: Bytes) -> Result<TransactionCall> {
+        ensure(!self.proof.is_empty(), "core proof is required")?;
+        ensure(
+            self.intent.mode != RELAYED_TOKEN || !signature.is_empty(),
+            "relay signature required",
+        )?;
+        self.draft_router_call(permit, signature)
+    }
+    /// Encode a draft outer call; empty proof and wallet signatures are permitted.
+    pub fn draft_router_call(&self, permit: Permit, signature: Bytes) -> Result<TransactionCall> {
         let Self {
             proof,
             request: r,
@@ -188,10 +210,6 @@ impl Payment {
         ensure(
             !permit.deadline.is_zero() || permit == Permit::default(),
             "invalid disabled permit",
-        )?;
-        ensure(
-            i.mode != RELAYED_TOKEN || !signature.is_empty(),
-            "relay signature required",
         )?;
         ensure(
             i.mode == RELAYED_TOKEN || signature.is_empty(),
@@ -272,7 +290,7 @@ impl NativePayment {
             "invalid delegated account parameters",
         )?;
         Ok(Self {
-            router_call: payment.router_call(Permit::default(), Bytes::new())?,
+            router_call: payment.draft_router_call(Permit::default(), Bytes::new())?,
             payer: payment.intent.payer,
             implementation,
             code_hash,
@@ -291,6 +309,10 @@ impl NativePayment {
             signature.len() == 65,
             "account requires a 65-byte EOA signature",
         )?;
+        self.draft_account_call(signature)
+    }
+    /// Encode account metadata before obtaining the wallet execution signature.
+    pub fn draft_account_call(&self, signature: Bytes) -> Result<TransactionCall> {
         Ok(TransactionCall {
             to: self.payer,
             value: U256::ZERO,
@@ -417,7 +439,7 @@ impl Payment {
                 )?;
                 let c = PaymentRouter::payTokenForCall::abi_decode_validate(&e.data)?;
                 ensure(
-                    self.router_call(c.permit, c.signature)?.data == e.data.as_ref(),
+                    self.draft_router_call(c.permit, c.signature)?.data == e.data.as_ref(),
                     "relay calldata differs from payment",
                 )
             }
@@ -428,7 +450,9 @@ impl Payment {
                 ensure(
                     c.abi_encode() == e.data.as_ref()
                         && c.routerCalldata.as_ref()
-                            == self.router_call(Permit::default(), Bytes::new())?.data
+                            == self
+                                .draft_router_call(Permit::default(), Bytes::new())?
+                                .data
                         && c.value == self.intent.amountInMaximum
                         && c.relayer == self.intent.relayer
                         && c.deadline <= self.intent.deadline,
@@ -563,4 +587,168 @@ pub fn permit_digest(
         "invalid permit domain/deadline",
     )?;
     Ok(typed_digest(domain_separator,keccak256((keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)"),owner,router,amount,nonce,deadline).abi_encode_params())))
+}
+
+/// Quote identity excludes only proof and wallet signature material.
+pub const ROUTER_INTENT_HASH_FORMAT: &str = "payment-router-intent-v1";
+pub fn router_intent_hash(chain_id: u64, core: Address, envelope: &RouterEnvelope) -> Result<B256> {
+    let mut normalized = envelope.clone();
+    if envelope
+        .data
+        .starts_with(&PaymentRouter::payTokenForCall::SELECTOR)
+    {
+        let mut call = PaymentRouter::payTokenForCall::abi_decode_validate(&envelope.data)?;
+        ensure(
+            call.abi_encode() == envelope.data.as_ref(),
+            "noncanonical Router calldata",
+        )?;
+        ensure(
+            call.i.mode == RELAYED_TOKEN && envelope.authorization_list.is_empty(),
+            "invalid token relay mode/authorizations",
+        )?;
+        normalize_intent(&call.proof, &call.r, &call.route, &mut call.i)?;
+        call.proof = Bytes::new();
+        call.signature = Bytes::new();
+        call.permit.v = 0;
+        call.permit.r = B256::ZERO;
+        call.permit.s = B256::ZERO;
+        normalized.data = call.abi_encode().into();
+    } else {
+        let mut action =
+            PaymentRouterAccount::executeNativePaymentCall::abi_decode_validate(&envelope.data)?;
+        ensure(
+            action.abi_encode() == envelope.data.as_ref(),
+            "noncanonical account calldata",
+        )?;
+        let mut call = PaymentRouter::payNativeCall::abi_decode_validate(&action.routerCalldata)?;
+        ensure(
+            call.abi_encode() == action.routerCalldata.as_ref()
+                && call.i.mode == SPONSORED_NATIVE
+                && envelope.to == call.i.payer
+                && action.value == call.i.amountInMaximum
+                && action.relayer == call.i.relayer
+                && action.deadline <= call.i.deadline,
+            "invalid native account envelope",
+        )?;
+        normalize_intent(&call.proof, &call.r, &call.route, &mut call.i)?;
+        call.proof = Bytes::new();
+        action.routerCalldata = call.abi_encode().into();
+        action.signature = Bytes::new();
+        normalized.data = action.abi_encode().into();
+    }
+    for a in &mut normalized.authorization_list {
+        a.y_parity = alloy_primitives::U8::ZERO;
+        a.r = U256::ZERO;
+        a.s = U256::ZERO;
+    }
+    Ok(keccak256(
+        (
+            keccak256("InvisiPaymentRouterIntentV1"),
+            envelope_hash(chain_id, core, &normalized)?,
+        )
+            .abi_encode_params(),
+    ))
+}
+fn normalize_intent(
+    proof: &[u8],
+    request: &TransactRequest,
+    route: &Route,
+    intent: &mut Intent,
+) -> Result<()> {
+    ensure(
+        intent.coreRequestHash == core_request_hash(proof, request)
+            && intent.routeHash == route_hash(route),
+        "invalid actual Core/route hash",
+    )?;
+    intent.coreRequestHash = core_request_hash(&[], request);
+    Ok(())
+}
+impl Payment {
+    pub fn draft_relay_envelope(&self, permit: Permit) -> Result<RouterEnvelope> {
+        ensure(
+            self.intent.mode == RELAYED_TOKEN,
+            "relayed token mode required",
+        )?;
+        let call = self.draft_router_call(permit, Bytes::new())?;
+        Ok(RouterEnvelope {
+            to: call.to,
+            data: call.data.into(),
+            value: "0".into(),
+            authorization_list: vec![],
+        })
+    }
+    /// Final submission still requires proof and actual wallet authorization material.
+    /// The provider-backed client additionally verifies pinned runtime, live counters and simulates.
+    pub fn check_final_envelope(&self, envelope: &RouterEnvelope) -> Result<()> {
+        self.check_envelope(envelope)?;
+        ensure(!self.proof.is_empty(), "core proof is required")?;
+        if self.intent.mode == RELAYED_TOKEN {
+            let c = PaymentRouter::payTokenForCall::abi_decode_validate(&envelope.data)?;
+            ensure(!c.signature.is_empty(), "relay signature required")?;
+            ensure(
+                c.permit.deadline.is_zero()
+                    || (matches!(c.permit.v, 27 | 28)
+                        && c.permit.r != B256::ZERO
+                        && c.permit.s != B256::ZERO),
+                "permit signature required",
+            )?;
+        } else {
+            let c = PaymentRouterAccount::executeNativePaymentCall::abi_decode_validate(
+                &envelope.data,
+            )?;
+            ensure(c.signature.len() == 65, "account signature required")?;
+            ensure(
+                envelope.authorization_list.len() <= 1,
+                "one payer authorization expected",
+            )?;
+            for a in &envelope.authorization_list {
+                validate_authorizations(
+                    self.chain_id,
+                    self.intent.payer,
+                    a.address,
+                    std::slice::from_ref(a),
+                )?;
+            }
+        }
+        router_intent_hash(self.chain_id, self.core.to, envelope)?;
+        Ok(())
+    }
+}
+impl NativePayment {
+    pub fn draft_envelope(
+        &self,
+        authorization_list: Vec<SignedAuthorization>,
+    ) -> Result<RouterEnvelope> {
+        ensure(
+            authorization_list.len() <= 1,
+            "one payer authorization expected",
+        )?;
+        for a in &authorization_list {
+            ensure(
+                a.address == self.implementation,
+                "authorization implementation mismatch",
+            )?;
+        }
+        let call = self.draft_account_call(Bytes::new())?;
+        Ok(RouterEnvelope {
+            to: call.to,
+            data: call.data.into(),
+            value: "0".into(),
+            authorization_list,
+        })
+    }
+}
+impl AuthorizationRequest {
+    /// Unsigned tuple metadata to bind before the wallet signs the 7702 authorization.
+    pub fn draft(&self) -> Result<SignedAuthorization> {
+        self.digest()?;
+        Ok(SignedAuthorization {
+            chain_id: U256::from(self.chain_id),
+            address: self.implementation,
+            nonce: alloy_primitives::U64::from(self.nonce),
+            y_parity: alloy_primitives::U8::ZERO,
+            r: U256::ZERO,
+            s: U256::ZERO,
+        })
+    }
 }

@@ -1,6 +1,7 @@
 //! Compile-checked host integration recipes for the unreleased canonical API.
 //! Main never contacts a provider, signs, proves, or broadcasts. Call these functions
-//! only with real host capabilities, executable balances/allowances and proved Core data.
+//! only with real host capabilities. Quote drafts before proof and wallet signing;
+//! final simulation and submission require executable balances/allowances.
 use alloy_primitives::{Address, Bytes, B256, U256};
 use invisi_sdk::{
     broadcaster::{Fee, SignedQuote},
@@ -44,7 +45,7 @@ pub async fn intent(
         relayer,
         nonce: client.router_nonce(payer).await?,
         deadline: U256::from(deadline),
-        coreRequestHash: B256::ZERO, // Filled from the real proof by prepare_canonical.
+        coreRequestHash: B256::ZERO, // Filled from the draft, then recomputed after proof.
         routeHash: B256::ZERO,
         mode,
     })
@@ -158,13 +159,13 @@ async fn simulate_envelope(
 /// The host can inspect/budget the estimated fee before preparing a replacement.
 pub enum RelayQuote {
     RebuildWithFee(Fee),
-    Ready(SignedQuote),
+    Ready(Box<SignedQuote>),
 }
 
-/// Run only after proof, signatures and balance/allowance prerequisites above.
+/// Run on the unproved, unsigned draft before invoking the prover or wallet.
 /// The host bounds retries. Retain an approved fee above the current minimum.
-/// A required fee increase needs a new Core proof, payment, wallet signatures and
-/// envelope before this function is called again; never exceed the host fee cap.
+/// A required fee increase rebuilds the unproved Core funding and route before
+/// calling again; max_fee_amount is wallet maxFeeAmount in token base units.
 pub fn signed_relay_quote<T: RpcTransport>(
     relay: &RouterRelayClient<T>,
     payment: &Payment,
@@ -187,10 +188,10 @@ pub fn signed_relay_quote<T: RpcTransport>(
     if required_fee > approved_fee {
         return Ok(RelayQuote::RebuildWithFee(estimate));
     }
-    // Verifies envelope format/hash, direct execution, trusted signer, fee and expiry.
+    // Verifies semantic intent format/hash, direct execution, trusted signer, fee and expiry.
     relay
         .get_quote(payment, envelope, now)
-        .map(RelayQuote::Ready)
+        .map(|quote| RelayQuote::Ready(Box::new(quote)))
 }
 
 /// Explicit host action after saving the frozen request for idempotent recovery.
@@ -206,5 +207,92 @@ pub fn submit<T: RpcTransport>(
 }
 
 fn main() {
-    println!("Canonical Router host recipes compile successfully. Supply real proof, wallet signing, deployment and executable funding before using these functions; no RPC or broadcast is performed by main.");
+    println!("Quote the unsigned Router draft before proving and wallet signing. Simulate the complete actual final call before submission. Main performs no RPC or broadcast.");
+}
+
+/// Executable bounded fee convergence: quote first, then prove and sign once.
+/// Refresh a swap route for each changed fee-inclusive funding amount in the host
+/// before retrying; this helper demonstrates the no-swap same-token path.
+#[allow(clippy::too_many_arguments)]
+pub async fn quote_token_before_proof<T: RpcTransport>(
+    client: &PaymentRouterClient,
+    relay: &RouterRelayClient<T>,
+    sdk: &Invisi,
+    wallet: &Wallet,
+    prover: &dyn Prover,
+    mut preparation: RouterPaymentPreparation,
+    intent: Intent,
+    now: u64,
+    max_fee_amount: U256,
+    sign: impl FnOnce(B256) -> Result<Bytes>,
+) -> Result<(Payment, RouterEnvelope, SignedQuote)> {
+    if intent.mode != RELAYED_TOKEN {
+        return Err(Error::Invalid("ERC20 relay requires RELAYED_TOKEN"));
+    }
+    for _ in 0..4 {
+        let prepared = client
+            .prepare_payment(sdk, wallet, preparation.clone())
+            .await?;
+        let core = prepared.broadcaster_intent().map_err(Error::Preparation)?;
+        let draft = client
+            .prepare_canonical_draft(core, intent.clone(), Route::default())
+            .await?;
+        let draft_envelope = draft.draft_relay_envelope(Permit::default())?;
+        let _local_preview = draft.estimate_gas(false, 0, None)?;
+        match signed_relay_quote(relay, &draft, &draft_envelope, now, max_fee_amount)? {
+            RelayQuote::RebuildWithFee(fee) => {
+                preparation.fee.amount = fee
+                    .fee_amount
+                    .parse()
+                    .map_err(|_| Error::Invalid("invalid fee"))?;
+                preparation.fee.recipient = fee.fee_recipient;
+            }
+            RelayQuote::Ready(quote) => {
+                let ready = prepared.prove(prover, false).map_err(Error::Preparation)?;
+                let payment = client
+                    .prepare_canonical(
+                        ready.export_transaction().map_err(Error::Preparation)?,
+                        draft.intent().clone(),
+                        draft.route().clone(),
+                    )
+                    .await?;
+                let signature = sign(payment.digest(payment.chain_id()))?;
+                let envelope = payment.relay_envelope(Permit::default(), signature)?;
+                relay.verify_quote(&payment, &envelope, &quote, now)?;
+                simulate_envelope(client, &payment, &envelope, None).await?;
+                return Ok((payment, envelope, *quote));
+            }
+        }
+    }
+    Err(Error::Invalid("fee convergence attempt limit exceeded"))
+}
+
+/// Native quote metadata is available without account or 7702 wallet signatures.
+/// After quote acceptance prove Core, rebuild Payment and NativePayment, then sign
+/// their actual digests using the relayed_native recipe and reuse the same quote.
+pub async fn native_quote_draft(
+    client: &PaymentRouterClient,
+    unsigned_core: TransactionCall,
+    intent: Intent,
+    route: Route,
+    account: &AccountDeployment,
+    authorization: Option<AuthorizationRequest>,
+) -> Result<(Payment, RouterEnvelope)> {
+    let draft = client
+        .prepare_canonical_draft(unsigned_core, intent, route)
+        .await?;
+    let native = client
+        .prepare_native_account(
+            &draft,
+            account,
+            draft.intent().deadline,
+            authorization.is_some(),
+        )
+        .await?;
+    let authorizations = authorization
+        .map(|a| a.draft())
+        .transpose()?
+        .into_iter()
+        .collect();
+    Ok((draft, native.draft_envelope(authorizations)?))
 }

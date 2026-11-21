@@ -673,6 +673,32 @@ async fn canonical_modes_nonce_sender_route_and_outer_simulation() {
             .prepare_canonical(core.clone(), intent.clone(), route.clone())
             .await
             .unwrap();
+        let mut unproved =
+            invisi_sdk_protocol::protocol::InvisiCore::transact_0Call::abi_decode_validate(
+                &core.data,
+            )
+            .unwrap();
+        unproved._0 = alloy_primitives::Bytes::new();
+        let draft_core = TransactionCall {
+            to: core.to,
+            data: unproved.abi_encode(),
+            value: U256::ZERO,
+        };
+        let draft = client
+            .prepare_canonical_draft(draft_core.clone(), intent.clone(), route.clone())
+            .await
+            .unwrap();
+        assert!(draft.estimate_gas(false, 0, None).unwrap()["available"]
+            .as_bool()
+            .unwrap());
+        assert!(client
+            .prepare_canonical(draft_core, intent.clone(), route.clone())
+            .await
+            .is_err());
+        assert!(client
+            .simulate_canonical(&draft, call.clone(), intent.payer, &[], None)
+            .await
+            .is_err());
         let sender = if intent.mode == RELAYED_TOKEN {
             intent.relayer
         } else {

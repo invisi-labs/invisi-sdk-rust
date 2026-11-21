@@ -494,6 +494,21 @@ pub fn inspect_core_payment(
     inspect_request(&core._0, &request, d, now)?;
     Ok((core._0, request))
 }
+pub(crate) fn inspect_core_draft(
+    call: &TransactionCall,
+    d: &PaymentRouterDeployment,
+    now: u64,
+) -> Result<(Bytes, abi::IInvisiCore::TransactRequest)> {
+    ensure(
+        call.to == d.core_address && call.value.is_zero(),
+        "core payment deployment/value mismatch",
+    )?;
+    let core = InvisiCore::transact_0Call::abi_decode_validate(&call.data)?;
+    ensure(core.abi_encode() == call.data, "noncanonical Core calldata")?;
+    let request = abi::IInvisiCore::TransactRequest::abi_decode_validate(&core.r.abi_encode())?;
+    inspect_request_draft(&request, d, now)?;
+    Ok((core._0, request))
+}
 fn inspect_request(
     proof: &Bytes,
     r: &abi::IInvisiCore::TransactRequest,
@@ -501,6 +516,13 @@ fn inspect_request(
     now: u64,
 ) -> Result<()> {
     ensure(!proof.is_empty(), "core proof is required")?;
+    inspect_request_draft(r, d, now)
+}
+fn inspect_request_draft(
+    r: &abi::IInvisiCore::TransactRequest,
+    d: &PaymentRouterDeployment,
+    now: u64,
+) -> Result<()> {
     let f = &r.funding;
     let p = &r.params;
     ensure(
@@ -579,7 +601,7 @@ pub struct CanonicalSimulation {
 }
 impl PaymentRouterClient {
     /// Prepare any canonical mode after deployment, current Router nonce and route validation.
-    /// Use `prepare_payment` first to produce/prove the detached Core transaction.
+    /// Use `prepare_canonical_draft` before proof/signatures to obtain a relay quote.
     pub async fn prepare_canonical(
         &self,
         core: TransactionCall,
@@ -592,6 +614,29 @@ impl PaymentRouterClient {
             .await?;
         ensure(intent.nonce == nonce, "stale Router nonce")?;
         let payment = canonical::Payment::prepare(
+            &self.deployment,
+            core,
+            intent,
+            route,
+            frame.block.timestamp,
+            frame.settler_address,
+        )?;
+        self.assert_frame(&frame).await?;
+        Ok(payment)
+    }
+    /// Read pinned deployment and Router nonce before quoting an unsigned, unproved draft.
+    pub async fn prepare_canonical_draft(
+        &self,
+        core: TransactionCall,
+        intent: canonical::Intent,
+        route: canonical::Route,
+    ) -> Result<canonical::Payment> {
+        let frame = self.frame(route.channel == 2).await?;
+        let nonce = self
+            .router_nonce_at(intent.payer, frame.block.number)
+            .await?;
+        ensure(intent.nonce == nonce, "stale Router nonce")?;
+        let payment = canonical::Payment::prepare_draft(
             &self.deployment,
             core,
             intent,
@@ -755,7 +800,7 @@ impl PaymentRouterClient {
             deadline >= U256::from(f.block.timestamp) && deadline <= p.intent().deadline,
             "invalid account deadline",
         )?;
-        let checked = canonical::Payment::prepare(
+        let checked = canonical::Payment::prepare_draft(
             &self.deployment,
             p.core().clone(),
             p.intent().clone(),
@@ -820,7 +865,7 @@ impl PaymentRouterClient {
                 value: call.value.to_string(),
                 authorization_list: authorizations.to_vec(),
             };
-            p.check_envelope(&env)?;
+            p.check_final_envelope(&env)?;
             if i.mode == canonical::SPONSORED_NATIVE {
                 let d = account.ok_or(Error::Invalid("account deployment required"))?;
                 let nonce = self
@@ -915,7 +960,7 @@ impl PaymentRouterClient {
             interfaces::address(v).map_err(|_| Error::Invalid("invalid 0x address"))
         };
         let frame = self.frame(true).await?;
-        let (_, r) = inspect_core_payment(&core, &self.deployment, frame.block.timestamp)?;
+        let (_, r) = inspect_core_draft(&core, &self.deployment, frame.block.timestamp)?;
         let input = if intent.tokenIn.is_zero() {
             NATIVE_TOKEN
         } else {
@@ -977,7 +1022,7 @@ impl PaymentRouterClient {
             target: parse_address(&tx["to"])?,
             data: crate::provider::bytes(&tx["data"])?.into(),
         };
-        let payment = canonical::Payment::prepare(
+        let payment = canonical::Payment::prepare_draft(
             &self.deployment,
             core,
             intent,
@@ -1020,7 +1065,7 @@ impl PaymentRouterClient {
             token.check()?;
         }
         let frame = self.frame(true).await?;
-        let (_, request) = inspect_core_payment(&core, &self.deployment, frame.block.timestamp)?;
+        let (_, request) = inspect_core_draft(&core, &self.deployment, frame.block.timestamp)?;
         ensure(
             self.router_nonce_at(intent.payer, frame.block.number)
                 .await?

@@ -92,18 +92,33 @@ Submit adds `quote`, its separate `signature`, and `proofSidecars: []` for Route
 pure public funding with no foreign Note inputs, even if general service metadata
 reports `provenanceRequired: true`.
 
-Both estimate and signed quote simulate/estimate the complete outer transaction.
-Prepare a real Core proof and obtain all Router/account/authorization signatures
-first; the payer needs executable input balances and Router allowance or permit.
-The ordinary quote-before-proving lifecycle above applies only to Core flows.
-A fee or route change requires rebuilding the payment and resigning; changes to
-Core funding also require a new proof. Fees are denominated only in the embedded
-Core settlement token, including the fee in its exact funding amount. Input-token
-price support is not required. Discover enabled `paymentRouters` through service
-status/token-support responses and configure trusted deployment and quote-signer pins.
+Estimate and signed quote accept an unproved, unsigned draft. Export Core data with
+`prepared.broadcaster_intent()`, prepare with `prepare_canonical_draft`, and encode
+`draft_relay_envelope` or native `draft_envelope` plus unsigned authorization
+metadata. Finalize all business fields before obtaining the signed quote, then
+prove and sign the actual Router/account/permit/7702 messages. Ordinary Core quote
+capabilities and their lifecycle above remain unchanged.
 
-Quotes require `requestHashFormat: "payment-router-envelope-v1"`, the exact outer
-envelope hash and `execution: "direct"`. Scheduling and aggregation are rejected.
+The shared conservative `payment-router-gas-v1` model adds Router allowances to the
+existing Core baseline and reports `source: "model"`, not receipt-calibrated swap
+measurements. Opaque 0x estimation is unavailable without a trusted service-policy
+route gas budget. Broadcaster uses dynamic chain fees bounded by its operational
+gas-price maximum. The host bounds fee convergence attempts and wallet
+`maxFeeAmount` in Core-token base units; retain an approved higher fee when the
+minimum falls. Fees are denominated only in the embedded Core settlement token,
+and exact funding includes the fee. Input-token price support is not required.
+Discover enabled `paymentRouters` through service status/token-support responses
+and configure trusted deployment and quote-signer pins.
+
+Quotes require `requestHashFormat: "payment-router-intent-v1"`, the semantic intent
+hash and `execution: "direct"`. Proof/signature completion preserves this identity;
+amounts, fees, route, deadlines, nonces, account fields and authorization metadata
+remain bound. `envelope_hash` retains raw signed-envelope identity. Business-field
+changes require a fresh quote and applicable proof/signatures. Only final
+submission requires executable principal and allowance/permit plus the actual
+proof/signatures. Broadcaster checks actual Core/route hashes, pinned runtime and
+live counters, then estimates and simulates the complete actual outer call before
+sending, within signed gas/token-fee caps. Scheduling and aggregation are rejected.
 Native relay spends the payer EOA's principal with zero outer value; the host owns
 EIP-7702 signing and persistent delegation/revocation. See the
 [Router guide](../invisi-sdk-payment-router/README.md) for nonce and simulation rules.

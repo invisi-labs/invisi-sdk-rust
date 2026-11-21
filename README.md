@@ -211,7 +211,8 @@ Preparation and quotation preserve the existing API. Independent Note/Credit che
 
 For ordinary Core Note/Credit and managed Session relay flows, call
 `client.quote(&mut prepared, chain.clone(), &options)` before authorization or proving.
-Router relay uses the separate proof-and-signature-first envelope flow described below.
+Router relay uses the separate unsigned-draft envelope flow described below, also quoting
+before proof and wallet signatures. Ordinary Core quotation capabilities are unchanged.
 The same client accepts ordinary Note/Credit preparations and managed Session operations.
 Managed quotation commits its final plan, quote and scheduling capability in the encrypted store;
 failed quotation leaves the target unchanged. The independent RPC client remains available through
@@ -267,11 +268,30 @@ exact-buy quoting (`quote_canonical_zeroex`); same-token/wrap payments use an em
 route. Exact Core funding includes the Broadcaster fee in the Core settlement token.
 ERC20 payers approve the Router or supply an ERC-2612 permit.
 
-`RouterRelayClient` estimates, quotes and submits the complete signed outer envelope
-through the standard Broadcaster RPC methods. It requires the full Core proof,
-Router/account signature, input balance and allowance/permit before quotation.
-Changed fees/routes require rebuilding, reproving when Core changes, and fresh wallet
-signatures. Quotes bind `payment-router-envelope-v1` and direct execution only;
+`RouterRelayClient` estimates and quotes an unsigned Router/account draft before
+proof generation or wallet signatures. Export the unproved Core call with
+`prepared.broadcaster_intent()`, use `prepare_canonical_draft`, and build
+`draft_relay_envelope` or the native `draft_envelope` with unsigned authorization
+metadata. Keep fee convergence bounded by the wallet's token-denominated
+`maxFeeAmount`; fees and exact-output funding use the Core settlement token.
+
+Local `Payment::estimate_gas` and service previews use the conservative
+`payment-router-gas-v1` allowances over the existing Core gas baseline, with
+`source="model"`; these Router budgets are not receipt-calibrated swap figures.
+Opaque 0x estimation is unavailable without a trusted service-policy route gas
+budget. Broadcaster prices the model using dynamic chain fees within its configured
+operational gas-price maximum; the signed gas cap remains a submission bound.
+
+Quotes bind `payment-router-intent-v1` and direct execution. Proof completion and
+Router/account/permit/7702 signature completion preserve quote identity while all
+business amounts, fees, routes, deadlines, nonces and authorization metadata stay
+bound. Rebuild the final payment after proving and sign its actual wallet digests.
+Only the final actual call needs executable principal, allowance/permit and full
+simulation before submission; Broadcaster verifies actual hashes/signatures,
+pinned runtime and live counters, then estimates/simulates the complete call.
+Changed business fields require a fresh quote and applicable proof/signatures.
+`envelope_hash` remains available for raw signed-envelope identity.
+
 Router relay supports neither scheduling nor aggregation. Sponsored native relay
 sends zero outer value and spends principal from the payer EOA. Wallet signing,
 persistent delegation/revocation, transaction signing and durable reconciliation

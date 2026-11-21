@@ -2,11 +2,13 @@
 
 ## Unreleased (planned 1.3.3)
 
-- Document canonical Router relay separately from ordinary Core quotation, including executable proof/signature-first estimates, fee convergence, all four payment modes and compile-checked host integration examples.
+- Add Router draft quotation before proof or wallet signing, conservative `payment-router-gas-v1` previews (`source="model"`) over the existing Core baseline, and shared gas/hash parity fixtures. Opaque 0x estimation requires a trusted service-policy route gas budget. Broadcaster prices the model with dynamic chain fees within its operational maximum.
+- Bind Router quotes to `payment-router-intent-v1`, preserving identity through proof/signature completion while amounts, fees, routes, deadlines, nonces, account fields and authorization metadata remain bound. Preserve raw `envelope_hash`; require actual proof/hashes/signatures, pinned runtime, live counters and complete final-call estimation/simulation before submission.
+- Document bounded draft fee convergence under wallet `maxFeeAmount`, all four payment modes and compile-checked quote-before-proof examples. Ordinary Core quote capabilities remain unchanged.
 
 - Add built-in canonical native/ERC20 0x exact-buy HTTP and client quote convenience with Router taker/recipient, current-Settler refresh, cancellation and canonical payload normalization.
 - Reject stale EIP-7702 authorization nonces with a block-pinned EOA transaction-count read, including already-delegated accounts whose execution could otherwise succeed after the EVM skips the authorization.
-- Add canonical unversioned PaymentRouter/Account compiler ABIs, four-mode intent/call builders, EIP-712 and ERC-2612 digests, ERC20 approval, same-token/wrap and V3/0x inputs, live nonce/deployment/account checks and complete outer simulation. Add EIP-7702 authorization helpers and exact Broadcaster envelope hashing/quote/submission wire with tamper checks and shared contract/Go vectors. Preserve native-only legacy APIs and 1.3.2 versions.
+- Add canonical unversioned PaymentRouter/Account compiler ABIs, four-mode intent/call builders, EIP-712 and ERC-2612 digests, ERC20 approval, same-token/wrap and V3/0x inputs, live nonce/deployment/account checks and complete outer simulation. Add EIP-7702 authorization helpers and raw Broadcaster envelope hashing plus semantic-intent quote/submission wire with tamper checks and shared contract/Go vectors. Preserve native-only legacy APIs and 1.3.2 versions.
 
 - Read consecutive trusted historical headers through validated `invisi_getBlockHeaders` ranges, chunked at 256 blocks. Fall back to live batches only for explicit unsupported or unavailable history errors; retain live single-header canonical and reorg checks. Reject incomplete fork-field prefixes and authenticate complete historical and live headers through `slotNumber` without changing pinned Alloy versions.
 

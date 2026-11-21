@@ -223,19 +223,35 @@ for self-submitted ERC20, relayed ERC20, and sponsored native with host-provided
 signing callbacks. Run `cargo check -p invisi-sdk-payment-router --examples` and
 `cargo run -p invisi-sdk-payment-router --example canonical` to check/build it;
 its main only prints guidance and opens no RPC connection. The functions accept
-real prepared/proved Core calls and explicit deployment, payer, route and wallet
+real unproved draft or final proved Core calls and explicit deployment, payer, route and wallet
 capabilities; they contain no fake proof or automatic broadcast. The existing
 `--example quote` CLI targets the legacy native-only API.
 
 The [Router guide](../crates/invisi-sdk-payment-router/README.md) covers all four
 modes, arbitrary ERC20/native V3 and built-in 0x quotes, and same-token/wrap paths.
-For Router relay, prove Core and sign the exact Router/account envelope before
-`RouterRelayClient::{estimate_quote, get_quote}`. Balances and Router approval or
-permit must already make that outer call executable. A changed Core fee means
-reprepare/reprove/rebuild/resign and requote; changed route terms mean rebuild and
-resign. This differs from ordinary `07-broadcaster` Core quote-before-proving flows.
-Fee pricing uses only the Core output token and exact funding includes the fee.
-Router relay is direct only, without scheduling/aggregation. Native relay uses
-EIP-7702 and zero outer value; the payer's balance supplies principal. Host wallets
-own signing and persistent delegation/revocation, and must track independent Router,
-account action, and EOA transaction/authorization nonces.
+For Router relay, `quote_token_before_proof` demonstrates bounded fee convergence
+on an unsigned, unproved draft, obtains the signed quote, then proves, signs and
+simulates. `native_quote_draft` supplies account fields and unsigned 7702 metadata;
+obtain its quote before using `relayed_native` with final proved Core data and
+wallet signatures. `RouterRelayClient::{estimate_quote, get_quote}` accept these
+drafts. The host limits attempts and token-denominated wallet `maxFeeAmount`,
+retaining a previously approved higher fee if the estimated minimum falls.
+
+Local previews and service quotes use conservative `payment-router-gas-v1`
+Router allowances over the Core baseline with `source="model"`, not
+receipt-calibrated swap figures. Opaque 0x needs a trusted service-policy route gas
+budget or estimation is unavailable. The service prices the model using dynamic
+chain fees within its configured operational maximum. Fee pricing uses the Core
+output token and exact funding includes the fee.
+
+`payment-router-intent-v1` binds business fields while proof and wallet signature
+completion preserve the quote identity. Changed Core fees, routes, deadlines,
+nonces or authorization metadata require a fresh quote and applicable
+proof/signatures. Final submission requires actual proof/signatures, executable
+principal and approval/permit, and full actual-call estimation/simulation with
+pinned runtime and live-counter checks. Ordinary `07-broadcaster` Core quote
+capabilities are unchanged. Router relay is direct only, without
+scheduling/aggregation. Native relay uses EIP-7702 and zero outer value; the payer's
+balance supplies principal. Host wallets own signing and persistent
+delegation/revocation, and must track independent Router, account action, and EOA
+transaction/authorization nonces.

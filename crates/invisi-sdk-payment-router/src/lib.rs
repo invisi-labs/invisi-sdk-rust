@@ -1,8 +1,11 @@
 #![doc = include_str!("../README.md")]
 mod adapters;
+pub mod canonical;
 mod client;
 mod codecs;
 mod provider;
+mod relay;
+pub use relay::*;
 mod types;
 pub use adapters::*;
 pub use client::*;
@@ -10,9 +13,10 @@ pub use codecs::*;
 pub use provider::*;
 pub use types::*;
 
-/// Reviewed router ABI from invisi-periphery b246f29 and native 0x calls.
-/// The core tuple matches InvisiCore exactly.
-pub const PAYMENT_ROUTER_ABI: &str = include_str!("payment-router.abi.json");
+/// Canonical Router ABI at invisi-periphery ffd81f4.
+pub const PAYMENT_ROUTER_ABI: &str = include_str!("canonical.abi.json");
+pub const PAYMENT_ROUTER_ACCOUNT_ABI: &str = include_str!("account.abi.json");
+pub const LEGACY_PAYMENT_ROUTER_ABI: &str = include_str!("payment-router.abi.json");
 pub const ZERO_EX_PAYMENT_ROUTER_ABI: &str = include_str!("router.abi.json");
 pub mod abi {
     alloy_sol_types::sol!(

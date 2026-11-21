@@ -2124,6 +2124,7 @@ dependencies = [
  "hex",
  "invisi-sdk",
  "invisi-sdk-protocol",
+ "k256",
  "reqwest",
  "serde",
  "serde_json",

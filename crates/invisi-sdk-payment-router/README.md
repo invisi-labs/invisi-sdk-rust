@@ -1,6 +1,6 @@
 # Invisi Payment Router
 
-Optional native ETH payment orchestration for the reviewed Invisi Payment Router contracts. The crate composes the existing `invisi-sdk` preparation/proof lifecycle with exact-output Uniswap V3 routes and registry-verified native 0x quotes. It never signs or broadcasts transactions.
+Canonical unversioned `PaymentRouter` and `PaymentRouterAccount` bindings for Periphery `ffd81f4`, with direct native/ERC20, signed ERC20 relay and EIP-7702 sponsored native payments. The optional crate composes detached Core proof preparation with Router intent signing, validated V3/0x routes, complete outer-call simulation and Broadcaster envelope submission. Wallet signatures remain host-provided.
 
 ```toml
 [dependencies]
@@ -9,7 +9,49 @@ invisi-sdk-payment-router = "=1.3.2"
 
 The core SDK does not depend on this crate. Applications explicitly opt in and provide a trusted deployment, an async Ethereum provider and their existing SDK/wallet capabilities. Alloy `Address`, `U256` and `B256` types enforce address and integer representations. Chain IDs and deadlines are `u64`; amounts are checked against their protocol bounds.
 
-## Configure and quote
+## Canonical payments
+
+Use `canonical::{Payment, Intent, Route, Permit, NativePayment}` for the new deployment. `PAYMENT_ROUTER_ABI` and `PAYMENT_ROUTER_ACCOUNT_ABI` are the actual compiler ABIs. Mode values are `DIRECT_NATIVE=0`, `DIRECT_TOKEN=1`, `RELAYED_TOKEN=2`, `SPONSORED_NATIVE=3`; channels are None=0, V3=1, 0x=2. Native input is address zero. All routes and public proof fields are bound with canonical ABI encoding and EIP-712 domains from the contracts.
+
+1. Configure `PaymentRouterClient` with the immutable deployment, preferably its runtime hash, and an explicit `RouterProvider`/`HttpRouterProvider`. `prepare_payment` prepares pure public funding with the Router as Core payer. Prove it through the existing SDK lifecycle and export its Core call. Funding authorization stays empty; the settlement token funding amount includes Core's token-denominated Broadcaster fee.
+2. Read `router_nonce(payer)`, construct an `Intent` and `Route`, and call `prepare_canonical(core, intent, route)`. The builder validates the live deployment, route and nonce, and fills `coreRequestHash`/`routeHash` without changing proof-bound fields. Any stale registry/nonce, expired deadline or changed signed field requires rebuilding and signing again. Offline `Payment::prepare` accepts a host-validated timestamp and current Settler.
+3. Sign `payment.digest(chain_id)` through the host wallet for relayed ERC20. Direct modes pass an empty Router signature. `payment.router_call(permit, signature)` produces the canonical call: native sends the maximum input as value; ERC20 sends zero value. `approval(token, router, amount)` prepares an ERC20 approval. `Permit` and `permit_digest` support ERC-2612 when the token implements it and the host has verified its domain/permit nonce. Permit is optional and separate from the intent signature. ERC1271 Router payers are validated by complete simulation rather than EOA recovery.
+4. Call `simulate_canonical` with the actual outer sender before sending. It checks the current Router nonce and route, simulates the complete Router or delegated-account call, and estimates the same call's gas at one canonical block. Submitters use their existing transaction signer or the relay client below.
+
+`Route::default()` is a no-swap route for same-token ERC20 and native-to-WETH wrapping. `quote_canonical_v3` supports arbitrary ERC20 input with the original V3 exact-output router's reversed path; `encode_v3_exact_output_path` constructs it. The raw input estimate is returned so the host chooses the signed slippage cap. For 0x, fetch an exact-buy quote with Router as taker and recipient, then pass the response to `prepare_canonical_zeroex_quote`. This works for native or ERC20 input and checks the current registry Settler, native guard or canonical AllowanceHolder envelope, recipient, buy token/amount, input cap and chain. API credentials and transport stay with the host. Applications must still review/simulate trusted Settler liquidity actions; envelope checks do not certify them.
+
+```rust,no_run
+use alloy_primitives::Bytes;
+use invisi_sdk_payment_router::{canonical::*, PaymentRouterClient, Result};
+use invisi_sdk_protocol::protocol::TransactionCall;
+
+async fn build_direct(
+    client: &PaymentRouterClient, proved_core: TransactionCall,
+    intent: Intent, route: Route,
+) -> Result<TransactionCall> {
+    let payer = intent.payer;
+    let payment = client.prepare_canonical(proved_core, intent, route).await?;
+    let call = payment.router_call(Permit::default(), Bytes::new())?;
+    client.simulate_canonical(&payment, call.clone(), payer, &[], None).await?;
+    Ok(call)
+}
+```
+
+## Sponsored native and Broadcaster
+
+`AccountDeployment` requires the account implementation and its runtime hash. `prepare_native_account` checks implementation code, immutable Router/address/code hash, the installed `0xef0100 || implementation` delegation and independent account action nonce. It rejects an incompatible existing wallet delegation, including when pending delegation is allowed. With an empty payer account, explicit `allow_pending_delegation=true` permits preparing a new delegation. It never installs or replaces wallet code. Empty/revoked payer code still requires reading the namespaced account nonce with `eth_getStorageAt`; account storage survives revocation, so pending delegation never assumes nonce zero. Custom providers without storage reads fail explicitly for that path.
+
+The host separately signs `AuthorizationRequest::digest()` for the exact chain, implementation and EOA authorization nonce, and `NativePayment::digest(chain_id)` for the payment. `SignedAuthorization` uses geth hex quantities. `NativePayment::envelope` attaches the wallet-signed list (or an empty list for an installed delegation). `simulate_canonical` verifies the account payment signature, action nonce, expiry, exact-chain authorization signatures and complete zero-value account transaction. Pending authorization simulation needs RPC support for type-4 `authorizationList`; a provider without that capability fails explicitly. EOA transaction nonce, authorization nonce, Router nonce and account action nonce are independent. Persistent delegation/revocation and wallet/chain capability detection remain host responsibilities.
+
+`RouterRelayClient<T: RpcTransport>` uses the ordinary `broadcaster_estimateQuote`, `broadcaster_getQuote` and `broadcaster_submitTransaction` methods with `{data: embeddedCoreCalldata, router: {to, data, value: "0", authorizationList?}}`. Relayed ERC20 uses `payment.relay_envelope`; sponsored native uses the account envelope. Provide registered `Trust` (chain/Core/quote signer) and fee recipient. `get_quote`/`verify_quote` require direct execution, `requestHashFormat="payment-router-envelope-v1"`, exact envelope hash, unchanged Core settlement token/fee, bounded expiry and a trusted quote signature. `submit_transaction` rechecks this binding and sends `quote`, `signature` and caller-supplied provenance sidecars. Scheduling and aggregate execution are rejected.
+
+The client does not rewrite a proof to accommodate a fee estimate: if `estimate_quote` changes the fee, prepare/prove the correct Core funding statement, rebuild the Router/account calldata and obtain fresh wallet signatures and a signed quote. Simulate again near submission. Retain the returned service status and your transaction/provenance journal; the Router helper does not replace the core SDK's reconciliation lifecycle. `envelope_hash` matches the Go/Broadcaster ABI schema, including authorization tuple order and signatures.
+
+## Legacy native-only APIs
+
+The following existing `quote`, `build_payment_transaction`, `build_prepared_payment_transaction` and `simulate_payment` APIs target the previous native-only contracts (`pay`/`payWithZeroEx`). They remain available for existing deployments. `LEGACY_PAYMENT_ROUTER_ABI` and `ZERO_EX_PAYMENT_ROUTER_ABI` expose those ABIs. Use the canonical APIs above for the unversioned Router; no deployment autodetection or fallback changes the selected ABI.
+
+## Legacy configure and quote
 
 `PaymentRouterDeployment` requires chain ID, Router, Core, WETH and original V3 router addresses. All addresses must be nonzero and distinct. Supply `runtime_code_hash` to pin the Router bytecode. Enabling 0x additionally requires an allowance holder and Settler registry. No deployment addresses or credentials are inferred.
 

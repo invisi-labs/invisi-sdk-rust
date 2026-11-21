@@ -32,6 +32,10 @@ struct State {
     missing_code: bool,
     fail: bool,
     spent: Option<U256>,
+    expected_sender: Option<Address>,
+    account_payer: Option<Address>,
+    wrong_delegation: bool,
+    revoked_delegation: bool,
     calls: Vec<(TransactionCall, Option<Address>, u64)>,
 }
 struct Provider(Mutex<State>);
@@ -44,6 +48,18 @@ impl Provider {
     }
 }
 impl RouterProvider for Provider {
+    fn storage_at(&self, target: Address, slot: B256, block: u64) -> BoxFuture<'_, Result<B256>> {
+        Box::pin(async move {
+            assert_eq!(Some(target), self.0.lock().unwrap().account_payer);
+            assert_eq!(block, 10);
+            let expected = U256::from_be_slice(
+                alloy_primitives::keccak256("invisi.payment-router.account.storage.v1").as_slice(),
+            ) - U256::from(1);
+            assert_eq!(slot, B256::from(expected.to_be_bytes::<32>()));
+            Ok(B256::from(U256::from(9).to_be_bytes::<32>()))
+        })
+    }
+
     fn chain_id(&self) -> BoxFuture<'_, Result<u64>> {
         Box::pin(async { Ok(self.0.lock().unwrap().chain_id.unwrap_or(31337)) })
     }
@@ -57,10 +73,21 @@ impl RouterProvider for Provider {
             })
         })
     }
-    fn code(&self, _: Address, b: u64) -> BoxFuture<'_, Result<Vec<u8>>> {
+    fn code(&self, target: Address, b: u64) -> BoxFuture<'_, Result<Vec<u8>>> {
         Box::pin(async move {
             assert_eq!(b, 10);
-            Ok(if self.0.lock().unwrap().missing_code {
+            let state = self.0.lock().unwrap();
+            if state.account_payer == Some(target) {
+                if state.revoked_delegation {
+                    return Ok(vec![]);
+                }
+                let mut code = vec![0xef, 0x01, 0x00];
+                code.extend_from_slice(
+                    a(if state.wrong_delegation { 0xdd } else { 0xcc }).as_slice(),
+                );
+                return Ok(code);
+            }
+            Ok(if state.missing_code {
                 vec![]
             } else {
                 vec![0x60, 0]
@@ -89,6 +116,23 @@ impl RouterProvider for Provider {
                 if selector == &alloy_primitives::keccak256(name)[..4] {
                     return Ok((value,).abi_encode_params());
                 }
+            }
+            if s.account_payer.is_some() {
+                if selector == &alloy_primitives::keccak256("implementation()")[..4] {
+                    return Ok(a(0xcc).abi_encode());
+                }
+                if selector == &alloy_primitives::keccak256("router()")[..4] {
+                    return Ok(a(0x33).abi_encode());
+                }
+                if selector == &alloy_primitives::keccak256("routerCodeHash()")[..4] {
+                    return Ok(alloy_primitives::keccak256([0x60, 0]).abi_encode());
+                }
+                if selector == &alloy_primitives::keccak256("nonce()")[..4] {
+                    return Ok(U256::from(3).abi_encode());
+                }
+            }
+            if selector == &alloy_primitives::keccak256("nonces(address)")[..4] {
+                return Ok(U256::from(7).abi_encode());
             }
             if selector == &alloy_primitives::keccak256("CHAIN_ID()")[..4] {
                 return Ok((U256::from(31337),).abi_encode_params());
@@ -122,9 +166,15 @@ impl RouterProvider for Provider {
         b: u64,
     ) -> BoxFuture<'_, Result<U256>> {
         Box::pin(async move {
-            assert_eq!(from, a(0xaa));
+            assert_eq!(
+                from,
+                self.0.lock().unwrap().expected_sender.unwrap_or(a(0xaa))
+            );
             assert_eq!(b, 10);
-            assert_eq!(c.to, a(0x33));
+            assert_eq!(
+                c.to,
+                self.0.lock().unwrap().account_payer.unwrap_or(a(0x33))
+            );
             Ok(U256::from(123456))
         })
     }
@@ -557,4 +607,249 @@ async fn deployment_pins_deadline_refresh_and_extreme_v3_arithmetic() {
     p.0.lock().unwrap().quoter_inputs = vec![Some(U256::MAX), None];
     maximum.slippage_bps = Some(1);
     assert!(c.quote(&adapter, maximum).await.is_err());
+}
+
+#[tokio::test]
+async fn canonical_modes_nonce_sender_route_and_outer_simulation() {
+    use invisi_sdk_payment_router::canonical::*;
+    let v: Value = serde_json::from_str(include_str!("fixtures/intent.json")).unwrap();
+    for c in v["cases"].as_array().unwrap().iter().take(3) {
+        let provider = Provider::new();
+        let client = PaymentRouterClient::new(dep(), provider.clone()).unwrap();
+        let call = TransactionCall {
+            to: a(0x33),
+            data: data(&c["call"]["data"]),
+            value: num(&c["call"]["value"]),
+        };
+        let (intent, route) = match c["method"].as_str().unwrap() {
+            "payNative" => {
+                let x = PaymentRouter::payNativeCall::abi_decode_validate(&call.data).unwrap();
+                (x.i, x.route)
+            }
+            "payToken" => {
+                let x = PaymentRouter::payTokenCall::abi_decode_validate(&call.data).unwrap();
+                (x.i, x.route)
+            }
+            _ => {
+                let x = PaymentRouter::payTokenForCall::abi_decode_validate(&call.data).unwrap();
+                (x.i, x.route)
+            }
+        };
+        let core = TransactionCall {
+            to: a(0x11),
+            data: data(&c["coreCalldata"]),
+            value: U256::ZERO,
+        };
+        let p = client
+            .prepare_canonical(core.clone(), intent.clone(), route.clone())
+            .await
+            .unwrap();
+        let sender = if intent.mode == RELAYED_TOKEN {
+            intent.relayer
+        } else {
+            intent.payer
+        };
+        provider.0.lock().unwrap().expected_sender = Some(sender);
+        let simulated = client
+            .simulate_canonical(&p, call.clone(), sender, &[], None)
+            .await
+            .unwrap();
+        assert_eq!(simulated.input_spent, U256::from(60));
+        assert!(provider
+            .0
+            .lock()
+            .unwrap()
+            .calls
+            .iter()
+            .any(|(actual, from, _)| actual.data == call.data && *from == Some(sender)));
+        assert!(client
+            .simulate_canonical(&p, call.clone(), a(0xfe), &[], None)
+            .await
+            .is_err());
+        let mut wrong = call.clone();
+        wrong.value = call.value + U256::from(1);
+        assert!(client
+            .simulate_canonical(&p, wrong, sender, &[], None)
+            .await
+            .is_err());
+        let mut stale = intent.clone();
+        stale.nonce += U256::from(1);
+        assert!(client
+            .prepare_canonical(core.clone(), stale, route.clone())
+            .await
+            .is_err());
+        let mut malformed = route.clone();
+        malformed.channel = 9;
+        assert!(client
+            .prepare_canonical(core.clone(), intent.clone(), malformed)
+            .await
+            .is_err());
+    }
+}
+
+#[tokio::test]
+async fn sponsored_account_signature_delegation_and_outer_simulation() {
+    use invisi_sdk_payment_router::canonical::*;
+    use k256::ecdsa::SigningKey;
+    let key = SigningKey::from_bytes((&[1u8; 32]).into()).unwrap();
+    let payer = Address::from_slice(
+        &alloy_primitives::keccak256(&key.verifying_key().to_encoded_point(false).as_bytes()[1..])
+            [12..],
+    );
+    let provider = Provider::new();
+    {
+        let mut s = provider.0.lock().unwrap();
+        s.account_payer = Some(payer);
+        s.expected_sender = Some(a(0xbb));
+    }
+    let client = PaymentRouterClient::new(dep(), provider.clone()).unwrap();
+    let v: Value = serde_json::from_str(include_str!("fixtures/intent.json")).unwrap();
+    let c = &v["cases"][3];
+    let x = PaymentRouter::payNativeCall::abi_decode_validate(&data(&c["call"]["data"])).unwrap();
+    let mut i = x.i;
+    i.payer = payer;
+    let p = client
+        .prepare_canonical(
+            TransactionCall {
+                to: a(0x11),
+                data: data(&c["coreCalldata"]),
+                value: U256::ZERO,
+            },
+            i,
+            x.route,
+        )
+        .await
+        .unwrap();
+    let d = AccountDeployment {
+        implementation: a(0xcc),
+        runtime_code_hash: alloy_primitives::keccak256([0x60, 0]),
+    };
+    let n = client
+        .prepare_native_account(&p, &d, p.intent().deadline, false)
+        .await
+        .unwrap();
+    let (sig, id) = key
+        .sign_prehash_recoverable(n.digest(31337).as_slice())
+        .unwrap();
+    let mut bytes = sig.to_bytes().to_vec();
+    bytes.push(id.to_byte() + 27);
+    let call = n.account_call(bytes.into()).unwrap();
+    assert_eq!(call.to, payer);
+    assert_eq!(call.value, U256::ZERO);
+    client
+        .simulate_canonical(&p, call.clone(), a(0xbb), &[], Some(&d))
+        .await
+        .unwrap();
+    let mut bad = call.clone();
+    let mut action =
+        PaymentRouterAccount::executeNativePaymentCall::abi_decode_validate(&bad.data).unwrap();
+    action.nonce_ += U256::from(1);
+    bad.data = action.abi_encode();
+    assert!(client
+        .simulate_canonical(&p, bad, a(0xbb), &[], Some(&d))
+        .await
+        .is_err());
+    provider.0.lock().unwrap().wrong_delegation = true;
+    assert!(client
+        .simulate_canonical(&p, call, a(0xbb), &[], Some(&d))
+        .await
+        .is_err());
+    assert!(client
+        .prepare_native_account(&p, &d, p.intent().deadline, true)
+        .await
+        .is_err());
+    {
+        let mut state = provider.0.lock().unwrap();
+        state.wrong_delegation = false;
+        state.revoked_delegation = true;
+    }
+    assert!(client
+        .prepare_native_account(&p, &d, p.intent().deadline, false)
+        .await
+        .is_err());
+    let pending = client
+        .prepare_native_account(&p, &d, p.intent().deadline, true)
+        .await
+        .unwrap();
+    let call = pending
+        .account_call(alloy_primitives::Bytes::from(vec![1; 65]))
+        .unwrap();
+    assert_eq!(
+        PaymentRouterAccount::executeNativePaymentCall::abi_decode_validate(&call.data)
+            .unwrap()
+            .nonce_,
+        U256::from(9)
+    );
+}
+
+#[tokio::test]
+async fn canonical_erc20_quotes_bind_input_output_cap_and_registry() {
+    use invisi_sdk_payment_router::canonical::*;
+    use serde_json::json;
+    let provider = Provider::new();
+    let client = PaymentRouterClient::new(dep(), provider.clone()).unwrap();
+    let v: Value = serde_json::from_str(include_str!("fixtures/intent.json")).unwrap();
+    let c = &v["cases"][1];
+    let x = PaymentRouter::payTokenCall::abi_decode_validate(&data(&c["call"]["data"])).unwrap();
+    let mut i = x.i;
+    i.tokenIn = a(0x44);
+    let core = TransactionCall {
+        to: a(0x11),
+        data: data(&c["coreCalldata"]),
+        value: U256::ZERO,
+    };
+    let inner = abi::executeCall {
+        slippage: abi::Slippage {
+            recipient: a(0x33),
+            buyToken: a(0x22),
+            minAmountOut: U256::from(100200000),
+        },
+        actions: vec![],
+        zid: B256::ZERO,
+    }
+    .abi_encode();
+    let outer = abi::execCall {
+        operator: a(0x66),
+        token: i.tokenIn,
+        amount: i.amountInMaximum,
+        target: a(0x66),
+        data: inner.into(),
+    }
+    .abi_encode();
+    let body = json!({"liquidityAvailable":true,"chainId":31337,"sellToken":i.tokenIn,"buyToken":a(0x22),"buyAmount":"100200000","maxSellAmount":i.amountInMaximum.to_string(),"transaction":{"to":a(0x77),"value":"0","data":format!("0x{}",hex::encode(outer))}});
+    client
+        .prepare_canonical_zeroex_quote(core.clone(), i.clone(), &body)
+        .await
+        .unwrap();
+    let mut bad = body.clone();
+    bad["buyAmount"] = json!("1");
+    assert!(client
+        .prepare_canonical_zeroex_quote(core.clone(), i.clone(), &bad)
+        .await
+        .is_err());
+    bad = body.clone();
+    bad["sellToken"] = json!(a(0xaa));
+    assert!(client
+        .prepare_canonical_zeroex_quote(core.clone(), i.clone(), &bad)
+        .await
+        .is_err());
+    bad = body.clone();
+    bad["transaction"]["value"] = json!("1");
+    assert!(client
+        .prepare_canonical_zeroex_quote(core.clone(), i.clone(), &bad)
+        .await
+        .is_err());
+    provider.0.lock().unwrap().settler = Some(a(0xfe));
+    assert!(client
+        .prepare_canonical_zeroex_quote(core.clone(), i.clone(), &body)
+        .await
+        .is_err());
+    let path = encode_v3_exact_output_path(&[a(0xaa), a(0x22)], &[3000]).unwrap();
+    assert_eq!(
+        client
+            .quote_canonical_v3(a(0x99), path.into(), a(0xaa), a(0x22), U256::from(10))
+            .await
+            .unwrap(),
+        U256::from(60)
+    );
 }

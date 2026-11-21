@@ -16,6 +16,50 @@ pub struct RouterBlock {
 }
 /// All state reads, calls and gas estimates are explicitly pinned to the same block.
 pub trait RouterProvider: Send + Sync {
+    fn storage_at(
+        &self,
+        _target: Address,
+        _slot: B256,
+        _block: u64,
+    ) -> BoxFuture<'_, Result<B256>> {
+        Box::pin(async {
+            Err(Error::Invalid(
+                "provider does not support account storage reads",
+            ))
+        })
+    }
+
+    fn call_authorized<'a>(
+        &'a self,
+        call: TransactionCall,
+        from: Address,
+        block: u64,
+        auth: &'a [crate::canonical::SignedAuthorization],
+    ) -> BoxFuture<'a, Result<Vec<u8>>> {
+        Box::pin(async move {
+            ensure(
+                auth.is_empty(),
+                "provider does not support EIP-7702 simulation",
+            )?;
+            self.call(call, Some(from), block).await
+        })
+    }
+    fn estimate_gas_authorized<'a>(
+        &'a self,
+        call: TransactionCall,
+        from: Address,
+        block: u64,
+        auth: &'a [crate::canonical::SignedAuthorization],
+    ) -> BoxFuture<'a, Result<U256>> {
+        Box::pin(async move {
+            ensure(
+                auth.is_empty(),
+                "provider does not support EIP-7702 simulation",
+            )?;
+            self.estimate_gas(call, from, block).await
+        })
+    }
+
     fn chain_id(&self) -> BoxFuture<'_, Result<u64>>;
     fn block(&self, number: Option<u64>) -> BoxFuture<'_, Result<RouterBlock>>;
     fn code(&self, target: Address, block: u64) -> BoxFuture<'_, Result<Vec<u8>>>;
@@ -121,6 +165,62 @@ fn transaction(call: TransactionCall, from: Option<Address>) -> Value {
     v
 }
 impl RouterProvider for HttpRouterProvider {
+    fn storage_at(&self, target: Address, slot: B256, block: u64) -> BoxFuture<'_, Result<B256>> {
+        Box::pin(async move {
+            let value = bytes(
+                &self
+                    .rpc(
+                        "eth_getStorageAt",
+                        json!([target, slot, format!("0x{block:x}")]),
+                    )
+                    .await?,
+            )?;
+            ensure(value.len() == 32, "invalid account storage word")?;
+            Ok(B256::from_slice(&value))
+        })
+    }
+
+    fn call_authorized<'a>(
+        &'a self,
+        call: TransactionCall,
+        from: Address,
+        block: u64,
+        auth: &'a [crate::canonical::SignedAuthorization],
+    ) -> BoxFuture<'a, Result<Vec<u8>>> {
+        Box::pin(async move {
+            let mut tx = transaction(call, Some(from));
+            if !auth.is_empty() {
+                tx["authorizationList"] = json!(auth);
+                tx["type"] = json!("0x4");
+            }
+            bytes(
+                &self
+                    .rpc("eth_call", json!([tx, format!("0x{block:x}")]))
+                    .await?,
+            )
+        })
+    }
+    fn estimate_gas_authorized<'a>(
+        &'a self,
+        call: TransactionCall,
+        from: Address,
+        block: u64,
+        auth: &'a [crate::canonical::SignedAuthorization],
+    ) -> BoxFuture<'a, Result<U256>> {
+        Box::pin(async move {
+            let mut tx = transaction(call, Some(from));
+            if !auth.is_empty() {
+                tx["authorizationList"] = json!(auth);
+                tx["type"] = json!("0x4");
+            }
+            quantity(
+                &self
+                    .rpc("eth_estimateGas", json!([tx, format!("0x{block:x}")]))
+                    .await?,
+            )
+        })
+    }
+
     fn chain_id(&self) -> BoxFuture<'_, Result<u64>> {
         Box::pin(async { u64_quantity(&self.rpc("eth_chainId", json!([])).await?) })
     }

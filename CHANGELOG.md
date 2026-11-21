@@ -2,6 +2,8 @@
 
 ## Unreleased (planned 1.3.3)
 
+- Add canonical unversioned PaymentRouter/Account compiler ABIs, four-mode intent/call builders, EIP-712 and ERC-2612 digests, ERC20 approval, same-token/wrap and V3/0x inputs, live nonce/deployment/account checks and complete outer simulation. Add EIP-7702 authorization helpers and exact Broadcaster envelope hashing/quote/submission wire with tamper checks and shared contract/Go vectors. Preserve native-only legacy APIs and 1.3.2 versions.
+
 - Read consecutive trusted historical headers through validated `invisi_getBlockHeaders` ranges, chunked at 256 blocks. Fall back to live batches only for explicit unsupported or unavailable history errors; retain live single-header canonical and reorg checks. Reject incomplete fork-field prefixes and authenticate complete historical and live headers through `slotNumber` without changing pinned Alloy versions.
 
 - Refresh compiler-derived Core and Factory ABI bindings after removal of address screening. Core construction now takes the protocol parameters and address registry; Factory deployment and address prediction take five arguments without a screener.

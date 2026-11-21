@@ -162,10 +162,7 @@ impl PaymentRouterClient {
             options.outputs.len() >= 2,
             "pure funding requires at least two Note outputs",
         )?;
-        ensure(
-            options.token != self.deployment.weth_address,
-            "WETH output is not supported",
-        )?;
+
         let mut amount = options.fee.amount;
         for output in &options.outputs {
             uint(output.amount(), 128, true, "invalid output amount")?;
@@ -492,6 +489,7 @@ pub fn inspect_core_payment(
         "core payment deployment/value mismatch",
     )?;
     let core = InvisiCore::transact_0Call::abi_decode_validate(&call.data)?;
+    ensure(core.abi_encode() == call.data, "noncanonical Core calldata")?;
     let request = abi::IInvisiCore::TransactRequest::abi_decode_validate(&core.r.abi_encode())?;
     inspect_request(&core._0, &request, d, now)?;
     Ok((core._0, request))
@@ -527,7 +525,8 @@ fn inspect_request(
             && p.withdrawalAddress.is_zero(),
         "Router payment requires zero private inputs and no withdrawal",
     )?;
-    ensure(p.token != d.weth_address, "WETH output is not supported")?;
+    nonzero(p.token)?;
+    ensure(p.feeAmount <= f.amount, "fee exceeds funding")?;
     ensure(
         (2..=190).contains(&p.noteCommitments.len()),
         "unsupported transact shape",
@@ -564,4 +563,437 @@ fn inspect_request(
     uint(p.deadline, 64, false, "invalid core deadline")?;
     ensure(p.deadline >= U256::from(now), "core deadline expired")?;
     Ok(())
+}
+
+/// Pinned EIP-7702 account implementation. Wallet delegation remains an explicit host action.
+#[derive(Clone, Debug)]
+pub struct AccountDeployment {
+    pub implementation: Address,
+    pub runtime_code_hash: B256,
+}
+#[derive(Clone, Debug)]
+pub struct CanonicalSimulation {
+    pub gas_estimate: U256,
+    pub input_spent: U256,
+    pub input_refunded: U256,
+}
+impl PaymentRouterClient {
+    /// Prepare any canonical mode after deployment, current Router nonce and route validation.
+    /// Use `prepare_payment` first to produce/prove the detached Core transaction.
+    pub async fn prepare_canonical(
+        &self,
+        core: TransactionCall,
+        intent: canonical::Intent,
+        route: canonical::Route,
+    ) -> Result<canonical::Payment> {
+        let frame = self.frame(route.channel == 2).await?;
+        let nonce = self
+            .router_nonce_at(intent.payer, frame.block.number)
+            .await?;
+        ensure(intent.nonce == nonce, "stale Router nonce")?;
+        let payment = canonical::Payment::prepare(
+            &self.deployment,
+            core,
+            intent,
+            route,
+            frame.block.timestamp,
+            frame.settler_address,
+        )?;
+        self.assert_frame(&frame).await?;
+        Ok(payment)
+    }
+    async fn router_nonce_at(&self, payer: Address, block: u64) -> Result<U256> {
+        U256::abi_decode_validate(
+            &self
+                .read(
+                    self.deployment.router_address,
+                    canonical::noncesCall { payer }.abi_encode(),
+                    block,
+                )
+                .await?,
+        )
+        .map_err(Error::from)
+    }
+    pub async fn router_nonce(&self, payer: Address) -> Result<U256> {
+        nonzero(payer)?;
+        let f = self.frame(false).await?;
+        let n = self.router_nonce_at(payer, f.block.number).await?;
+        self.assert_frame(&f).await?;
+        Ok(n)
+    }
+    pub async fn token_allowance(&self, token: Address, payer: Address) -> Result<U256> {
+        nonzero(token)?;
+        nonzero(payer)?;
+        let f = self.frame(false).await?;
+        let n = U256::abi_decode_validate(
+            &self
+                .read(
+                    token,
+                    canonical::allowanceCall {
+                        owner: payer,
+                        spender: self.deployment.router_address,
+                    }
+                    .abi_encode(),
+                    f.block.number,
+                )
+                .await?,
+        )?;
+        self.assert_frame(&f).await?;
+        Ok(n)
+    }
+    /// Quote an arbitrary ERC20 or wrapped-native exact-output V3 path at a pinned block.
+    /// Returns the raw estimate; callers choose their signed maximum/slippage budget.
+    pub async fn quote_canonical_v3(
+        &self,
+        quoter: Address,
+        path: Bytes,
+        token_in: Address,
+        token_out: Address,
+        amount: U256,
+    ) -> Result<U256> {
+        nonzero(quoter)?;
+        nonzero(token_in)?;
+        nonzero(token_out)?;
+        uint(amount, 128, true, "invalid quote output")?;
+        validate_v3_path(&path, token_in, token_out)?;
+        let f = self.frame(false).await?;
+        self.code(quoter, f.block.number).await?;
+        let data = self
+            .read(
+                quoter,
+                abi::quoteExactOutputCall {
+                    path,
+                    amountOut: amount,
+                }
+                .abi_encode(),
+                f.block.number,
+            )
+            .await?;
+        let result = abi::quoteExactOutputCall::abi_decode_returns_validate(&data)?;
+        self.assert_frame(&f).await?;
+        ensure(!result.amountIn.is_zero(), "invalid V3 quote")?;
+        Ok(result.amountIn)
+    }
+    /// Inspect account deployment and installed delegation without replacing existing wallet code.
+    async fn account_at(
+        &self,
+        payer: Address,
+        d: &AccountDeployment,
+        block: u64,
+        allow_pending: bool,
+    ) -> Result<U256> {
+        nonzero(d.implementation)?;
+        ensure(
+            !d.runtime_code_hash.is_zero(),
+            "account runtime pin required",
+        )?;
+        ensure(
+            keccak256(self.code(d.implementation, block).await?) == d.runtime_code_hash,
+            "account runtime mismatch",
+        )?;
+        for (name, expected) in [
+            ("router()", self.deployment.router_address),
+            ("implementation()", d.implementation),
+        ] {
+            ensure(
+                Address::abi_decode_validate(
+                    &self
+                        .read(d.implementation, keccak256(name)[..4].to_vec(), block)
+                        .await?,
+                )? == expected,
+                "account immutable mismatch",
+            )?;
+        }
+        let router_hash = B256::abi_decode_validate(
+            &self
+                .read(
+                    d.implementation,
+                    keccak256("routerCodeHash()")[..4].to_vec(),
+                    block,
+                )
+                .await?,
+        )?;
+        ensure(
+            router_hash == keccak256(self.code(self.deployment.router_address, block).await?),
+            "account Router runtime mismatch",
+        )?;
+        let installed = self.provider.code(payer, block).await?;
+        let mut expected = vec![0xef, 0x01, 0x00];
+        expected.extend_from_slice(d.implementation.as_slice());
+        ensure(
+            installed == expected || (allow_pending && installed.is_empty()),
+            "incompatible existing account delegation",
+        )?;
+        if installed.is_empty() {
+            // Revocation removes code, not storage. Reinstalling the implementation must
+            // continue the account action nonce rather than reactivate nonce-zero actions.
+            let slot = U256::from_be_slice(
+                keccak256("invisi.payment-router.account.storage.v1").as_slice(),
+            ) - U256::from(1);
+            let word = self
+                .provider
+                .storage_at(payer, B256::from(slot.to_be_bytes::<32>()), block)
+                .await?;
+            return Ok(U256::from_be_slice(word.as_slice()));
+        }
+        Ok(U256::abi_decode_validate(
+            &self
+                .read(payer, keccak256("nonce()")[..4].to_vec(), block)
+                .await?,
+        )?)
+    }
+    /// Build a wallet-signable native payment after checking the actual account action nonce.
+    pub async fn prepare_native_account(
+        &self,
+        p: &canonical::Payment,
+        d: &AccountDeployment,
+        deadline: U256,
+        allow_pending_delegation: bool,
+    ) -> Result<canonical::NativePayment> {
+        let f = self.frame(p.route().channel == 2).await?;
+        ensure(
+            deadline >= U256::from(f.block.timestamp) && deadline <= p.intent().deadline,
+            "invalid account deadline",
+        )?;
+        let checked = canonical::Payment::prepare(
+            &self.deployment,
+            p.core().clone(),
+            p.intent().clone(),
+            p.route().clone(),
+            f.block.timestamp,
+            f.settler_address,
+        )?;
+        ensure(
+            checked.intent() == p.intent() && p.chain_id() == self.deployment.chain_id,
+            "payment deployment mismatch",
+        )?;
+        let nonce = self
+            .account_at(
+                p.intent().payer,
+                d,
+                f.block.number,
+                allow_pending_delegation,
+            )
+            .await?;
+        let hash = keccak256(
+            self.code(self.deployment.router_address, f.block.number)
+                .await?,
+        );
+        let result = canonical::NativePayment::prepare(p, d.implementation, hash, nonce, deadline)?;
+        self.assert_frame(&f).await?;
+        Ok(result)
+    }
+    /// Simulate and estimate the exact outer call with its actual sender and signed authorizations.
+    /// Pending delegation requires provider support for authorizationList (unsupported RPCs fail).
+    pub async fn simulate_canonical(
+        &self,
+        p: &canonical::Payment,
+        call: TransactionCall,
+        from: Address,
+        authorizations: &[canonical::SignedAuthorization],
+        account: Option<&AccountDeployment>,
+    ) -> Result<CanonicalSimulation> {
+        nonzero(from)?;
+        ensure(
+            p.chain_id() == self.deployment.chain_id,
+            "payment chain mismatch",
+        )?;
+        let i = p.intent();
+        let f = self.frame(p.route().channel == 2).await?;
+        let fresh = canonical::Payment::prepare(
+            &self.deployment,
+            p.core().clone(),
+            i.clone(),
+            p.route().clone(),
+            f.block.timestamp,
+            f.settler_address,
+        )?;
+        ensure(
+            fresh.intent() == i && self.router_nonce_at(i.payer, f.block.number).await? == i.nonce,
+            "stale payment intent/nonce",
+        )?;
+        if i.mode >= canonical::RELAYED_TOKEN {
+            ensure(from == i.relayer, "wrong relayer sender")?;
+            let env = canonical::RouterEnvelope {
+                to: call.to,
+                data: call.data.clone().into(),
+                value: call.value.to_string(),
+                authorization_list: authorizations.to_vec(),
+            };
+            p.check_envelope(&env)?;
+            if i.mode == canonical::SPONSORED_NATIVE {
+                let d = account.ok_or(Error::Invalid("account deployment required"))?;
+                let nonce = self
+                    .account_at(i.payer, d, f.block.number, !authorizations.is_empty())
+                    .await?;
+                let action =
+                    canonical::PaymentRouterAccount::executeNativePaymentCall::abi_decode_validate(
+                        &call.data,
+                    )?;
+                ensure(
+                    action.nonce_ == nonce && action.deadline >= U256::from(f.block.timestamp),
+                    "stale account nonce/deadline",
+                )?;
+                let native = canonical::NativePayment::prepare(
+                    p,
+                    d.implementation,
+                    keccak256(
+                        self.code(self.deployment.router_address, f.block.number)
+                            .await?,
+                    ),
+                    nonce,
+                    action.deadline,
+                )?;
+                native.verify_signature(self.deployment.chain_id, &action.signature)?;
+                canonical::validate_authorizations(
+                    self.deployment.chain_id,
+                    i.payer,
+                    d.implementation,
+                    authorizations,
+                )?;
+            }
+        } else {
+            ensure(
+                from == i.payer && authorizations.is_empty(),
+                "invalid direct payment sender",
+            )?;
+            let expected = if i.mode == canonical::DIRECT_NATIVE {
+                p.router_call(canonical::Permit::default(), Bytes::new())?
+            } else {
+                let parsed =
+                    canonical::PaymentRouter::payTokenCall::abi_decode_validate(&call.data)?;
+                p.router_call(parsed.permit, Bytes::new())?
+            };
+            ensure(
+                call.to == expected.to
+                    && call.value == expected.value
+                    && call.data == expected.data,
+                "direct call differs from payment",
+            )?;
+        }
+        let result = self
+            .provider
+            .call_authorized(call.clone(), from, f.block.number, authorizations)
+            .await?;
+        let gas = self
+            .provider
+            .estimate_gas_authorized(call, from, f.block.number, authorizations)
+            .await?;
+        let spent = U256::abi_decode_validate(&result)?;
+        ensure(spent <= i.amountInMaximum, "simulated input exceeds cap")?;
+        self.assert_frame(&f).await?;
+        Ok(CanonicalSimulation {
+            gas_estimate: gas,
+            input_spent: spent,
+            input_refunded: i.amountInMaximum - spent,
+        })
+    }
+}
+
+impl PaymentRouterClient {
+    /// Accept a host-fetched 0x exact-buy response for either native or ERC20 input.
+    /// The host chooses API authentication/transport; the SDK binds its public economic fields
+    /// and validates the Holder/Settler calldata against a fresh deployment frame.
+    pub async fn prepare_canonical_zeroex_quote(
+        &self,
+        core: TransactionCall,
+        intent: canonical::Intent,
+        body: &serde_json::Value,
+    ) -> Result<canonical::Payment> {
+        use invisi_sdk_protocol::interfaces;
+        let parse_amount = |v: &serde_json::Value| {
+            interfaces::decimal(v).map_err(|_| Error::Invalid("invalid 0x amount"))
+        };
+        let parse_address = |v: &serde_json::Value| {
+            interfaces::address(v).map_err(|_| Error::Invalid("invalid 0x address"))
+        };
+        let frame = self.frame(true).await?;
+        let (_, r) = inspect_core_payment(&core, &self.deployment, frame.block.timestamp)?;
+        let input = if intent.tokenIn.is_zero() {
+            NATIVE_TOKEN
+        } else {
+            intent.tokenIn
+        };
+        ensure(
+            body["liquidityAvailable"] == true
+                && parse_address(&body["sellToken"])? == input
+                && parse_address(&body["buyToken"])? == r.params.token
+                && parse_amount(&body["buyAmount"])? == r.funding.amount,
+            "0x quote token/output mismatch",
+        )?;
+        let maximum = parse_amount(&body["maxSellAmount"])?;
+        ensure(
+            !maximum.is_zero() && maximum <= intent.amountInMaximum,
+            "0x quote exceeds input cap",
+        )?;
+        if let Some(amount) = body.get("sellAmount") {
+            ensure(
+                parse_amount(amount)? <= maximum,
+                "0x estimated input exceeds cap",
+            )?;
+        }
+        for field in ["taker", "recipient"] {
+            if let Some(v) = body.get(field) {
+                ensure(
+                    parse_address(v)? == self.deployment.router_address,
+                    "0x taker/recipient mismatch",
+                )?;
+            }
+        }
+        let tx = &body["transaction"];
+        ensure(
+            parse_amount(&tx["value"])?
+                == if intent.tokenIn.is_zero() {
+                    intent.amountInMaximum
+                } else {
+                    U256::ZERO
+                },
+            "0x transaction value mismatch",
+        )?;
+        for id in [body.get("chainId"), tx.get("chainId")]
+            .into_iter()
+            .flatten()
+        {
+            let chain = if let Some(n) = id.as_u64() {
+                U256::from(n)
+            } else {
+                parse_amount(id)?
+            };
+            ensure(
+                chain == U256::from(self.deployment.chain_id),
+                "0x quote chain mismatch",
+            )?;
+        }
+        let route = canonical::Route {
+            channel: 2,
+            path: Bytes::new(),
+            target: parse_address(&tx["to"])?,
+            data: crate::provider::bytes(&tx["data"])?.into(),
+        };
+        let payment = canonical::Payment::prepare(
+            &self.deployment,
+            core,
+            intent,
+            route,
+            frame.block.timestamp,
+            frame.settler_address,
+        )?;
+        ensure(
+            self.router_nonce_at(payment.intent().payer, frame.block.number)
+                .await?
+                == payment.intent().nonce,
+            "stale Router nonce",
+        )?;
+        self.assert_frame(&frame).await?;
+        let current = self.frame(true).await?;
+        ensure(
+            current.settler_address == frame.settler_address,
+            "0x Settler changed; refresh quote",
+        )?;
+        ensure(
+            payment.intent().deadline >= U256::from(current.block.timestamp),
+            "0x quote expired",
+        )?;
+        Ok(payment)
+    }
 }

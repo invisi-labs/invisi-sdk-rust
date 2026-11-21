@@ -1,6 +1,6 @@
 [package]
 name = "invisi-sdk-primitives"
-version = "1.3.2"
+version = "1.3.3"
 edition = "2021"
 authors = ["InvisiPay team"]
 repository = "https://github.com/invisi-labs/invisi-sdk-rust"

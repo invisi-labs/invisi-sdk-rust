@@ -10,10 +10,10 @@ Contract bindings follow the current `invisi-core` compiler artifacts: `InvisiCo
 
 ## Release validation
 
-The public crates share version **1.3.2**. See [local release validation](RELEASE.md)
+The public crates share version **1.3.3**. See [local release validation](RELEASE.md)
 for packaging checks and the required publication order.
 
-Version 1.3.2 exposes six common modules, the independent IPP crate, the separate native FFI adapter and the optional Payment Router crate.
+Version 1.3.3 exposes six common modules, the independent IPP crate, the separate native FFI adapter and the optional Payment Router crate.
 Replace `invisi-sdk-core` dependencies/imports with `invisi-sdk-primitives`.
 Use `invisi_sdk::sdk` for stateless operations and `invisi_sdk_session::session`
 for managed wallets; enable `sqlite` on `invisi-sdk-session` when needed.
@@ -26,8 +26,8 @@ and its coordinator are in `invisi_sdk_session::provenance_recovery`.
 
 `Invisi::prepare_create_credit`, `prepare_update_credit`, `prepare_draw_credit`, and
 `prepare_revoke_credit` accept `CreateCreditRequest`, `UpdateCreditRequest`,
-`DrawCreditRequest`, and `RevokeCreditRequest`. Create allocates the revocation
-reference and generates the nonce/shared key. Spender and draw recipients accept
+`DrawCreditRequest`, and `RevokeCreditRequest`. Create selects a positive uint128 grant ID
+and generates the nonce/shared key. Spender and draw recipients accept
 complete receiving addresses; EVM addresses require an injected receiving-key
 resolver. The granular state-based variants are named `*_explicit`.
 Absent update/member draw payloads preserve the previous payload; `Some(vec![])` clears it.
@@ -265,17 +265,17 @@ Open a focused GitHub issue or pull request describing the problem, scope, and v
 
 ## Independent proving resource sets
 
-Core (Transact/Credit, including initial-payment) and Provenance use separate immutable catalogs. The default Core index is `36f58bac1a0f70c6f8422b47f7cc35a30416a20f8a0f30038d23db0832e2bc93`; the Provenance index is `8d5a3e60e3e5cbe315150511207d7aff67f4e2924148d396b67d82017ecd1f1c`. Public objects retain their existing bytes and logical names. Downloads use `/prover/sets/<index-hash>/`, and verified objects share the same content-addressed cache.
+Core (Transact/Credit, including initial-payment) and Provenance use separate immutable catalogs. The default Core index is `85a5d1dffe40fc965ab4345a28b632f463c3ad861c44d5845850fbc7447fd8f6`; the Provenance index is `8d5a3e60e3e5cbe315150511207d7aff67f4e2924148d396b67d82017ecd1f1c`. Each catalog authenticates its public object bytes and logical names. Downloads use `/prover/sets/<index-hash>/`, and verified objects share the same content-addressed cache.
 
 Core operations do not require the Provenance catalog; Provenance operations do not load Core. Missing or corrupt split resources fail without a legacy downgrade. Historical catalogs remain available through explicit legacy configuration.
 
-**Release prerequisite:** these split catalogs have been built and verified locally but are not claimed published. Publish each producer's authenticated CI artifact before releasing SDKs with these new defaults. Until then, provision matching local catalogs or select legacy mode explicitly. No production pins are fetched from an untrusted URL or inferred from a failed download.
+The default Core and Provenance catalogs are published at the authenticated public asset service. Their independent index pins are verified before resources are loaded; historical legacy catalogs remain available through explicit configuration.
 
 `ResourceOptions` accepts `legacy_combined: true` for historical compatibility. Core uses `source`, `directory` and `index_sha256`; Provenance uses `provenance_source`, `provenance_directory` and `provenance_index_sha256`. The source may contain an explicit `{pin}` placeholder for a shared mirror. Prefer struct literals with `..ResourceOptions::default()`. Cache and offline settings remain shared.
 
 ### Optional Payment Router
 
-**Unreleased (planned 1.3.3; versions remain 1.3.2):**
+**Available in 1.3.3:**
 `invisi-sdk-payment-router` supports the canonical unversioned `PaymentRouter` and
 `PaymentRouterAccount`: self-submitted native/ERC20, signed ERC20 relay, and EIP-7702
 sponsored native. Native or arbitrary ERC20 inputs support V3 and built-in 0x

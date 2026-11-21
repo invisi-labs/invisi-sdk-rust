@@ -220,7 +220,7 @@ See the [contribution guidelines](../README.md#contributing) for issues, pull re
 
 ### Canonical PaymentRouter integration
 
-The unreleased canonical API (planned 1.3.3; versions remain 1.3.2) has a [compile-checked canonical example](../crates/invisi-sdk-payment-router/examples/canonical.rs)
+The canonical API in 1.3.3 has a [compile-checked canonical example](../crates/invisi-sdk-payment-router/examples/canonical.rs)
 for self-submitted ERC20, relayed ERC20, and sponsored native with host-provided
 signing callbacks. Run `cargo check -p invisi-sdk-payment-router --examples` and
 `cargo run -p invisi-sdk-payment-router --example canonical` to check/build it;

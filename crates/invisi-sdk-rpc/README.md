@@ -81,7 +81,7 @@ exact transaction, canonical receipt and matching `ReceivingKeysSet` event.
 
 ### Optional PaymentRouter relay
 
-The canonical Router API is unreleased (planned 1.3.3; versions remain 1.3.2).
+The canonical Router API is available in 1.3.3.
 Use `invisi_sdk_payment_router::RouterRelayClient`, rather than the ordinary Core
 quote verifier, for Router/account envelopes. It calls the same
 `broadcaster_estimateQuote`, `broadcaster_getQuote`, and

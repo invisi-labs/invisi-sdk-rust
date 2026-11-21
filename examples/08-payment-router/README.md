@@ -1,7 +1,7 @@
 # Canonical Router host recipes
 
 These five native Rust binaries are compile-checked host integration recipes for the
-unreleased canonical workspace API (crate versions remain 1.3.2). Their `main`
+canonical API in 1.3.3. Their `main`
 functions only print guidance: running with or without arguments opens no RPC,
 wallet, credential file, prover or Broadcaster. They are not configured live demos.
 A host must invoke the exported functions with its own real capabilities. The SDK

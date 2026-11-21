@@ -118,8 +118,8 @@ pub async fn relayed_native(
     if intent.mode != SPONSORED_NATIVE {
         return Err(Error::Invalid("native relay requires SPONSORED_NATIVE"));
     }
-    let deadline = intent.deadline;
     let payment = client.prepare_canonical(proved_core, intent, route).await?;
+    let deadline = payment.intent().deadline;
     let native = client
         .prepare_native_account(&payment, account, deadline, !authorizations.is_empty())
         .await?;
@@ -159,16 +159,29 @@ pub enum RelayQuote {
 }
 
 /// Run only after proof, signatures and balance/allowance prerequisites above.
-/// The host bounds retries and fee budget. A changed fee requires a new Core proof,
-/// payment, wallet signatures and envelope before this function is called again.
+/// The host bounds retries. Retain an approved fee above the current minimum.
+/// A required fee increase needs a new Core proof, payment, wallet signatures and
+/// envelope before this function is called again; never exceed the host fee cap.
 pub fn signed_relay_quote<T: RpcTransport>(
     relay: &RouterRelayClient<T>,
     payment: &Payment,
     envelope: &RouterEnvelope,
     now: u64,
+    max_fee_amount: U256,
 ) -> Result<RelayQuote> {
+    let approved_fee = payment.request().params.feeAmount;
+    if approved_fee > max_fee_amount {
+        return Err(Error::Invalid("approved Core fee exceeds host cap"));
+    }
     let estimate = relay.estimate_quote(payment, envelope)?;
-    if estimate.fee_amount != payment.request().params.feeAmount.to_string() {
+    let required_fee: U256 = estimate
+        .fee_amount
+        .parse()
+        .map_err(|_| Error::Invalid("invalid estimated fee amount"))?;
+    if required_fee > max_fee_amount {
+        return Err(Error::Invalid("required fee exceeds host cap"));
+    }
+    if required_fee > approved_fee {
         return Ok(RelayQuote::RebuildWithFee(estimate));
     }
     // Verifies envelope format/hash, direct execution, trusted signer, fee and expiry.

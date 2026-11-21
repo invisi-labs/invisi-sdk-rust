@@ -213,3 +213,60 @@ fn native_action_and_authorization_metadata_remain_bound() {
     changed.data = c.abi_encode().into();
     assert_eq!(original, router_intent_hash(31337, core, &changed).unwrap());
 }
+
+#[test]
+fn final_native_builder_requires_proof_while_draft_builder_accepts_empty_proof() {
+    let vectors: Value =
+        serde_json::from_str(include_str!("fixtures/preprove-intent-vectors.json")).unwrap();
+    let v = &vectors[1];
+    let deployment = PaymentRouterDeployment {
+        chain_id: 31337,
+        core_address: Address::repeat_byte(0x11),
+        router_address: Address::repeat_byte(0x33),
+        weth_address: Address::repeat_byte(0x44),
+        uniswap_router_address: Address::repeat_byte(0x55),
+        runtime_code_hash: None,
+        zero_ex: None,
+    };
+    for prefix in ["draft", "final"] {
+        let envelope: RouterEnvelope =
+            serde_json::from_value(v[format!("{prefix}Envelope")].clone()).unwrap();
+        let action =
+            PaymentRouterAccount::executeNativePaymentCall::abi_decode_validate(&envelope.data)
+                .unwrap();
+        let inner =
+            PaymentRouter::payNativeCall::abi_decode_validate(&action.routerCalldata).unwrap();
+        let core = TransactionCall {
+            to: deployment.core_address,
+            data: hex::decode(
+                v[format!("{prefix}CoreData")]
+                    .as_str()
+                    .unwrap()
+                    .trim_start_matches("0x"),
+            )
+            .unwrap(),
+            value: U256::ZERO,
+        };
+        let payment =
+            Payment::prepare_draft(&deployment, core, inner.i, inner.route, 1000, None).unwrap();
+        let native = NativePayment::prepare(
+            &payment,
+            Address::repeat_byte(0xcc),
+            alloy_primitives::B256::repeat_byte(1),
+            action.nonce_,
+            action.deadline,
+        )
+        .unwrap();
+        assert!(native.draft_account_call(Bytes::new()).is_ok());
+        assert!(native.draft_envelope(vec![]).is_ok());
+        let signature = Bytes::from(vec![7; 65]);
+        assert_eq!(
+            native.account_call(signature.clone()).is_ok(),
+            prefix == "final"
+        );
+        assert_eq!(
+            native.envelope(signature, vec![]).is_ok(),
+            prefix == "final"
+        );
+    }
+}

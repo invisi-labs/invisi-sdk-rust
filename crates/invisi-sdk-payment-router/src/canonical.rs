@@ -309,6 +309,17 @@ impl NativePayment {
             signature.len() == 65,
             "account requires a 65-byte EOA signature",
         )?;
+        let call = PaymentRouter::payNativeCall::abi_decode_validate(&self.router_call.data)?;
+        ensure(
+            call.abi_encode() == self.router_call.data,
+            "noncanonical Router calldata",
+        )?;
+        ensure(!call.proof.is_empty(), "core proof is required")?;
+        ensure(
+            call.i.coreRequestHash == core_request_hash(&call.proof, &call.r)
+                && call.i.routeHash == route_hash(&call.route),
+            "invalid actual Core/route hash",
+        )?;
         self.draft_account_call(signature)
     }
     /// Encode account metadata before obtaining the wallet execution signature.

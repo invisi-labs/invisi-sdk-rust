@@ -84,6 +84,8 @@ pub async fn self_erc20(
 }
 
 /// Host callback signs the exact final Router EIP-712 digest with the payer wallet.
+/// On-chain EOA signatures use low-s r||s||v with v=27/28 (normalize recovery parity
+/// 0/1); ERC-1271 signatures use the contract wallet format.
 pub async fn relayed_erc20(
     client: &PaymentRouterClient,
     proved_core: TransactionCall,
@@ -102,6 +104,7 @@ pub async fn relayed_erc20(
     Ok((payment, envelope))
 }
 
+/// Account payment signatures also use v=27/28; EIP-7702 yParity stays 0/1.
 /// Host separately signs AuthorizationRequest::digest() at the payer's current EOA
 /// transaction nonce when installing delegation. Supply that SignedAuthorization,
 /// or an empty list for an already installed delegation. Delegation persists even

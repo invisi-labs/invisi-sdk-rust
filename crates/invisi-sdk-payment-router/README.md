@@ -85,6 +85,11 @@ submission IDs and frozen original envelopes for status/idempotent recovery.
 
 The following existing `quote`, `build_payment_transaction`, `build_prepared_payment_transaction` and `simulate_payment` APIs target the previous native-only contracts (`pay`/`payWithZeroEx`). They remain available for existing deployments. `LEGACY_PAYMENT_ROUTER_ABI` and `ZERO_EX_PAYMENT_ROUTER_ABI` expose those ABIs. Use the canonical APIs above for the unversioned Router; no deployment autodetection or fallback changes the selected ABI.
 
+Host signing callbacks return low-s `r || s || v` EOA signatures with on-chain
+`v` equal to 27 or 28. Convert recovery parity 0/1 before attaching Router/account
+signatures. EIP-7702 authorization `yParity` stays 0/1. ERC-1271 Router payer
+signatures follow the contract wallet's format instead.
+
 ## Legacy configure and quote
 
 `PaymentRouterDeployment` requires chain ID, Router, Core, WETH and original V3 router addresses. All addresses must be nonzero and distinct. Supply `runtime_code_hash` to pin the Router bytecode. Enabling 0x additionally requires an allowance holder and Settler registry. No deployment addresses or credentials are inferred.

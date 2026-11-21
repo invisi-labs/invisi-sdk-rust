@@ -851,6 +851,13 @@ impl PaymentRouterClient {
                     d.implementation,
                     authorizations,
                 )?;
+                if let Some(authorization) = authorizations.first() {
+                    let current = self.provider.nonce_at(i.payer, f.block.number).await?;
+                    ensure(
+                        authorization.nonce.to::<u64>() == current,
+                        "stale EIP-7702 authorization nonce",
+                    )?;
+                }
             }
         } else {
             ensure(

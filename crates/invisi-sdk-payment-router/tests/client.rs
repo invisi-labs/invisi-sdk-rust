@@ -36,6 +36,7 @@ struct State {
     account_payer: Option<Address>,
     wrong_delegation: bool,
     revoked_delegation: bool,
+    eoa_nonce: u64,
     calls: Vec<(TransactionCall, Option<Address>, u64)>,
 }
 struct Provider(Mutex<State>);
@@ -48,6 +49,34 @@ impl Provider {
     }
 }
 impl RouterProvider for Provider {
+    fn nonce_at(&self, target: Address, block: u64) -> BoxFuture<'_, Result<u64>> {
+        Box::pin(async move {
+            let state = self.0.lock().unwrap();
+            assert_eq!(Some(target), state.account_payer);
+            assert_eq!(block, 10);
+            Ok(state.eoa_nonce)
+        })
+    }
+
+    fn call_authorized<'a>(
+        &'a self,
+        call: TransactionCall,
+        from: Address,
+        block: u64,
+        _auth: &'a [canonical::SignedAuthorization],
+    ) -> BoxFuture<'a, Result<Vec<u8>>> {
+        self.call(call, Some(from), block)
+    }
+    fn estimate_gas_authorized<'a>(
+        &'a self,
+        call: TransactionCall,
+        from: Address,
+        block: u64,
+        _auth: &'a [canonical::SignedAuthorization],
+    ) -> BoxFuture<'a, Result<U256>> {
+        self.estimate_gas(call, from, block)
+    }
+
     fn storage_at(&self, target: Address, slot: B256, block: u64) -> BoxFuture<'_, Result<B256>> {
         Box::pin(async move {
             assert_eq!(Some(target), self.0.lock().unwrap().account_payer);
@@ -738,6 +767,40 @@ async fn sponsored_account_signature_delegation_and_outer_simulation() {
     assert_eq!(call.value, U256::ZERO);
     client
         .simulate_canonical(&p, call.clone(), a(0xbb), &[], Some(&d))
+        .await
+        .unwrap();
+    // An installed implementation would keep executing if the EVM silently skipped stale
+    // authorization. SDK preflight must reject the stale EOA nonce before simulation.
+    let authorization = |nonce: u64| {
+        let request = AuthorizationRequest {
+            chain_id: 31337,
+            implementation: a(0xcc),
+            nonce,
+        };
+        let (sig, id) = key
+            .sign_prehash_recoverable(request.digest().unwrap().as_slice())
+            .unwrap();
+        let raw = sig.to_bytes();
+        SignedAuthorization {
+            chain_id: U256::from(31337),
+            address: a(0xcc),
+            nonce: alloy_primitives::U64::from(nonce),
+            y_parity: alloy_primitives::U8::from(id.to_byte()),
+            r: U256::from_be_slice(&raw[..32]),
+            s: U256::from_be_slice(&raw[32..]),
+        }
+    };
+    provider.0.lock().unwrap().eoa_nonce = 5;
+    let error = client
+        .simulate_canonical(&p, call.clone(), a(0xbb), &[authorization(4)], Some(&d))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::Invalid("stale EIP-7702 authorization nonce")
+    ));
+    client
+        .simulate_canonical(&p, call.clone(), a(0xbb), &[authorization(5)], Some(&d))
         .await
         .unwrap();
     let mut bad = call.clone();

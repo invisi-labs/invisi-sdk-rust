@@ -16,6 +16,11 @@ pub struct RouterBlock {
 }
 /// All state reads, calls and gas estimates are explicitly pinned to the same block.
 pub trait RouterProvider: Send + Sync {
+    /// EOA transaction nonce at the exact preflight block, independent of account action nonce.
+    fn nonce_at(&self, _target: Address, _block: u64) -> BoxFuture<'_, Result<u64>> {
+        Box::pin(async { Err(Error::Invalid("provider does not support EOA nonce reads")) })
+    }
+
     fn storage_at(
         &self,
         _target: Address,
@@ -165,6 +170,19 @@ fn transaction(call: TransactionCall, from: Option<Address>) -> Value {
     v
 }
 impl RouterProvider for HttpRouterProvider {
+    fn nonce_at(&self, target: Address, block: u64) -> BoxFuture<'_, Result<u64>> {
+        Box::pin(async move {
+            u64_quantity(
+                &self
+                    .rpc(
+                        "eth_getTransactionCount",
+                        json!([target, format!("0x{block:x}")]),
+                    )
+                    .await?,
+            )
+        })
+    }
+
     fn storage_at(&self, target: Address, slot: B256, block: u64) -> BoxFuture<'_, Result<B256>> {
         Box::pin(async move {
             let value = bytes(

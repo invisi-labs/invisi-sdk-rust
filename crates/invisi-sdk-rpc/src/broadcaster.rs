@@ -140,22 +140,6 @@ pub struct Intent {
     pub deadline: U256,
 }
 fn stripped_intent(data: &[u8]) -> Result<(Intent, Vec<u8>)> {
-    if let Ok(mut legacy) =
-        crate::protocol::LegacyCreditCreation::createCreditCall::abi_decode_validate(data)
-    {
-        if legacy.abi_encode() != data {
-            return Err(Error::Invalid("noncanonical broadcaster calldata"));
-        }
-        let intent = Intent {
-            method: "createCredit",
-            token: legacy.p.token,
-            fee_recipient: legacy.p.feeRecipient,
-            fee_amount: legacy.p.feeAmount,
-            deadline: legacy.p.deadline,
-        };
-        legacy.proof = Bytes::new();
-        return Ok((intent, legacy.abi_encode()));
-    }
     let call = ProtocolContract::decode_call(data)
         .map_err(|_| Error::Invalid("unsupported broadcaster calldata"))?;
     if call.abi_encode() != data {

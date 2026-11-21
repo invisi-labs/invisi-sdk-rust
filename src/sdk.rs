@@ -681,26 +681,21 @@ pub trait ChainState: Send + Sync {
     }
     fn known_root(&self, tree_id: u64, root: B256, block: &CanonicalBlock) -> Result<bool>;
     fn nullifier_spent(&self, nullifier: B256, block: &CanonicalBlock) -> Result<bool>;
-    fn credit_revoked(
+    /// Read the scoped grant at this exact canonical block: 0 unknown, 1 active, 2 permanently disabled.
+    fn credit_status(
         &self,
         owner: Address,
         token: Address,
-        shard: u64,
-        slot: u16,
+        grant_id: u128,
         block: &CanonicalBlock,
-    ) -> Result<bool>;
+    ) -> Result<u8>;
     fn token_balance_allowance(
         &self,
         owner: Address,
         token: Address,
         block: &CanonicalBlock,
     ) -> Result<(U256, U256)>;
-    fn credit_allocation(
-        &self,
-        owner: Address,
-        token: Address,
-        block: &CanonicalBlock,
-    ) -> Result<(u64, u16)>;
+
     fn funding_nonce(&self, _owner: Address, _block: &CanonicalBlock) -> Result<U256> {
         Err("funding nonce reader required".into())
     }
@@ -741,9 +736,13 @@ impl<C: CanonicalHead> RpcChainState<C> {
         for arg in args {
             bytes.extend_from_slice(&arg.to_be_bytes::<32>());
         }
-        self.chain
+        self.canonical(block)?;
+        let result = self
+            .chain
             .call(address, &bytes, block.number)
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        self.canonical(block)?;
+        Ok(result)
     }
     fn uint_read(
         &self,
@@ -833,26 +832,30 @@ impl<C: CanonicalHead> ChainState for RpcChainState<C> {
         }
         Ok(n == U256::from(1))
     }
-    fn credit_revoked(
+    fn credit_status(
         &self,
         owner: Address,
         token: Address,
-        shard: u64,
-        slot: u16,
+        grant_id: u128,
         b: &CanonicalBlock,
-    ) -> Result<bool> {
-        let bits = self.uint_read(
+    ) -> Result<u8> {
+        if grant_id == 0 {
+            return Err("positive grant ID required".into());
+        }
+        let status = self.uint_read(
             self.deployment.protocol.address,
-            "creditRevocationBitmap(address,address,uint64,uint8)",
+            "creditStatus(address,address,uint128)",
             &[
                 address_word(owner),
                 address_word(token),
-                U256::from(shard),
-                U256::from(slot / 256),
+                U256::from(grant_id),
             ],
             b,
         )?;
-        Ok(bits.bit((slot % 256) as usize))
+        if status > U256::from(2) {
+            return Err("invalid Credit status".into());
+        }
+        Ok(status.to::<u8>())
     }
     fn token_balance_allowance(
         &self,
@@ -911,28 +914,6 @@ impl<C: CanonicalHead> ChainState for RpcChainState<C> {
         let mut magic = [0; 32];
         magic[..4].copy_from_slice(&[0x16, 0x26, 0xba, 0x7e]);
         Ok(result.len() >= 32 && result[..32] == magic)
-    }
-    fn credit_allocation(
-        &self,
-        owner: Address,
-        token: Address,
-        b: &CanonicalBlock,
-    ) -> Result<(u64, u16)> {
-        let raw = self.read(
-            self.deployment.protocol.address,
-            "creditAllocation(address,address)",
-            &[address_word(owner), address_word(token)],
-            b,
-        )?;
-        if raw.len() != 64 {
-            return Err("invalid Credit allocation result".into());
-        }
-        Ok((
-            u64::try_from(U256::from_be_slice(&raw[..32]))
-                .map_err(|_| "allocation shard overflow")?,
-            u16::try_from(U256::from_be_slice(&raw[32..]))
-                .map_err(|_| "allocation slot overflow")?,
-        ))
     }
 }
 
@@ -1492,10 +1473,10 @@ pub(crate) fn wallet_authorization_request(
     ))?);
     let name = match operation {
         "transact" => "Invisi.Transact.v1",
-        "create-credit" => "Invisi.CreateCredit.v4",
-        "create-credit-initial-payment" => "Invisi.CreateCreditInitialPayment.v4",
-        "credit-draw" => "Invisi.CreditDraw.v4",
-        "update-credit" => "Invisi.UpdateCredit.v4",
+        "create-credit" => "Invisi.CreateCredit.GrantId.Uint128.v1",
+        "create-credit-initial-payment" => "Invisi.CreateCreditInitialPayment.GrantId.Uint128.v1",
+        "credit-draw" => "Invisi.CreditDraw.GrantId.Uint128.v1",
+        "update-credit" => "Invisi.UpdateCredit.GrantId.Uint128.v1",
         _ => return Err("unsupported wallet authorization operation".into()),
     };
     let statement_hash = keccak256((U256::from(capacity), words.to_vec()).abi_encode_params());
@@ -2026,6 +2007,7 @@ pub(crate) mod test_support {
         pub context: ProtocolContext,
         pub block: Mutex<CanonicalBlock>,
         pub spent: Mutex<BTreeSet<B256>>,
+        pub credit_statuses: Mutex<BTreeMap<(Address, Address, u128), u8>>,
     }
     impl ChainState for FixtureChain {
         fn context(&self) -> ProtocolContext {
@@ -2046,15 +2028,19 @@ pub(crate) mod test_support {
         fn nullifier_spent(&self, n: B256, _: &CanonicalBlock) -> Result<bool> {
             Ok(self.spent.lock().unwrap().contains(&n))
         }
-        fn credit_revoked(
+        fn credit_status(
             &self,
-            _: Address,
-            _: Address,
-            _: u64,
-            _: u16,
+            owner: Address,
+            token: Address,
+            id: u128,
             _: &CanonicalBlock,
-        ) -> Result<bool> {
-            Ok(false)
+        ) -> Result<u8> {
+            Ok(*self
+                .credit_statuses
+                .lock()
+                .unwrap()
+                .get(&(owner, token, id))
+                .unwrap_or(&0))
         }
         fn token_balance_allowance(
             &self,
@@ -2066,14 +2052,6 @@ pub(crate) mod test_support {
         }
         fn funding_nonce(&self, _: Address, _: &CanonicalBlock) -> Result<U256> {
             Ok(U256::ZERO)
-        }
-        fn credit_allocation(
-            &self,
-            _: Address,
-            _: Address,
-            _: &CanonicalBlock,
-        ) -> Result<(u64, u16)> {
-            Ok((1, 0))
         }
     }
     pub fn note_fixture() -> (Arc<FixtureChain>, Wallet, TransferPreparation, Vec<B256>) {
@@ -2134,6 +2112,7 @@ pub(crate) mod test_support {
                 timestamp: 1,
             }),
             spent: Mutex::new(BTreeSet::new()),
+            credit_statuses: Default::default(),
         });
         let wallet = Wallet::from_keys(owner, test_receiving_keys()).unwrap();
         let mut outputs = Vec::new();

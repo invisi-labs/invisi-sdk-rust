@@ -27,6 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let prepared = invisi.prepare_create_credit(
         &wallet,
         sdk::CreateCreditRequest {
+            grant_id: None,
             credit_shared_key: None,
             // Gross owner debit includes the broadcaster fee; the encrypted first Note belongs to the spender.
             initial_payment: env::var("INITIAL_PAYMENT_GROSS")

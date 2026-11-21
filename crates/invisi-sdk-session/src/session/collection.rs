@@ -116,13 +116,16 @@ impl WalletSession {
                 .chain
                 .nullifier_spent(credit.nullifier, &anchor)?;
             let n = &credit.delivery.note;
-            credit.revoked |= self.invisi.chain.credit_revoked(
+            credit.status = self.invisi.chain.credit_status(
                 sdk::word_address(n.owner_wallet_identity)?,
                 sdk::word_address(n.token_address)?,
-                n.revocation_shard,
-                n.revocation_slot,
+                n.grant_id,
                 &anchor,
             )?;
+            if credit.status > 2 {
+                return Err("invalid Credit status".into());
+            }
+            credit.revoked = credit.status == 2;
         }
         state.observed_through = Some(anchor.clone());
         state.preparation_snapshot = None;

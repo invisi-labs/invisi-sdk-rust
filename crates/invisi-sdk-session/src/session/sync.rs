@@ -163,7 +163,7 @@ enum ApplyState {
 struct ScanReadSnapshot {
     block: CanonicalBlock,
     consumed: Mutex<BTreeMap<B256, bool>>,
-    revoked: Mutex<BTreeMap<(Address, Address, u64, u16), bool>>,
+    revoked: Mutex<BTreeMap<(Address, Address, u128), u8>>,
 }
 impl ScanReadSnapshot {
     fn new(block: CanonicalBlock) -> Self {
@@ -195,21 +195,20 @@ impl ScanReadSnapshot {
         session: &WalletSession,
         owner: Address,
         token: Address,
-        shard: u64,
-        slot: u16,
-    ) -> Result<bool> {
+        grant_id: u128,
+    ) -> Result<u8> {
         let mut values = self
             .revoked
             .lock()
             .map_err(|_| "scan revocation cache poisoned")?;
-        let key = (owner, token, shard, slot);
+        let key = (owner, token, grant_id);
         if let Some(value) = values.get(&key) {
             return Ok(*value);
         }
         let value = session
             .invisi
             .chain
-            .credit_revoked(owner, token, shard, slot, &self.block)?;
+            .credit_status(owner, token, grant_id, &self.block)?;
         if values.len() < 8192 {
             values.insert(key, value);
         }
@@ -913,23 +912,20 @@ impl PendingWalletRefresh {
                 let state = &credit.delivery.note;
                 let owner = sdk::word_address(state.owner_wallet_identity)?;
                 let token = sdk::word_address(state.token_address)?;
-                credit.revoked = if let Some(reads) = &self.read_snapshot {
-                    reads.revoked(
-                        session,
-                        owner,
-                        token,
-                        state.revocation_shard,
-                        state.revocation_slot,
-                    )?
+                credit.status = if let Some(reads) = &self.read_snapshot {
+                    reads.revoked(session, owner, token, state.grant_id)?
                 } else {
-                    session.invisi.chain.credit_revoked(
+                    session.invisi.chain.credit_status(
                         owner,
                         token,
-                        state.revocation_shard,
-                        state.revocation_slot,
+                        state.grant_id,
                         &observation,
                     )?
                 };
+                if credit.status > 2 {
+                    return Err("invalid Credit status".into());
+                }
+                credit.revoked = credit.status == 2;
             }
         }
         let mut completions = self.completion.clone().unwrap_or_default();
@@ -1188,6 +1184,10 @@ fn insert_credit(
             return Err("conflicting canonical Credit identity".into());
         }
     }
+    let prior = state
+        .credits
+        .get(&key)
+        .map(|c| (c.consumed, c.status, c.revoked));
     let nullifier = sdk::field_word(delivery.note.nullifier().map_err(|e| e.to_string())?);
     let reserved_by = reservation_for(state, &format!("credit:{}", leaf.commitment));
     state.credits.insert(
@@ -1203,8 +1203,9 @@ fn insert_credit(
             block: leaf.block.clone(),
             transaction_hash: leaf.transaction_hash,
             role,
-            consumed: false,
-            revoked: false,
+            consumed: prior.is_some_and(|c| c.0),
+            status: prior.map_or(0, |c| c.1),
+            revoked: prior.is_some_and(|c| c.2),
             reserved_by,
         },
     );

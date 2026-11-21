@@ -186,6 +186,12 @@ pub fn decode_note(plain: &[u8], context: &DeliveryContext) -> ModelResult<Note>
     }
     Ok(note)
 }
+// Fixed uint128 Credit plaintext fields; native-wallet preflight shares these offsets.
+pub(crate) const CREDIT_OWNER_KEYS_OFFSET: usize =
+    32 * 2 + 16 + 32 + 8 + 32 + 16 * 4 + 1 + 8 * 2 + 16 * 3;
+pub(crate) const CREDIT_SPENDER_KEYS_OFFSET: usize = CREDIT_OWNER_KEYS_OFFSET + 33 + 32;
+pub(crate) const CREDIT_PAYLOAD_LENGTH_OFFSET: usize = CREDIT_SPENDER_KEYS_OFFSET + 33 + 32;
+
 pub fn encode_credit(state: &CreditDeliveryState) -> ModelResult<Zeroizing<Vec<u8>>> {
     state.validate()?;
     let n = &state.note;
@@ -193,8 +199,7 @@ pub fn encode_credit(state: &CreditDeliveryState) -> ModelResult<Zeroizing<Vec<u
     for (value, size) in [
         (n.spender_wallet_identity, 32),
         (n.owner_wallet_identity, 32),
-        (U256::from(n.revocation_shard), 8),
-        (U256::from(n.revocation_slot), 2),
+        (U256::from(n.grant_id), 16),
         (n.nonce, 32),
         (U256::from(n.expiry), 8),
         (n.credit_shared_key, 32),
@@ -211,10 +216,12 @@ pub fn encode_credit(state: &CreditDeliveryState) -> ModelResult<Zeroizing<Vec<u
     ] {
         push(&mut p, value, size)?;
     }
+    debug_assert_eq!(p.len(), CREDIT_OWNER_KEYS_OFFSET);
     for keys in [&state.owner_receiving_keys, &state.spender_receiving_keys] {
         p.extend_from_slice(&keys.viewing_public_key);
         p.extend_from_slice(&keys.clue_key);
     }
+    debug_assert_eq!(p.len(), CREDIT_PAYLOAD_LENGTH_OFFSET);
     payload(&mut p, &n.payload)?;
     Ok(p)
 }
@@ -222,8 +229,7 @@ pub fn decode_credit(plain: &[u8], context: &DeliveryContext) -> ModelResult<Cre
     let mut o = 0;
     let spender = read(plain, &mut o, 32)?;
     let owner = read(plain, &mut o, 32)?;
-    let shard = read(plain, &mut o, 8)?.to::<u64>();
-    let slot = read(plain, &mut o, 2)?.to::<u16>();
+    let grant_id = read(plain, &mut o, 16)?.to::<u128>();
     let nonce = read(plain, &mut o, 32)?;
     let expiry = read(plain, &mut o, 8)?.to::<u64>();
     let key = read(plain, &mut o, 32)?;
@@ -260,8 +266,7 @@ pub fn decode_credit(plain: &[u8], context: &DeliveryContext) -> ModelResult<Cre
             token_address: context.token_address,
             spender_wallet_identity: spender,
             owner_wallet_identity: owner,
-            revocation_shard: shard,
-            revocation_slot: slot,
+            grant_id,
             nonce,
             expiry,
             credit_shared_key: key,
@@ -283,15 +288,15 @@ pub fn decode_credit(plain: &[u8], context: &DeliveryContext) -> ModelResult<Cre
 fn domain(header: u8) -> ModelResult<&'static [u8]> {
     match header {
         1 => Ok(b"Invisi.NoteDelivery.v1"),
-        130 => Ok(b"Invisi.CreditDelivery.v2"),
+        132 => Ok(b"Invisi.CreditDelivery.v4.GrantId.Uint128"),
         _ => Err(invalid()),
     }
 }
 pub fn validate_envelope(data: &[u8], credit: bool) -> ModelResult<()> {
-    let minimum = if credit { 485 } else { 160 };
+    let minimum = if credit { 491 } else { 160 };
     if data.len() < minimum
         || data.len() > MAX_CIPHERTEXT_BYTES
-        || data[0] != if credit { 130 } else { 1 }
+        || data[0] != if credit { 132 } else { 1 }
     {
         return Err(invalid());
     }
@@ -331,7 +336,7 @@ fn seal(public: &[u8], plain: &[u8], context: &DeliveryContext, role: u8) -> Mod
         return Err(invalid());
     }
     let ephemeral = SecretKey::random(&mut OsRng);
-    let mut header = vec![if role == 0 { 1 } else { 130 }];
+    let mut header = vec![if role == 0 { 1 } else { 132 }];
     header.extend_from_slice(ephemeral.public_key().to_encoded_point(true).as_bytes());
     let mut salt_iv = [0; 28];
     OsRng.fill_bytes(&mut salt_iv);

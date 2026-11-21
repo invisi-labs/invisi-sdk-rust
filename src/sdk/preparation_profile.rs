@@ -35,21 +35,17 @@ impl ChainState for LatencyChain {
         self.wait();
         self.inner.nullifier_spent(n, b)
     }
-    fn credit_revoked(
+    fn credit_status(
         &self,
         o: Address,
         t: Address,
-        s: u64,
-        l: u16,
+        s: u128,
         b: &CanonicalBlock,
-    ) -> Result<bool> {
+    ) -> Result<u8> {
         self.wait();
-        self.inner.credit_revoked(o, t, s, l, b)
+        self.inner.credit_status(o, t, s, b)
     }
-    fn credit_allocation(&self, o: Address, t: Address, b: &CanonicalBlock) -> Result<(u64, u16)> {
-        self.wait();
-        self.inner.credit_allocation(o, t, b)
-    }
+
     fn token_balance_allowance(
         &self,
         o: Address,

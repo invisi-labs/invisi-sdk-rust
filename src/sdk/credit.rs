@@ -25,13 +25,12 @@ impl CreditInput {
             || merkle_root(model(s.commitment())?, self.leaf_index, &self.path)? != self.root
             || !chain.known_root(self.tree_id, field_word(self.root), block)?
             || chain.nullifier_spent(field_word(model(s.nullifier())?), block)?
-            || chain.credit_revoked(
+            || chain.credit_status(
                 word_address(s.owner_wallet_identity)?,
                 token,
-                s.revocation_shard,
-                s.revocation_slot,
+                s.grant_id,
                 block,
-            )?
+            )? != 1
         {
             return Err(
                 "Credit input context, membership, consumption or revocation mismatch".into(),
@@ -62,8 +61,7 @@ pub(crate) enum CreditPlan {
     Revoke {
         owner: Address,
         token: Address,
-        shard: u64,
-        slot: u16,
+        grant_id: u128,
         deadline: u64,
         fee: Fee,
         signature: Vec<u8>,
@@ -94,7 +92,7 @@ pub(crate) enum CreditRepriceTemplate {
     Create(CreditDeliveryState, Option<InitialCreditPayment>, u64),
     Update(CreditInput, crate::credit::CreditUpdateChanges, u64),
     Draw(Vec<CreditInput>, Wallet, u64, Vec<u8>),
-    Revoke(Address, u64, u16, u64),
+    Revoke(Address, u128, u64),
 }
 impl std::fmt::Debug for PreparedCredit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -202,14 +200,12 @@ impl Invisi {
             || s.expiry <= constructed_at
             || deadline < constructed_at
             || s.usage != crate::credit::CreditUsage::default()
-            || s.revocation_shard == 0
+            || s.grant_id == 0
         {
             return Err("invalid initial Credit owner, usage, expiry or context".into());
         }
-        if chain.credit_allocation(wallet.owner_address, token, &anchor)?
-            != (s.revocation_shard, s.revocation_slot)
-        {
-            return Err("Credit allocation changed".into());
+        if chain.credit_status(wallet.owner_address, token, s.grant_id, &anchor)? != 0 {
+            return Err("Credit grant ID already used".into());
         }
         let initial_available = state.note.available_credit;
         let payment = if let Some(payment) = initial_payment {
@@ -248,8 +244,7 @@ impl Invisi {
         let params = abi::CreateCreditParams {
             token,
             owner: wallet.owner_address,
-            revocationShard: s.revocation_shard,
-            revocationSlot: s.revocation_slot,
+            grantId: s.grant_id,
             creditCommitment: field_word(model(s.commitment())?),
             deadline: U256::from(deadline),
             feeRecipient: fee.recipient,
@@ -336,8 +331,7 @@ impl Invisi {
             },
             nullifier: field_word(updated.nullifier),
             creditCommitment: field_word(updated.state_commitment),
-            revocationShard: s.revocation_shard,
-            revocationSlot: s.revocation_slot,
+            grantId: s.grant_id,
             deadline: U256::from(deadline),
             feeRecipient: fee.recipient,
             feeAmount: fee.amount,
@@ -413,8 +407,7 @@ impl Invisi {
         inputs.sort_by_key(|input| {
             (
                 input.delivery.note.owner_wallet_identity,
-                input.delivery.note.revocation_shard,
-                input.delivery.note.revocation_slot,
+                input.delivery.note.grant_id,
             )
         });
         let mut groups: BTreeMap<Address, U256> = BTreeMap::new();
@@ -447,11 +440,7 @@ impl Invisi {
             let s = &input.delivery.note;
             if s.spender_wallet_identity != address_word(wallet.owner_address)
                 || s.expiry < deadline
-                || !seen_refs.insert((
-                    s.owner_wallet_identity,
-                    s.revocation_shard,
-                    s.revocation_slot,
-                ))
+                || !seen_refs.insert((s.owner_wallet_identity, s.grant_id))
             {
                 return Err("Credit spender, expiry or duplicate grant reference mismatch".into());
             }
@@ -501,8 +490,7 @@ impl Invisi {
                             .position(|p| address_word(p.payer) == s.owner_wallet_identity)
                             .ok_or("Credit payer missing")?,
                     ),
-                    shard: s.revocation_shard,
-                    slot: s.revocation_slot,
+                    grantId: s.grant_id,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -571,48 +559,37 @@ impl Invisi {
         &self,
         owner_address: Address,
         token: Address,
-        shard: u64,
-        slot: u16,
+        grant_id: u128,
         deadline: u64,
         fee: Fee,
     ) -> PreparationResult<PreparedCredit> {
-        self.prepare_revoke_credit_explicit_internal(
-            owner_address,
-            token,
-            shard,
-            slot,
-            deadline,
-            fee,
-        )
-        .map_err(|cause| InvisiError::preparation("prepare_revoke_credit", cause))
+        self.prepare_revoke_credit_explicit_internal(owner_address, token, grant_id, deadline, fee)
+            .map_err(|cause| InvisiError::preparation("prepare_revoke_credit", cause))
     }
     fn prepare_revoke_credit_explicit_internal(
         &self,
         owner_address: Address,
         token: Address,
-        shard: u64,
-        slot: u16,
+        grant_id: u128,
         deadline: u64,
         fee: Fee,
     ) -> Result<PreparedCredit> {
         if owner_address == Address::ZERO {
             return Err("nonzero owner address required".into());
         }
-        let template = CreditRepriceTemplate::Revoke(token, shard, slot, deadline);
+        let template = CreditRepriceTemplate::Revoke(token, grant_id, deadline);
         let reads = Arc::new(PreparationChain::new(self.chain.clone()));
         let chain = &*reads;
         let anchor = chain.snapshot()?;
         let constructed_at = chain.construction_timestamp(&anchor);
         let context = chain.context();
-        fee.validate()?;
-        let current = chain.credit_allocation(owner_address, token, &anchor)?;
         if deadline < constructed_at
-            || shard == 0
-            || (shard, slot) >= current
-            || chain.credit_revoked(owner_address, token, shard, slot, &anchor)?
+            || grant_id == 0
+            || chain.credit_status(owner_address, token, grant_id, &anchor)? > 1
         {
-            return Err("Credit revocation reference is unallocated, revoked or expired".into());
+            return Err("Credit grant ID disabled or deadline expired".into());
         }
+        fee.validate()?;
         fee_balance(chain, owner_address, token, fee.amount, &anchor)?;
         chain.canonical(&anchor)?;
         Ok(PreparedCredit {
@@ -626,8 +603,7 @@ impl Invisi {
             plan: CreditPlan::Revoke {
                 owner: owner_address,
                 token,
-                shard,
-                slot,
+                grant_id,
                 deadline,
                 fee,
                 signature: Vec::new(),
@@ -732,8 +708,7 @@ impl PreparedCredit {
             CreditPlan::Create { params: p, .. } => {
                 words.extend([
                     address_word(p.owner),
-                    U256::from(p.revocationShard),
-                    U256::from(p.revocationSlot),
+                    U256::from(p.grantId),
                     U256::from_be_slice(p.creditCommitment.as_slice()),
                     p.deadline,
                     hash[0],
@@ -758,8 +733,7 @@ impl PreparedCredit {
                     U256::from_be_slice(p.source.merkleRoot.as_slice()),
                     U256::from_be_slice(p.nullifier.as_slice()),
                     U256::from_be_slice(p.creditCommitment.as_slice()),
-                    U256::from(p.revocationShard),
-                    U256::from(p.revocationSlot),
+                    U256::from(p.grantId),
                     p.deadline,
                     hash[0],
                     hash[1],
@@ -773,7 +747,7 @@ impl PreparedCredit {
                     U256::from(p.sources.len()),
                     U256::from(p.payers.len()),
                 ]);
-                let mut arrays = vec![Vec::new(); 10];
+                let mut arrays = vec![Vec::new(); 9];
                 for source in &p.sources {
                     arrays[0].push(source.treeId);
                     arrays[1].push(U256::from_be_slice(source.merkleRoot.as_slice()));
@@ -784,11 +758,10 @@ impl PreparedCredit {
                 }
                 for (i, r) in p.grantRefs.iter().enumerate() {
                     arrays[4].push(r.payerIndex);
-                    arrays[5].push(U256::from(r.shard));
-                    arrays[6].push(U256::from(r.slot));
-                    arrays[7].push(U256::from_be_slice(p.nullifiers[i].as_slice()));
-                    arrays[8].push(U256::from_be_slice(p.creditCommitments[i].as_slice()));
-                    arrays[9].push(U256::from_be_slice(p.recoveryAmounts[i].as_slice()));
+                    arrays[5].push(U256::from(r.grantId));
+                    arrays[6].push(U256::from_be_slice(p.nullifiers[i].as_slice()));
+                    arrays[7].push(U256::from_be_slice(p.creditCommitments[i].as_slice()));
+                    arrays[8].push(U256::from_be_slice(p.recoveryAmounts[i].as_slice()));
                 }
                 for mut row in arrays {
                     row.resize(capacity, U256::ZERO);
@@ -1044,7 +1017,7 @@ impl PreparedCredit {
             ))
             .into()
         };
-        match &self.plan {
+        let call: Result<TransactionCall> = match &self.plan {
             CreditPlan::Create { params: p, .. } => {
                 if p.hasInitialPayment
                     && !chain.historical_preparation()
@@ -1054,10 +1027,9 @@ impl PreparedCredit {
                     return Err("initial payment Credit usage period changed".into());
                 }
                 if p.deadline < U256::from(block.timestamp)
-                    || chain.credit_allocation(p.owner, p.token, &block)?
-                        != (p.revocationShard, p.revocationSlot)
+                    || chain.credit_status(p.owner, p.token, p.grantId, &block)? != 0
                 {
-                    return Err("Credit create deadline or allocation changed".into());
+                    return Err("Credit create deadline or grant ID status changed".into());
                 }
                 fee_balance(
                     chain,
@@ -1110,16 +1082,15 @@ impl PreparedCredit {
             CreditPlan::Revoke {
                 owner,
                 token,
-                shard,
-                slot,
+                grant_id,
                 deadline,
                 fee,
                 signature,
             } => {
-                if *deadline < block.timestamp
+                if *grant_id == 0
+                    || *deadline < block.timestamp
+                    || chain.credit_status(*owner, *token, *grant_id, &block)? > 1
                     || signature.is_empty() && *owner != caller
-                    || (*shard, *slot) >= chain.credit_allocation(*owner, *token, &block)?
-                    || chain.credit_revoked(*owner, *token, *shard, *slot, &block)?
                 {
                     return Err(
                         "Credit revocation expired, unallocated, already revoked or unauthorized caller".into(),
@@ -1139,15 +1110,17 @@ impl PreparedCredit {
                 Ok(contract.call(&InvisiCore::revokeCreditCall {
                     token: *token,
                     owner: *owner,
-                    shard: *shard,
-                    slot: *slot,
+                    grantId: *grant_id,
                     deadline: U256::from(*deadline),
                     feeRecipient: fee.recipient,
                     feeAmount: fee.amount,
                     signature: signature.clone().into(),
                 }))
             }
-        }
+        };
+        let call = call?;
+        chain.canonical(&block)?;
+        Ok(call)
     }
 }
 
@@ -1174,8 +1147,7 @@ mod tests {
                 token_address: address_word(Address::repeat_byte(2)),
                 spender_wallet_identity: address_word(spender),
                 owner_wallet_identity: address_word(owner),
-                revocation_shard: 1,
-                revocation_slot: 0,
+                grant_id: 1,
                 nonce: U256::from(74),
                 expiry: 2100000000,
                 credit_shared_key: U256::from(75),
@@ -1280,8 +1252,7 @@ impl PreparedCredit {
         let CreditPlan::Revoke {
             owner,
             token,
-            shard,
-            slot,
+            grant_id,
             deadline,
             fee,
             ..
@@ -1290,15 +1261,14 @@ impl PreparedCredit {
             return Err("public revocation operation required".into());
         };
         Ok(
-            json!({"domain":{"name":"InvisibleProtocol","version":"1","chainId":self.context.chain_id.to_string(),"verifyingContract":hex(&self.context.protocol_address.to_be_bytes::<32>()[12..])},"primaryType":"RevokeCredit","types":{"RevokeCredit":[{"name":"token","type":"address"},{"name":"owner","type":"address"},{"name":"shard","type":"uint64"},{"name":"slot","type":"uint16"},{"name":"deadline","type":"uint256"},{"name":"feeRecipient","type":"address"},{"name":"feeAmount","type":"uint256"}]},"message":{"token":hex(token.as_slice()),"owner":hex(owner.as_slice()),"shard":shard.to_string(),"slot":slot.to_string(),"deadline":deadline.to_string(),"feeRecipient":hex(fee.recipient.as_slice()),"feeAmount":fee.amount.to_string()}}),
+            json!({"domain":{"name":"InvisibleProtocol","version":"1","chainId":self.context.chain_id.to_string(),"verifyingContract":hex(&self.context.protocol_address.to_be_bytes::<32>()[12..])},"primaryType":"RevokeCredit","types":{"RevokeCredit":[{"name":"token","type":"address"},{"name":"owner","type":"address"},{"name":"grantId","type":"uint128"},{"name":"deadline","type":"uint256"},{"name":"feeRecipient","type":"address"},{"name":"feeAmount","type":"uint256"}]},"message":{"token":hex(token.as_slice()),"owner":hex(owner.as_slice()),"grantId":grant_id.to_string(),"deadline":deadline.to_string(),"feeRecipient":hex(fee.recipient.as_slice()),"feeAmount":fee.amount.to_string()}}),
         )
     }
     pub fn revocation_digest(&self) -> Result<B256> {
         let CreditPlan::Revoke {
             owner,
             token,
-            shard,
-            slot,
+            grant_id,
             deadline,
             fee,
             ..
@@ -1307,7 +1277,7 @@ impl PreparedCredit {
             return Err("public revocation operation required".into());
         };
         let domain=keccak256((keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),keccak256("InvisibleProtocol"),keccak256("1"),U256::from(self.context.chain_id),word_address(self.context.protocol_address)?).abi_encode());
-        let structure=keccak256((keccak256("RevokeCredit(address token,address owner,uint64 shard,uint16 slot,uint256 deadline,address feeRecipient,uint256 feeAmount)"),*token,*owner,*shard,*slot,U256::from(*deadline),fee.recipient,fee.amount).abi_encode());
+        let structure=keccak256((keccak256("RevokeCredit(address token,address owner,uint128 grantId,uint256 deadline,address feeRecipient,uint256 feeAmount)"),*token,*owner,*grant_id,U256::from(*deadline),fee.recipient,fee.amount).abi_encode());
         let mut bytes = vec![0x19, 0x01];
         bytes.extend_from_slice(domain.as_slice());
         bytes.extend_from_slice(structure.as_slice());
@@ -1330,12 +1300,18 @@ impl PreparedCredit {
         }
         chain.canonical(&self.anchor)?;
         let CreditPlan::Revoke {
-            owner, deadline, ..
+            owner,
+            token,
+            grant_id,
+            deadline,
+            ..
         } = &self.plan
         else {
             return Err("public revocation operation required".into());
         };
-        if *deadline < block.timestamp
+        if *grant_id == 0
+            || *deadline < block.timestamp
+            || chain.credit_status(*owner, *token, *grant_id, &block)? > 1
             || !chain.public_signature_valid(
                 *owner,
                 self.revocation_digest()?,
@@ -1569,7 +1545,7 @@ mod lifecycle_tests {
             prepared.successor_states()[0].note.usage.total_spent,
             U256::from(7)
         );
-        assert_eq!(prepared.public_inputs().unwrap().len(), 18);
+        assert_eq!(prepared.public_inputs().unwrap().len(), 17);
         assert_eq!(
             prepared.operation().unwrap().1,
             "create_credit_initial_payment"
@@ -1601,13 +1577,14 @@ mod lifecycle_tests {
             .is_err());
     }
     #[test]
-    fn request_create_allocates_state_and_preserves_typed_recipient_failures() {
+    fn request_create_selects_random_id_and_preserves_typed_recipient_failures() {
         use super::*;
         let chain = chain();
         let owner = wallet(1);
         let spender = wallet(2);
         let initial = initial(chain.as_ref());
         let request = CreateCreditRequest {
+            grant_id: None,
             credit_shared_key: None,
             initial_payment: None,
             token: word_address(initial.note.token_address).unwrap(),
@@ -1633,6 +1610,7 @@ mod lifecycle_tests {
         assert_ne!(state.note.credit_shared_key, U256::ZERO);
         let mut explicit = request.clone();
         explicit.credit_shared_key = Some(U256::from(123));
+        explicit.grant_id = Some(u128::MAX);
         let prepared_explicit = invisi
             .prepare_create_credit(&owner, explicit, None)
             .unwrap();
@@ -1641,6 +1619,10 @@ mod lifecycle_tests {
                 .note
                 .credit_shared_key,
             U256::from(123)
+        );
+        assert_eq!(
+            prepared_explicit.successor_states()[0].note.grant_id,
+            u128::MAX
         );
         let delivery_context = DeliveryContext {
             context: invisi.context(),
@@ -1739,7 +1721,7 @@ mod lifecycle_tests {
             .unwrap();
         assert_eq!(
             &pure.broadcaster_intent().unwrap().data[..4],
-            &[0x00, 0xb6, 0xfa, 0x56]
+            &<InvisiCore::createCreditCall as alloy_sol_types::SolCall>::SELECTOR
         );
         if let CreditPlan::Create { params, .. } = &pure.plan {
             assert!(!params.hasInitialPayment);
@@ -1856,6 +1838,7 @@ mod lifecycle_tests {
             )
             .unwrap();
         let original = prepared.preparation_reads.clone().unwrap();
+        let frozen = prepared.successor_states()[0].note.clone();
         for _ in 0..2 {
             prepared = prepared
                 .quote_for_broadcaster(
@@ -1870,10 +1853,21 @@ mod lifecycle_tests {
                     },
                 )
                 .unwrap();
-            assert!(
-                Arc::ptr_eq(&original, prepared.preparation_reads.as_ref().unwrap()),
-                "quote replaced the operation read set"
+            assert_eq!(
+                prepared.successor_states()[0].note.grant_id,
+                frozen.grant_id
             );
+            assert_eq!(
+                prepared.successor_states()[0].note.credit_shared_key,
+                frozen.credit_shared_key
+            );
+            let live: Arc<dyn ChainState> = chain.clone();
+            if original.matches(&live) {
+                assert!(
+                    Arc::ptr_eq(&original, prepared.preparation_reads.as_ref().unwrap()),
+                    "quote replaced a fresh operation read set"
+                );
+            }
         }
     }
     #[test]
@@ -1958,10 +1952,19 @@ mod lifecycle_tests {
             path: [U256::ZERO; 16],
             debit: U256::from(7),
         };
+        let create = invisi
+            .prepare_create_credit_explicit(&owner, state.clone(), 2000000100, Fee::default())
+            .unwrap();
+        chain.credit_statuses.lock().unwrap().insert(
+            (
+                owner.owner_address,
+                word_address(state.note.token_address).unwrap(),
+                state.note.grant_id,
+            ),
+            1,
+        );
         let plans = [
-            invisi
-                .prepare_create_credit_explicit(&owner, state.clone(), 2000000100, Fee::default())
-                .unwrap(),
+            create,
             invisi
                 .prepare_update_credit_explicit(
                     &owner,
@@ -1986,6 +1989,14 @@ mod lifecycle_tests {
                 .unwrap(),
         ];
         for original in plans {
+            chain.credit_statuses.lock().unwrap().insert(
+                (owner.owner_address, original.token, 1001),
+                if matches!(original.plan, CreditPlan::Create { .. }) {
+                    0
+                } else {
+                    1
+                },
+            );
             let relay = Arc::new(CreditRelay {
                 fees: std::sync::atomic::AtomicUsize::new(0),
                 submits: std::sync::atomic::AtomicUsize::new(0),
@@ -2188,12 +2199,11 @@ mod lifecycle_tests {
         facts
             .spent
             .push((field_word(input.delivery.note.nullifier().unwrap()), false));
-        facts.revocations.push((
+        facts.credit_statuses.push((
             wallet(1).owner_address,
             word_address(input.delivery.note.token_address).unwrap(),
+            1001,
             1,
-            0,
-            false,
         ));
         let now = facts.construction_timestamp(&block);
         let mut prepared = Invisi::new(Arc::new(facts))
@@ -2235,6 +2245,10 @@ mod lifecycle_tests {
             crate::credit::credit_periods(restored.constructed_at),
             crate::credit::credit_periods(now)
         );
+        chain.credit_statuses.lock().unwrap().insert(
+            (wallet(1).owner_address, Address::repeat_byte(0x22), 1001),
+            1,
+        );
         chain.block.lock().unwrap().timestamp = now + 86400;
         // The fixture chain pins only the current block, so preserve the original anchor check separately.
         struct PeriodChain<'a> {
@@ -2261,15 +2275,14 @@ mod lifecycle_tests {
             fn nullifier_spent(&self, n: B256, b: &CanonicalBlock) -> Result<bool> {
                 self.live.nullifier_spent(n, b)
             }
-            fn credit_revoked(
+            fn credit_status(
                 &self,
                 o: Address,
                 t: Address,
-                s: u64,
-                l: u16,
+                s: u128,
                 b: &CanonicalBlock,
-            ) -> Result<bool> {
-                self.live.credit_revoked(o, t, s, l, b)
+            ) -> Result<u8> {
+                self.live.credit_status(o, t, s, b)
             }
             fn token_balance_allowance(
                 &self,
@@ -2278,14 +2291,6 @@ mod lifecycle_tests {
                 b: &CanonicalBlock,
             ) -> Result<(U256, U256)> {
                 self.live.token_balance_allowance(o, t, b)
-            }
-            fn credit_allocation(
-                &self,
-                o: Address,
-                t: Address,
-                b: &CanonicalBlock,
-            ) -> Result<(u64, u16)> {
-                self.live.credit_allocation(o, t, b)
             }
         }
         let live = PeriodChain {
@@ -2467,6 +2472,7 @@ mod lifecycle_tests {
                 timestamp: 2000000000,
             }),
             spent: Mutex::new(BTreeSet::new()),
+            credit_statuses: Default::default(),
         })
     }
     fn initial(chain: &dyn ChainState) -> CreditDeliveryState {
@@ -2476,8 +2482,7 @@ mod lifecycle_tests {
                 token_address: U256::from_be_slice(&[0x22; 20]),
                 spender_wallet_identity: address_word(wallet(2).owner_address),
                 owner_wallet_identity: address_word(wallet(1).owner_address),
-                revocation_shard: 1,
-                revocation_slot: 0,
+                grant_id: 1001,
                 nonce: U256::from(74),
                 expiry: 2100000000,
                 credit_shared_key: U256::from(75),
@@ -2554,6 +2559,12 @@ mod lifecycle_tests {
         PreparedCredit,
     ) {
         let chain = chain();
+        if label != "create_credit" {
+            chain.credit_statuses.lock().unwrap().insert(
+                (wallet(1).owner_address, Address::repeat_byte(0x22), 1001),
+                1,
+            );
+        }
         let invisi = Invisi::new(chain.clone());
         let owner = wallet(1);
         let spender = wallet(2);
@@ -2670,6 +2681,12 @@ mod lifecycle_tests {
         PreparedCredit,
     ) {
         let chain = chain();
+        if label != "create_credit" {
+            chain.credit_statuses.lock().unwrap().insert(
+                (wallet(1).owner_address, Address::repeat_byte(0x22), 1001),
+                1,
+            );
+        }
         let invisi = Invisi::new(chain.clone());
         let state = initial(&*chain);
         let fee = Fee {
@@ -2746,6 +2763,183 @@ mod lifecycle_tests {
         }
     }
     #[test]
+    fn revocation_submission_rechecks_the_live_block_after_status_reads() {
+        struct ChangingChain {
+            inner: Arc<super::super::test_support::FixtureChain>,
+            change: std::sync::atomic::AtomicBool,
+        }
+        impl ChainState for ChangingChain {
+            fn context(&self) -> ProtocolContext {
+                self.inner.context()
+            }
+            fn snapshot(&self) -> Result<CanonicalBlock> {
+                self.inner.snapshot()
+            }
+            fn canonical(&self, b: &CanonicalBlock) -> Result<()> {
+                self.inner.canonical(b)
+            }
+            fn known_root(&self, t: u64, r: B256, b: &CanonicalBlock) -> Result<bool> {
+                self.inner.known_root(t, r, b)
+            }
+            fn nullifier_spent(&self, n: B256, b: &CanonicalBlock) -> Result<bool> {
+                self.inner.nullifier_spent(n, b)
+            }
+            fn credit_status(
+                &self,
+                o: Address,
+                t: Address,
+                id: u128,
+                b: &CanonicalBlock,
+            ) -> Result<u8> {
+                let status = self.inner.credit_status(o, t, id, b)?;
+                if self.change.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    self.inner.block.lock().unwrap().hash = B256::repeat_byte(99);
+                }
+                Ok(status)
+            }
+            fn token_balance_allowance(
+                &self,
+                o: Address,
+                t: Address,
+                b: &CanonicalBlock,
+            ) -> Result<(U256, U256)> {
+                self.inner.token_balance_allowance(o, t, b)
+            }
+        }
+        let chain = Arc::new(ChangingChain {
+            inner: chain(),
+            change: false.into(),
+        });
+        let owner = wallet(1).owner_address;
+        let prepared = Invisi::new(chain.clone())
+            .prepare_revoke_credit_explicit(
+                owner,
+                Address::repeat_byte(0x22),
+                u128::MAX,
+                2_000_000_100,
+                Fee::default(),
+            )
+            .unwrap();
+        chain
+            .change
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(prepared
+            .calldata(chain.as_ref(), owner)
+            .unwrap_err()
+            .contains("reorganization"));
+    }
+    #[test]
+    fn grant_status_enforces_create_and_pre_revocation_ordering_and_scoping() {
+        let chain = chain();
+        let invisi = Invisi::new(chain.clone());
+        let owner = wallet(1);
+        let mut state = initial(chain.as_ref());
+        state.note.grant_id = u128::MAX;
+        let token = word_address(state.note.token_address).unwrap();
+        let scope = (owner.owner_address, token, u128::MAX);
+        let input = || CreditInput {
+            delivery: state.clone(),
+            payload: None,
+            tree_id: 1,
+            leaf_index: 0,
+            path: [U256::ZERO; 16],
+            root: merkle_root(state.note.commitment().unwrap(), 0, &[U256::ZERO; 16]).unwrap(),
+            debit: U256::from(1),
+        };
+        assert!(invisi
+            .prepare_draw_credit_explicit(
+                &wallet(2),
+                vec![input()],
+                &wallet(91),
+                2_000_000_100,
+                Fee::default(),
+                vec![]
+            )
+            .is_err());
+        assert!(invisi
+            .prepare_update_credit_explicit(
+                &owner,
+                input(),
+                Default::default(),
+                2_000_000_100,
+                Fee::default()
+            )
+            .is_err());
+        let revoke = invisi
+            .prepare_revoke_credit_explicit(
+                owner.owner_address,
+                token,
+                u128::MAX,
+                2_000_000_100,
+                Fee::default(),
+            )
+            .unwrap();
+        assert!(revoke.calldata(chain.as_ref(), owner.owner_address).is_ok());
+        invisi
+            .prepare_create_credit_explicit(&owner, state.clone(), 2_000_000_100, Fee::default())
+            .unwrap();
+        chain.credit_statuses.lock().unwrap().insert(scope, 1);
+        assert!(invisi
+            .prepare_create_credit_explicit(&owner, state.clone(), 2_000_000_100, Fee::default())
+            .is_err());
+        assert!(invisi
+            .prepare_revoke_credit_explicit(
+                owner.owner_address,
+                token,
+                u128::MAX,
+                2_000_000_100,
+                Fee::default()
+            )
+            .is_ok());
+        chain.credit_statuses.lock().unwrap().insert(scope, 2);
+        let disabled = invisi
+            .prepare_revoke_credit_explicit(
+                owner.owner_address,
+                token,
+                u128::MAX,
+                2_000_000_100,
+                Fee {
+                    recipient: Address::ZERO,
+                    amount: U256::from(1),
+                },
+            )
+            .err()
+            .unwrap();
+        assert!(disabled.message.contains("disabled"));
+        assert!(invisi
+            .prepare_create_credit_explicit(&owner, state.clone(), 2_000_000_100, Fee::default())
+            .is_err());
+        assert!(invisi
+            .prepare_revoke_credit_explicit(
+                owner.owner_address,
+                token,
+                u128::MAX,
+                2_000_000_100,
+                Fee::default()
+            )
+            .is_err());
+        assert!(revoke
+            .calldata(chain.as_ref(), owner.owner_address)
+            .is_err());
+        // Permanent disablement remains local to the complete owner/token scope.
+        state.note.owner_wallet_identity = address_word(wallet(3).owner_address);
+        state.owner_receiving_keys = wallet(3).receiving_keys;
+        assert!(invisi
+            .prepare_create_credit_explicit(
+                &wallet(3),
+                state.clone(),
+                2_000_000_100,
+                Fee::default()
+            )
+            .is_ok());
+        state.note.owner_wallet_identity = address_word(owner.owner_address);
+        state.owner_receiving_keys = owner.receiving_keys.clone();
+        state.note.token_address = address_word(Address::repeat_byte(0x33));
+        assert!(invisi
+            .prepare_create_credit_explicit(&owner, state, 2_000_000_100, Fee::default())
+            .is_ok());
+    }
+    #[test]
     fn batched_draw_groups_distinct_payers_and_preserves_available_balances() {
         let chain = chain();
         let invisi = Invisi::new(chain.clone());
@@ -2764,6 +2958,16 @@ mod lifecycle_tests {
             path: [U256::ZERO; 16],
             debit: U256::from(debit),
         };
+        for state in [&first, &second] {
+            chain.credit_statuses.lock().unwrap().insert(
+                (
+                    word_address(state.note.owner_wallet_identity).unwrap(),
+                    word_address(state.note.token_address).unwrap(),
+                    state.note.grant_id,
+                ),
+                1,
+            );
+        }
         let first = member(first, 1, 7u64);
         let second = member(second, 2, 8u64);
         let prepared = invisi
@@ -2816,17 +3020,19 @@ mod lifecycle_tests {
     #[test]
     #[ignore = "requires explicit actual BB6, Noir executor and pinned circuit assets"]
     fn real_constructed_credit_witnesses_prove_and_verify() {
-        use crate::prover::{DirectoryAssets, NativeProver, NoirCli};
+        use crate::prover::{NativeProver, NoirCli, ResourceOptions, ResourceProvider};
         use std::{path::PathBuf, time::Duration};
         let backend = NativeProver {
             bb_binary: PathBuf::from(std::env::var_os("INVISI_BB").expect("explicit BB6 binary")),
             timeout: Duration::from_secs(600),
             threads: 4,
-            assets: Arc::new(DirectoryAssets {
-                directory: PathBuf::from(
-                    std::env::var_os("INVISI_PROVER_ASSETS").expect("explicit circuit assets"),
-                ),
-            }),
+            assets: Arc::new(ResourceProvider::new(ResourceOptions {
+                directory: Some(PathBuf::from(
+                    std::env::var_os("INVISI_PROVER_ASSETS").expect("explicit circuit catalog"),
+                )),
+                offline: true,
+                ..ResourceOptions::default()
+            })),
             witness_executor: Arc::new(NoirCli {
                 binary: PathBuf::from(
                     std::env::var_os("INVISI_NOIR_EXECUTE").expect("explicit real Noir executor"),
@@ -2879,15 +3085,8 @@ mod revocation_tests {
         fn nullifier_spent(&self, n: B256, b: &CanonicalBlock) -> Result<bool> {
             self.0.nullifier_spent(n, b)
         }
-        fn credit_revoked(
-            &self,
-            o: Address,
-            t: Address,
-            s: u64,
-            l: u16,
-            b: &CanonicalBlock,
-        ) -> Result<bool> {
-            self.0.credit_revoked(o, t, s, l, b)
+        fn credit_status(&self, o: Address, t: Address, s: u128, b: &CanonicalBlock) -> Result<u8> {
+            self.0.credit_status(o, t, s, b)
         }
         fn token_balance_allowance(
             &self,
@@ -2896,14 +3095,6 @@ mod revocation_tests {
             b: &CanonicalBlock,
         ) -> Result<(U256, U256)> {
             self.0.token_balance_allowance(o, t, b)
-        }
-        fn credit_allocation(
-            &self,
-            _: Address,
-            _: Address,
-            _: &CanonicalBlock,
-        ) -> Result<(u64, u16)> {
-            Ok((1, 1))
         }
     }
     #[test]
@@ -2921,7 +3112,6 @@ mod revocation_tests {
                 owner,
                 Address::repeat_byte(2),
                 1,
-                0,
                 2000000100,
                 Fee::default(),
             )
@@ -2999,7 +3189,7 @@ mod revocation_tests {
         let owner = wallet.owner_address;
         let deadline = 2000000100;
         let direct = invisi
-            .prepare_revoke_credit_explicit(owner, token, 1, 0, deadline, Fee::default())
+            .prepare_revoke_credit_explicit(owner, token, 1, deadline, Fee::default())
             .unwrap();
         let estimate = direct.estimate_gas().unwrap();
         assert!(estimate.available());
@@ -3016,7 +3206,7 @@ mod revocation_tests {
         let public = signing.verifying_key().to_encoded_point(false);
         let actual_owner = Address::from_slice(&keccak256(&public.as_bytes()[1..])[12..]);
         let prepared = invisi
-            .prepare_revoke_credit_explicit(actual_owner, token, 1, 0, deadline, Fee::default())
+            .prepare_revoke_credit_explicit(actual_owner, token, 1, deadline, Fee::default())
             .unwrap();
         let (signature, recovery) = signing
             .sign_prehash_recoverable(prepared.revocation_digest().unwrap().as_slice())
@@ -3032,7 +3222,6 @@ mod revocation_tests {
                 actual_owner,
                 token,
                 1,
-                0,
                 deadline,
                 Fee {
                     recipient: Address::repeat_byte(3),
@@ -3055,7 +3244,7 @@ impl PreparedCredit {
     pub fn estimate_gas(&self) -> Result<crate::gas::GasEstimate> {
         let (mut query, fee, draw) = match &self.plan {
             CreditPlan::Create { params, .. } => (
-                json!({"kind":if params.hasInitialPayment {"create-credit-initial-payment"} else {"create-credit"},"creationAbi":"initial-payment","scenario":"first-allocation-empty-tree"}),
+                json!({"kind":if params.hasInitialPayment {"create-credit-initial-payment"} else {"create-credit"},"scenario":"first-grant-empty-tree"}),
                 params.feeAmount,
                 false,
             ),
@@ -3070,12 +3259,12 @@ impl PreparedCredit {
                 successors,
                 ..
             } => (
-                json!({"kind":"draw-credit","capacity":credit_capacity(inputs.len())?,"creditInputs":inputs.len(),"distinctPayers":params.payers.iter().map(|p| p.payer).collect::<std::collections::BTreeSet<_>>().len(),"sourceTrees":params.sources.len(),"noteOutputs":1,"creditOutputs":successors.len(),"creditCiphertextBytes":485,"noteCiphertextBytes":160,"clueBytes":68,"scenario":"distinct-payers"}),
+                json!({"kind":"draw-credit","capacity":credit_capacity(inputs.len())?,"creditInputs":inputs.len(),"distinctPayers":params.payers.iter().map(|p| p.payer).collect::<std::collections::BTreeSet<_>>().len(),"sourceTrees":params.sources.len(),"noteOutputs":1,"creditOutputs":successors.len(),"creditCiphertextBytes":491,"noteCiphertextBytes":160,"clueBytes":68,"scenario":"distinct-payers"}),
                 params.feeAmount,
                 true,
             ),
             CreditPlan::Revoke { fee, .. } => (
-                json!({"kind":"revoke-credit","authorization":"unknown","bitmapWord":"empty"}),
+                json!({"kind":"revoke-credit","authorization":"unknown"}),
                 fee.amount,
                 false,
             ),
@@ -3100,7 +3289,7 @@ impl PreparedCredit {
             .map(|(i, d)| d.clue.len().saturating_sub(68)
                 + d.ciphertext
                     .len()
-                    .saturating_sub(if i < credit_count { 485 } else { 160 }))
+                    .saturating_sub(if i < credit_count { 491 } else { 160 }))
             .sum::<usize>());
         if self.broadcaster.as_ref().is_some_and(|s| {
             s.quote.quote.execution == invisi_sdk_rpc::broadcaster::Execution::Aggregate

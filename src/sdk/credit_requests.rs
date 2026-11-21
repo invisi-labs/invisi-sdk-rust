@@ -1,4 +1,4 @@
-//! Request-based Credit construction keeps allocation and recovery state inside the SDK.
+//! Request-based Credit construction selects grant IDs and keeps recovery state inside the SDK.
 use super::*;
 #[derive(Clone, Debug)]
 pub struct InitialCreditPayment {
@@ -11,6 +11,8 @@ pub struct InitialCreditPayment {
 #[derive(Clone)]
 pub struct CreateCreditRequest {
     pub token: Address,
+    /// Positive uint128 ID; selected once with OS randomness when omitted.
+    pub grant_id: Option<u128>,
     /// Optional caller-selected nonzero canonical field element; defaults to random.
     pub credit_shared_key: Option<U256>,
     pub initial_payment: Option<InitialCreditPayment>,
@@ -49,8 +51,7 @@ pub struct DrawCreditRequest {
 #[derive(Clone, Debug)]
 pub struct RevokeCreditRequest {
     pub token: Address,
-    pub shard: u64,
-    pub slot: u16,
+    pub grant_id: u128,
     pub deadline: u64,
     pub fee: Fee,
 }
@@ -107,19 +108,14 @@ impl Invisi {
         let spender = recipient_wallet(&request.spender, self.chain.context(), resolver)
             .map_err(|error| error.with_operation("prepare_create_credit"))?;
         let build = || -> Result<PreparedCredit> {
-            let anchor = self.chain.snapshot()?;
-            let (shard, slot) =
-                self.chain
-                    .credit_allocation(wallet.owner_address(), request.token, &anchor)?;
-            self.chain.canonical(&anchor)?;
+            let grant_id = request.grant_id.unwrap_or_else(random_grant_id);
             let delivery = CreditDeliveryState {
                 note: crate::credit::CreditState {
                     context: self.chain.context(),
                     token_address: address_word(request.token),
                     owner_wallet_identity: address_word(wallet.owner_address()),
                     spender_wallet_identity: address_word(spender.owner_address()),
-                    revocation_shard: shard,
-                    revocation_slot: slot,
+                    grant_id,
                     nonce: nonce(),
                     expiry: request.expiry,
                     credit_shared_key: request.credit_shared_key.unwrap_or_else(nonce),
@@ -181,10 +177,22 @@ impl Invisi {
         self.prepare_revoke_credit_explicit(
             wallet.owner_address(),
             request.token,
-            request.shard,
-            request.slot,
+            request.grant_id,
             request.deadline,
             request.fee,
         )
+    }
+}
+
+/// Select a nonzero uint128 from the operating system CSPRNG.
+pub fn random_grant_id() -> u128 {
+    use rand::RngCore;
+    loop {
+        let mut bytes = [0u8; 16];
+        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        let id = u128::from_be_bytes(bytes);
+        if id != 0 {
+            return id;
+        }
     }
 }

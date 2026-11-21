@@ -70,14 +70,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .credit_inventory(Some(token), Some(invisi_sdk::delivery::CreditRole::Owner))?
             .into_iter()
             .filter(|(_, credit)| {
-                !credit.consumed && !credit.revoked && credit.reserved_by.is_none()
+                credit.status < 2
+                    && !credit.consumed
+                    && !credit.revoked
+                    && credit.reserved_by.is_none()
             })
             .nth(index)
             .ok_or("no current unreserved owner Credit at CREDIT_INDEX")?;
         session.prepare_revoke_credit_explicit(
             token,
-            credit.delivery.note.revocation_shard,
-            credit.delivery.note.revocation_slot,
+            credit.delivery.note.grant_id,
             env::var("DEADLINE")?.parse()?,
             Fee::default(),
         )?

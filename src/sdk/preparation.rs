@@ -51,7 +51,7 @@ pub(super) fn map_preparation<T: Send, F: Fn(usize) -> Result<T> + Sync>(
 enum ReadValue {
     Boolean(bool),
     Amounts(U256, U256),
-    Allocation(u64, u16),
+    Status(u8),
 }
 pub(crate) struct PreparationChain {
     upstream: Arc<dyn ChainState>,
@@ -171,17 +171,15 @@ impl ChainState for PreparationChain {
             self.upstream.nullifier_spent(n, b)
         })
     }
-    fn credit_revoked(
-        &self,
-        o: Address,
-        t: Address,
-        s: u64,
-        l: u16,
-        b: &CanonicalBlock,
-    ) -> Result<bool> {
-        self.boolean(format!("revoked:{o}:{t}:{s}:{l}:{b:?}"), || {
-            self.upstream.credit_revoked(o, t, s, l, b)
-        })
+    fn credit_status(&self, o: Address, t: Address, id: u128, b: &CanonicalBlock) -> Result<u8> {
+        match self.read(format!("credit-status:{o}:{t}:{id}:{b:?}"), || {
+            self.upstream
+                .credit_status(o, t, id, b)
+                .map(ReadValue::Status)
+        })? {
+            ReadValue::Status(v) => Ok(v),
+            _ => Err("preparation read type mismatch".into()),
+        }
     }
     fn token_balance_allowance(
         &self,
@@ -198,16 +196,7 @@ impl ChainState for PreparationChain {
             _ => Err("preparation read type mismatch".into()),
         }
     }
-    fn credit_allocation(&self, o: Address, t: Address, b: &CanonicalBlock) -> Result<(u64, u16)> {
-        match self.read(format!("allocation:{o}:{t}:{b:?}"), || {
-            self.upstream
-                .credit_allocation(o, t, b)
-                .map(|(a, b)| ReadValue::Allocation(a, b))
-        })? {
-            ReadValue::Allocation(a, b) => Ok((a, b)),
-            _ => Err("preparation read type mismatch".into()),
-        }
-    }
+
     fn funding_nonce(&self, o: Address, b: &CanonicalBlock) -> Result<U256> {
         self.upstream.funding_nonce(o, b)
     }
@@ -234,8 +223,8 @@ pub struct PreparationSnapshot {
     pub block: CanonicalBlock,
     pub roots: Vec<(u64, B256, bool)>,
     pub spent: Vec<(B256, bool)>,
-    pub revocations: Vec<(Address, Address, u64, u16, bool)>,
-    pub allocations: Vec<(Address, Address, u64, u16)>,
+    #[serde(with = "credit_status_facts")]
+    pub credit_statuses: Vec<(Address, Address, u128, u8)>,
     pub funding_nonces: Vec<(Address, U256)>,
 }
 impl PreparationSnapshot {
@@ -262,8 +251,7 @@ impl PreparationSnapshot {
             block,
             roots: vec![],
             spent: vec![],
-            revocations: vec![],
-            allocations: vec![],
+            credit_statuses: vec![],
             funding_nonces: vec![],
         }
     }
@@ -287,14 +275,20 @@ impl PreparationSnapshot {
         if !unique(self.roots.iter().map(|(t, r, _)| (*t, *r)))
             || !unique(self.spent.iter().map(|(n, _)| *n))
             || !unique(
-                self.revocations
+                self.credit_statuses
                     .iter()
-                    .map(|(o, t, s, l, _)| (*o, *t, *s, *l)),
+                    .map(|(o, t, id, _)| (*o, *t, *id)),
             )
-            || !unique(self.allocations.iter().map(|(o, t, _, _)| (*o, *t)))
             || !unique(self.funding_nonces.iter().map(|(o, _)| *o))
         {
             return Err("duplicate preparation facts".into());
+        }
+        if self
+            .credit_statuses
+            .iter()
+            .any(|(_, _, id, s)| *id == 0 || *s > 2)
+        {
+            return Err("invalid Credit status fact".into());
         }
         Ok(())
     }
@@ -341,32 +335,21 @@ impl ChainState for PreparationSnapshot {
             .map(|(_, v)| *v)
             .ok_or_else(|| self.missing_read())
     }
-    fn credit_revoked(
+    fn credit_status(
         &self,
         owner: Address,
         token: Address,
-        shard: u64,
-        slot: u16,
+        grant_id: u128,
         block: &CanonicalBlock,
-    ) -> Result<bool> {
+    ) -> Result<u8> {
         self.canonical(block)?;
-        self.revocations
+        if grant_id == 0 {
+            return Err("positive grant ID required".into());
+        }
+        self.credit_statuses
             .iter()
-            .find(|(o, t, s, l, _)| (*o, *t, *s, *l) == (owner, token, shard, slot))
-            .map(|(_, _, _, _, v)| *v)
-            .ok_or_else(|| self.missing_read())
-    }
-    fn credit_allocation(
-        &self,
-        owner: Address,
-        token: Address,
-        block: &CanonicalBlock,
-    ) -> Result<(u64, u16)> {
-        self.canonical(block)?;
-        self.allocations
-            .iter()
-            .find(|(o, t, _, _)| (*o, *t) == (owner, token))
-            .map(|(_, _, s, l)| (*s, *l))
+            .find(|(o, t, id, _)| (*o, *t, *id) == (owner, token, grant_id))
+            .map(|(_, _, _, v)| *v)
             .ok_or_else(|| self.missing_read())
     }
     fn funding_nonce(&self, owner: Address, block: &CanonicalBlock) -> Result<U256> {
@@ -560,5 +543,34 @@ mod construction_tests {
             invisi.prepare_transfer(&wallet, plan).unwrap_err().code,
             InvisiErrorCode::PreparationFailed
         );
+    }
+}
+
+mod credit_status_facts {
+    use super::*;
+    type Facts = Vec<(Address, Address, u128, u8)>;
+    #[derive(Serialize, Deserialize)]
+    struct Id(#[serde(with = "crate::note::decimal_u128")] u128);
+    pub fn serialize<S: serde::Serializer>(
+        facts: &[(Address, Address, u128, u8)],
+        s: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        facts
+            .iter()
+            .map(|(o, t, id, status)| (*o, *t, Id(*id), *status))
+            .collect::<Vec<_>>()
+            .serialize(s)
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> std::result::Result<Facts, D::Error> {
+        let facts = Vec::<(Address, Address, Id, u8)>::deserialize(d)?;
+        if facts.iter().any(|(_, _, _, s)| *s > 2) {
+            return Err(serde::de::Error::custom("invalid Credit status"));
+        }
+        Ok(facts
+            .into_iter()
+            .map(|(o, t, id, s)| (o, t, id.0, s))
+            .collect())
     }
 }

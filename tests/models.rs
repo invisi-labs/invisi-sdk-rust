@@ -16,8 +16,7 @@ fn current() -> CreditState {
         token_address: n("0x2222222222222222222222222222222222222222"),
         spender_wallet_identity: n("3"),
         owner_wallet_identity: n("4"),
-        revocation_shard: 1,
-        revocation_slot: 0,
+        grant_id: 1001,
         nonce: n("5"),
         expiry: 2050000000,
         credit_shared_key: n("6"),
@@ -299,4 +298,67 @@ fn credit_update_payload_absent_preserves_and_empty_clears() {
     let cleared = derive_credit_update(&previous, &changes, 2000000001).unwrap();
     assert!(cleared.state.payload.is_empty());
     assert_eq!(preserved.state_commitment, cleared.state_commitment);
+}
+
+#[test]
+fn grant_id_wire_rejects_zero_overflow_and_noncanonical_decimals() {
+    let mut state = current();
+    for id in [1, (u64::MAX as u128) + 1, u128::MAX] {
+        state.grant_id = id;
+        let encoded = serde_json::to_value(&state).unwrap();
+        assert_eq!(encoded["grantId"], id.to_string());
+        assert_eq!(
+            serde_json::from_value::<CreditState>(encoded).unwrap(),
+            state
+        );
+    }
+    let encoded = serde_json::to_value(current()).unwrap();
+    for invalid in [
+        "0",
+        "01",
+        "+1",
+        "0x1",
+        "-1",
+        "340282366920938463463374607431768211456",
+        "",
+    ] {
+        let mut value = encoded.clone();
+        value["grantId"] = serde_json::json!(invalid);
+        assert!(
+            serde_json::from_value::<CreditState>(value).is_err(),
+            "{invalid}"
+        );
+    }
+    let mut value = encoded;
+    value["grantId"] = serde_json::json!(1);
+    assert!(serde_json::from_value::<CreditState>(value).is_err());
+}
+
+#[test]
+fn full_uint128_id_binds_commitment_and_survives_draw_update_and_recovery() {
+    let mut state = current();
+    state.grant_id = u128::MAX;
+    let commitment = state.commitment().unwrap();
+    let nullifier = state.nullifier().unwrap();
+    let mut other = state.clone();
+    other.grant_id = u64::MAX as u128;
+    assert_ne!(other.commitment().unwrap(), commitment);
+    assert_ne!(other.nullifier().unwrap(), nullifier);
+    let draw = derive_credit_state(&state, U256::from(7), 2_000_000_000).unwrap();
+    assert_eq!(draw.state.grant_id, u128::MAX);
+    let recovered = recover_credit_state(
+        state.context,
+        &state,
+        &CreditStateRecovery {
+            timestamp: 2_000_000_000,
+            credit_nullifier: draw.nullifier,
+            state_commitment: draw.state_commitment,
+            recovery_amount: draw.recovery_amount,
+        },
+    )
+    .unwrap();
+    assert_eq!(recovered.grant_id, u128::MAX);
+    let updated =
+        derive_credit_update(&draw.state, &CreditUpdateChanges::default(), 2_000_000_001).unwrap();
+    assert_eq!(updated.state.grant_id, u128::MAX);
 }

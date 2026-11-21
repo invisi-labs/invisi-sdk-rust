@@ -68,6 +68,8 @@ pub struct StoredCredit {
     pub transaction_hash: B256,
     pub role: CreditRole,
     pub consumed: bool,
+    /// Canonical on-chain status: 0 unknown, 1 active, 2 permanently disabled.
+    pub status: u8,
     pub revoked: bool,
     pub reserved_by: Option<String>,
 }

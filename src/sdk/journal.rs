@@ -362,16 +362,14 @@ impl ManagedPrepared {
                     CreditPlan::Revoke {
                         owner,
                         token,
-                        shard,
-                        slot,
+                        grant_id,
                         deadline,
                         fee,
                         signature,
                     } => P::revokeCreditCall {
                         token: *token,
                         owner: *owner,
-                        shard: *shard,
-                        slot: *slot,
+                        grantId: *grant_id,
                         deadline: U256::from(*deadline),
                         feeRecipient: fee.recipient,
                         feeAmount: fee.amount,
@@ -688,8 +686,7 @@ impl PreparedSnapshot {
                         if state.context != self.context
                             || state.token_address != address_word(self.token)
                             || state.owner_wallet_identity != address_word(owner_address)
-                            || state.revocation_shard != c.p.revocationShard
-                            || state.revocation_slot != c.p.revocationSlot
+                            || state.grant_id != c.p.grantId
                             || field_word(model(state.commitment())?) != c.p.creditCommitment
                             || !c.p.hasInitialPayment
                                 && state.usage != crate::credit::CreditUsage::default()
@@ -771,8 +768,7 @@ impl PreparedSnapshot {
                             || c.p.nullifier != field_word(model(state.nullifier())?)
                             || expected.state != self.states[0].note
                             || field_word(expected.state_commitment) != c.p.creditCommitment
-                            || state.revocation_shard != c.p.revocationShard
-                            || state.revocation_slot != c.p.revocationSlot
+                            || state.grant_id != c.p.grantId
                         {
                             return Err("saved Credit update invariants mismatch".into());
                         }
@@ -851,8 +847,7 @@ impl PreparedSnapshot {
                         CreditPlan::Revoke {
                             owner: c.owner,
                             token: c.token,
-                            shard: c.shard,
-                            slot: c.slot,
+                            grant_id: c.grantId,
                             deadline: u64::try_from(c.deadline)
                                 .map_err(|_| "saved deadline overflow")?,
                             fee: sdk::Fee {
@@ -931,13 +926,10 @@ impl PreparedSnapshot {
                         }
                         CreditPlan::Revoke {
                             token,
-                            shard,
-                            slot,
+                            grant_id,
                             deadline,
                             ..
-                        } => Some(CreditRepriceTemplate::Revoke(
-                            *token, *shard, *slot, *deadline,
-                        )),
+                        } => Some(CreditRepriceTemplate::Revoke(*token, *grant_id, *deadline)),
                     }
                 } else {
                     None

@@ -85,6 +85,7 @@ pub fn credit_inputs(state: &WalletState, token: Address, role: CreditRole) -> V
         .values()
         .filter(|value| {
             value.role == role
+                && value.status == 1
                 && !value.consumed
                 && !value.revoked
                 && value.reserved_by.is_none()
@@ -229,8 +230,7 @@ mod tests {
             token_address: U256::from(2),
             owner_wallet_identity: U256::from(1),
             spender_wallet_identity: U256::from(2),
-            revocation_shard: 1,
-            revocation_slot: 0,
+            grant_id: 1,
             nonce: U256::from(678),
             expiry: 2_000_000_123,
             credit_shared_key: U256::from(999),
@@ -256,6 +256,7 @@ mod tests {
             transaction_hash: B256::with_last_byte(1),
             role: CreditRole::Spender,
             consumed: false,
+            status: 1,
             revoked: false,
             reserved_by: None,
         }
@@ -285,7 +286,7 @@ mod tests {
         assert!(note_inputs(&state, token).is_empty());
     }
     #[test]
-    fn credit_draw_selection_respects_role_revocation_expiry_and_period_limits() {
+    fn credit_draw_selection_respects_status_role_revocation_expiry_and_period_limits() {
         let mut state = WalletState::default();
         let mut credit = grant();
         credit.delivery.note.policy.daily_limit = U256::from(50);
@@ -299,6 +300,12 @@ mod tests {
         );
         assert!(select_credit_draw(&state, token, U256::from(21), block().timestamp).is_err());
         assert!(credit_inputs(&state, token, CreditRole::Owner).is_empty());
+        for status in [0, 2, 255] {
+            state.credits.get_mut("grant").unwrap().status = status;
+            assert!(credit_inputs(&state, token, CreditRole::Spender).is_empty());
+            assert!(select_credit_draw(&state, token, U256::from(1), block().timestamp).is_err());
+        }
+        state.credits.get_mut("grant").unwrap().status = 1;
         state.credits.get_mut("grant").unwrap().revoked = true;
         assert!(select_credit_draw(&state, token, U256::from(1), block().timestamp).is_err());
         state.credits.get_mut("grant").unwrap().revoked = false;

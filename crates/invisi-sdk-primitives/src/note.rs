@@ -189,6 +189,25 @@ pub mod decimal_u64 {
         u64::try_from(n).map_err(serde::de::Error::custom)
     }
 }
+pub mod decimal_u128 {
+    use serde::{Deserializer, Serializer};
+    pub fn serialize<S: Serializer>(value: &u128, s: S) -> Result<S::Ok, S::Error> {
+        if *value == 0 {
+            return Err(serde::ser::Error::custom("positive grant ID required"));
+        }
+        s.serialize_str(&value.to_string())
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<u128, D::Error> {
+        let n = super::decimal::deserialize(d)?;
+        {
+            let value = u128::try_from(n).map_err(serde::de::Error::custom)?;
+            if value == 0 {
+                return Err(serde::de::Error::custom("positive grant ID required"));
+            }
+            Ok(value)
+        }
+    }
+}
 pub mod decimal_u16 {
     use serde::{Deserializer, Serializer};
     pub fn serialize<S: Serializer>(value: &u16, s: S) -> Result<S::Ok, S::Error> {

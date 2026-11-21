@@ -102,14 +102,18 @@ and always sets `InitialCreditPayment.net_amount`. This optional pin requires in
 `amount == net_amount + fee.amount`, survives saved journals, and makes quotation
 rebuild gross debit, grant usage and deliveries while keeping the merchant Note fixed.
 Without a net pin, `amount` stays gross and the fee reduces the Note.
-The creation example accepts `INITIAL_PAYMENT_GROSS`. Combined circuit resources use the same independent Core catalog and the existing lazy cache, explicit directory and offline settings; the historical separate pin is used only in explicit legacy mode. No circuit assets are bundled. `legacy_create_credit_call` retains explicit
-encoding for pure creation against legacy deployments.
+The creation example accepts `INITIAL_PAYMENT_GROSS`. Combined circuit resources use the same independent Core catalog and the existing lazy cache, explicit directory and offline settings; the historical separate pin is used only in explicit legacy mode. No circuit assets are bundled. Historical catalogs cannot prove current Credit statements.
 
-Notes use envelope `0x01`. Credit uses `0x82`, finite `availableCredit`, a canonical
+Notes use envelope `0x01`. Credit uses `0x84` (minimum 491 bytes), finite `availableCredit`, a canonical
 `unlimited` flag, three limits and gross usage counters. Create/update/revoke fees are
 pulled from the owner allowance; draw collects gross amounts, deducts its fee and issues
 one net ordinary Note. Updates use explicit balance deltas. Revocation is a public grant
-reference operation and does not need a ZK proof. There is no prepaid Credit compatibility
+ID operation and does not need a ZK proof. Grant IDs are positive uint128 values
+encoded as canonical decimal strings, scoped by chain, Core, owner and token. Creation
+selects an ID once with OS randomness (or accepts an explicit ID); retries and quotes
+preserve it. Status `0` is unknown, `1` active, and `2` permanently disabled. Creation
+requires `0`, draw/update require `1`, and revocation accepts `0` or `1`, including
+revoking an ID before creation. Disabled IDs cannot be reused. There is no prepaid Credit compatibility
 model in the current business API.
 
 Ordinary spending requires private authorization. An explicit permissionless owner sweep
@@ -304,3 +308,9 @@ persistent delegation/revocation, transaction signing and durable reconciliation
 remain host responsibilities. See [the crate guide](crates/invisi-sdk-payment-router/README.md)
 and [compile-checked integration example](crates/invisi-sdk-payment-router/examples/canonical.rs).
 The existing native-only `quote`/`pay` helpers remain explicitly legacy APIs.
+
+Current Credit proving resources use manifest 8 and format 9; Core protocol version remains 1.
+`scripts/generate-credit-fixtures.mjs ../invisi-core` regenerates deterministic Credit
+creation, draw, update and initial-payment parity fixtures from the matching Core checkout.
+Gas previews retain the recorded historical measurement source and release identity; the
+uint128 grant-ID release has not been remeasured.

@@ -1454,7 +1454,7 @@ mod resource_tests {
         });
         for (name, width) in [
             ("transact_user_slots1", 20),
-            ("create_credit_initial_payment", 18),
+            ("create_credit_initial_payment", 17),
         ] {
             let statement = statement(name, "evm", vec![B256::ZERO; width]).unwrap();
             let (artifact, key) = provider.load(&statement).unwrap();
@@ -1758,7 +1758,7 @@ mod split_resource_tests {
         });
         assert_eq!(
             provider.options.index_sha256,
-            "36f58bac1a0f70c6f8422b47f7cc35a30416a20f8a0f30038d23db0832e2bc93"
+            "85a5d1dffe40fc965ab4345a28b632f463c3ad861c44d5845850fbc7447fd8f6"
         );
         assert_eq!(
             provider

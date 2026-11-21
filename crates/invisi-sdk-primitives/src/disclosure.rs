@@ -74,11 +74,10 @@ pub enum DisclosureResult {
         payload: Option<Vec<u8>>,
     },
 }
-const CREDIT_FIELDS: [&str; 17] = [
+const CREDIT_FIELDS: [&str; 16] = [
     "spenderWalletIdentity",
     "ownerWalletIdentity",
-    "revocationShard",
-    "revocationSlot",
+    "grantId",
     "nonce",
     "expiry",
     "creditSharedKeyHash",
@@ -138,8 +137,7 @@ fn credit_data(state: &CreditState) -> ModelResult<BTreeMap<String, String>> {
     for (name, value) in [
         ("spenderWalletIdentity", hex(n.spender_wallet_identity, 20)),
         ("ownerWalletIdentity", hex(n.owner_wallet_identity, 20)),
-        ("revocationShard", n.revocation_shard.to_string()),
-        ("revocationSlot", n.revocation_slot.to_string()),
+        ("grantId", n.grant_id.to_string()),
         ("nonce", n.nonce.to_string()),
         ("expiry", n.expiry.to_string()),
         (
@@ -173,14 +171,12 @@ fn credit_commitment(
     }
     let key = U256::from_be_slice(&key);
     crate::note::field(key, "shared key hash")?;
-    let shard = number(data, "revocationShard")?;
-    let slot = number(data, "revocationSlot")?;
+    let grant_id = number(data, "grantId")?;
     let nonce = number(data, "nonce")?;
     let expiry = number(data, "expiry")?;
-    crate::note::uint(shard, 64, "shard")?;
-    crate::note::uint(slot, 16, "slot")?;
+    crate::note::uint(grant_id, 128, "grant ID")?;
     crate::note::uint(expiry, 64, "expiry")?;
-    if shard == U256::ZERO || expiry == U256::ZERO {
+    if grant_id == U256::ZERO || expiry == U256::ZERO {
         return Err(invalid());
     }
     let mut values = vec![
@@ -190,8 +186,7 @@ fn credit_commitment(
         spender,
         owner,
         context.token_address,
-        shard,
-        slot,
+        grant_id,
         nonce,
         expiry,
         key,

@@ -1,6 +1,6 @@
 //! Current Credit available balance, gross usage and authenticated successor recovery.
 use crate::note::{
-    address_hex, bytes_hex, decimal, decimal_u16, decimal_u64, field, field_hex, field_modulus,
+    address_hex, bytes_hex, decimal, decimal_u128, decimal_u64, field, field_hex, field_modulus,
     hash_fields, positive_address, uint, ModelError, ModelResult, ProtocolContext,
 };
 use alloy_primitives::U256;
@@ -60,10 +60,8 @@ pub struct CreditState {
     pub spender_wallet_identity: U256,
     #[serde(with = "address_hex")]
     pub owner_wallet_identity: U256,
-    #[serde(with = "decimal_u64")]
-    pub revocation_shard: u64,
-    #[serde(with = "decimal_u16")]
-    pub revocation_slot: u16,
+    #[serde(with = "decimal_u128")]
+    pub grant_id: u128,
     #[serde(with = "decimal")]
     pub nonce: U256,
     #[serde(with = "decimal_u64")]
@@ -87,8 +85,8 @@ impl CreditState {
         positive_address(self.token_address, "token address")?;
         positive_address(self.spender_wallet_identity, "spender identity")?;
         positive_address(self.owner_wallet_identity, "owner identity")?;
-        if self.revocation_shard == 0 || self.expiry == 0 || self.credit_shared_key == U256::ZERO {
-            return Err(ModelError::Invalid("credit shard, expiry or shared key"));
+        if self.grant_id == 0 || self.expiry == 0 || self.credit_shared_key == U256::ZERO {
+            return Err(ModelError::Invalid("credit grant ID, expiry or shared key"));
         }
         field(self.nonce, "credit nonce")?;
         field(self.credit_shared_key, "credit shared key")?;
@@ -109,8 +107,7 @@ impl CreditState {
             self.spender_wallet_identity,
             self.owner_wallet_identity,
             self.token_address,
-            U256::from(self.revocation_shard),
-            U256::from(self.revocation_slot),
+            U256::from(self.grant_id),
             self.nonce,
             U256::from(self.expiry),
             compute_credit_shared_key_hash(self.credit_shared_key)?,

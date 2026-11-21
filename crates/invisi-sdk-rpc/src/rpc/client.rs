@@ -596,57 +596,35 @@ impl<T: RpcTransport, C: CanonicalChain> ProtocolRpcClient<T, C> {
             membership,
         }))
     }
-    pub fn get_credit_allocation(
+    pub fn get_credit_status(
         &self,
         owner: Address,
         token: Address,
+        grant_id: u128,
         block: &CanonicalBlock,
-    ) -> Result<CreditAllocation> {
-        if owner == Address::ZERO || token == Address::ZERO {
-            return Err(Error::Invalid("nonzero owner and token required"));
+    ) -> Result<CreditStatus> {
+        if owner == Address::ZERO || token == Address::ZERO || grant_id == 0 {
+            return Err(Error::Invalid("invalid Credit scope or grant ID"));
         }
         self.read_at(block)?;
         let v = self.rpc.call(
-            "invisi_getCreditAllocation",
-            json!([owner, token, block.number]),
+            "invisi_getCreditStatus",
+            json!([owner, token, grant_id.to_string(), block.number]),
         )?;
         if CanonicalBlock::parse(&v["block"])? != *block {
-            return Err(Error::Invalid("allocation block mismatch"));
+            return Err(Error::Invalid("Credit status block mismatch"));
         }
-        let shard = uint(&v["shard"], 64)?;
-        if shard == 0 {
-            return Err(Error::Invalid("zero Credit shard"));
+        let status = v["status"]
+            .as_u64()
+            .ok_or(Error::Invalid("numeric Credit status required"))?;
+        if status > 2 {
+            return Err(Error::Invalid("invalid Credit status"));
         }
-        let slot = uint(&v["slot"], 16)? as u16;
         self.canonical(block)?;
-        Ok(CreditAllocation {
+        Ok(CreditStatus {
             block: block.clone(),
-            shard,
-            slot,
+            status: status as u8,
         })
-    }
-    pub fn get_credit_revocation_bitmap(
-        &self,
-        owner: Address,
-        token: Address,
-        shard: u64,
-        word: u8,
-        block: &CanonicalBlock,
-    ) -> Result<U256> {
-        if owner == Address::ZERO || token == Address::ZERO || shard == 0 {
-            return Err(Error::Invalid("invalid grant location"));
-        }
-        self.read_at(block)?;
-        let v = self.rpc.call(
-            "invisi_getCreditRevocationBitmap",
-            json!([owner, token, shard.to_string(), word, block.number]),
-        )?;
-        if CanonicalBlock::parse(&v["block"])? != *block {
-            return Err(Error::Invalid("revocation block mismatch"));
-        }
-        let bitmap = decimal(&v["bitmap"])?;
-        self.canonical(block)?;
-        Ok(bitmap)
     }
     fn consumption(&self, nullifier: B256, block: &CanonicalBlock, credit: bool) -> Result<bool> {
         if nullifier == B256::ZERO {
@@ -682,10 +660,9 @@ pub struct IndexedLookup<A> {
     pub membership: Membership,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CreditAllocation {
+pub struct CreditStatus {
     pub block: CanonicalBlock,
-    pub shard: u64,
-    pub slot: u16,
+    pub status: u8,
 }
 impl<T: RpcTransport, C: CanonicalChain> ProtocolRpcClient<T, C> {
     pub fn get_transaction_note_updates(

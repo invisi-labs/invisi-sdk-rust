@@ -132,8 +132,7 @@ pub struct CreditReceipt {
     pub credit_id: String,
     pub credit_status: String,
     pub owner: String,
-    pub revocation_shard: String,
-    pub revocation_slot: u16,
+    pub grant_id: String,
     pub verification_block: VerificationBlock,
     pub expires_at: String,
 }

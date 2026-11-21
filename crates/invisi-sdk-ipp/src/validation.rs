@@ -467,8 +467,7 @@ fn receipt(v: &Value, credit: bool) -> Result<()> {
             "creditId",
             "creditStatus",
             "owner",
-            "revocationShard",
-            "revocationSlot",
+            "grantId",
             "verificationBlock",
             "expiresAt",
         ]);
@@ -512,8 +511,7 @@ fn receipt(v: &Value, credit: bool) -> Result<()> {
             )?;
         }
         hex(&v["owner"], 20, true)?;
-        uint(&v["revocationShard"], 64, false)?;
-        number(&v["revocationSlot"], 65535)?;
+        uint(&v["grantId"], 128, true)?;
         timestamp(&v["expiresAt"])?;
         let b = &v["verificationBlock"];
         object(b, &["number", "hash", "timestamp"], &[])?;
@@ -608,7 +606,7 @@ pub fn parse_credential(v: Value, request: Option<&crate::Request>) -> Result<cr
         p,
         &["type", "transactionHash", "commitment"],
         if m == "credit" {
-            &["owner", "revocationShard", "revocationSlot"]
+            &["owner", "grantId"]
         } else {
             &[]
         },
@@ -626,11 +624,8 @@ pub fn parse_credential(v: Value, request: Option<&crate::Request>) -> Result<cr
     if let Some(x) = p.get("owner") {
         hex(x, 20, true)?;
     }
-    if let Some(x) = p.get("revocationShard") {
-        uint(x, 64, false)?;
-    }
-    if let Some(x) = p.get("revocationSlot") {
-        number(x, 65535)?;
+    if let Some(x) = p.get("grantId") {
+        uint(x, 128, true)?;
     }
     if let Some(r) = request {
         for k in ["mode", "sessionId", "requestId", "method"] {

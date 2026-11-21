@@ -2,7 +2,7 @@ use alloy_primitives::{keccak256, Address, B256, U256};
 use alloy_sol_types::{SolCall, SolEvent};
 use invisi_sdk_rpc::{
     address::{ReceivingAddress, ReceivingKeys},
-    protocol::{IAddressRegistry, InvisiAddressRegistry},
+    protocol::InvisiAddressRegistry,
     registration::{RegistrationOperation, RegistrationReader, RegistrationStatus},
     rpc::{
         CanonicalBlock, CanonicalChain, CanonicalHead, CanonicalLog, CanonicalReceipt,

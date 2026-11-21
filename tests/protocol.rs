@@ -9,16 +9,9 @@ fn current_typescript_go_calldata_roundtrips_without_abi_drift() {
     for (name, fixture) in vectors["fixtures"].as_object().unwrap() {
         if let Some(data) = fixture["calldata"].as_str() {
             let bytes = hex::decode(data.trim_start_matches("0x")).unwrap();
-            let encoded = if let Ok(call) = InvisiCore::InvisiCoreCalls::abi_decode_validate(&bytes)
-            {
-                call.abi_encode()
-            } else {
-                invisi_sdk::protocol::LegacyCreditCreation::createCreditCall::abi_decode_validate(
-                    &bytes,
-                )
+            let encoded = InvisiCore::InvisiCoreCalls::abi_decode_validate(&bytes)
                 .unwrap_or_else(|error| panic!("{name}: {error}"))
-                .abi_encode()
-            };
+                .abi_encode();
             assert_eq!(encoded, bytes, "{name}");
             count += 1;
         }

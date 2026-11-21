@@ -39,16 +39,14 @@ impl PreparedCredit {
             CreditPlan::Revoke {
                 owner,
                 token,
-                shard,
-                slot,
+                grant_id,
                 deadline,
                 fee,
                 ..
             } => contract.call(&InvisiCore::revokeCreditCall {
                 token: *token,
                 owner: *owner,
-                shard: *shard,
-                slot: *slot,
+                grantId: *grant_id,
                 deadline: U256::from(*deadline),
                 feeRecipient: fee.recipient,
                 feeAmount: fee.amount,
@@ -177,12 +175,11 @@ impl PreparedCredit {
                         f,
                         payload.clone(),
                     )?,
-                CreditRepriceTemplate::Revoke(token, shard, slot, deadline) => runtime
+                CreditRepriceTemplate::Revoke(token, grant_id, deadline) => runtime
                     .prepare_revoke_credit_explicit(
                         self.owner_address,
                         *token,
-                        *shard,
-                        *slot,
+                        *grant_id,
                         *deadline,
                         f,
                     )?,

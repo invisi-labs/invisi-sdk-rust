@@ -144,7 +144,7 @@ cargo run -p invisi-sdk-examples --features sqlite --bin revoke-credit-session -
 | Create | `SPENDER_ADDRESS`, `EXPIRES_AT`, `AVAILABLE_CREDIT`, optional `UNLIMITED` | Fresh allocated grant; no input grant |
 | Draw | `DEBIT_PER_GRANT`, `RECIPIENT_ADDRESS` | Two current unreserved spender grants from distinct owners, each covering the debit within expiry and policy limits |
 | Update | `INCREASE_AVAILABLE_CREDIT`, optional `CREDIT_INDEX` (default zero) | Current unreserved owner grant; visible typed changes increase remaining authority |
-| Revoke | Optional `CREDIT_INDEX` (default zero) | Current unreserved owner grant; derives public shard/slot from inventory |
+| Revoke | Optional `CREDIT_INDEX` (default zero) | Current unreserved owner grant; derives public grant ID from inventory |
 
 The managed draw is a merchant batching example: run creation from two different owner wallets granting the same spender, then switch to that spender’s wallet/database. `DEBIT_PER_GRANT` is the amount charged to **each** of two payers; one recipient Note receives `2 × DEBIT_PER_GRANT` with zero fee. Selection checks current usage limits and expiry through `DEADLINE`; SDK preparation rechecks the selected grants. The stateless draw continues to interpret `AMOUNT` as its total.
 
@@ -185,7 +185,7 @@ let response = native_host.execute(&request)?;
 let wallet = Wallet::from_response(&request, &response)?;
 let receiving_address = wallet.address()?;
 assert_eq!(Wallet::from_address(&receiving_address)?, wallet);
-let revocation = invisi.prepare_revoke_credit_explicit(owner_address, token, shard, slot, deadline, Fee::default())?;
+let revocation = invisi.prepare_revoke_credit_explicit(owner_address, token, grant_id, deadline, Fee::default())?;
 ```
 
 `transaction-confirmation` (`07-broadcaster/confirmation.rs`) reads `CHAIN_RPC_URL` and a transaction hash argument to report independently authenticated native inclusion/finality. It performs no submission, resend, or wallet mutation.

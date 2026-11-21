@@ -457,14 +457,13 @@ impl invisi_sdk::sdk::ChainState for PreparationChain {
     ) -> std::result::Result<bool, String> {
         panic!("pure funding has no nullifier reads")
     }
-    fn credit_revoked(
+    fn credit_status(
         &self,
         _: Address,
         _: Address,
-        _: u64,
-        _: u16,
+        _: u128,
         _: &invisi_sdk_protocol::interfaces::CanonicalBlock,
-    ) -> std::result::Result<bool, String> {
+    ) -> std::result::Result<u8, String> {
         panic!("pure funding has no credit reads")
     }
     fn token_balance_allowance(
@@ -474,14 +473,6 @@ impl invisi_sdk::sdk::ChainState for PreparationChain {
         _: &invisi_sdk_protocol::interfaces::CanonicalBlock,
     ) -> std::result::Result<(U256, U256), String> {
         Ok((U256::ZERO, U256::ZERO))
-    }
-    fn credit_allocation(
-        &self,
-        _: Address,
-        _: Address,
-        _: &invisi_sdk_protocol::interfaces::CanonicalBlock,
-    ) -> std::result::Result<(u64, u16), String> {
-        panic!("pure funding has no allocation reads")
     }
 }
 // Only the cryptographic backend is a test double. SDK witness/statement/proof binding is real.

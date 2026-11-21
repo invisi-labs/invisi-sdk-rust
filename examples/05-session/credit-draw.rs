@@ -87,7 +87,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut selections = Vec::new();
         for (key, credit) in inventory {
             let grant = &credit.delivery.note;
-            if credit.consumed
+            if credit.status != 1
+                || credit.consumed
                 || credit.revoked
                 || credit.reserved_by.is_some()
                 || grant.expiry <= timestamp

@@ -138,6 +138,8 @@ fn pinned_typescript_assets_are_byte_exact() {
 #[test]
 fn invalid_shapes_and_unsupported_execution_are_distinct() {
     for query in [
+        json!({"kind":"revoke-credit","bitmapWord":"empty"}),
+        json!({"kind":"create-credit","creationAbi":"initial-payment"}),
         json!({"kind":"shield","noteOutputs":0}),
         json!({"kind":"shield","noteOutputs":11}),
         json!({"kind":"transact","noteInputs":1,"noteOutputs":1,"capacity":3}),

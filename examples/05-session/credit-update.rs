@@ -81,7 +81,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .credit_inventory(Some(token), Some(invisi_sdk::delivery::CreditRole::Owner))?
             .into_iter()
             .filter(|(_, credit)| {
-                !credit.consumed && !credit.revoked && credit.reserved_by.is_none()
+                credit.status == 1
+                    && !credit.consumed
+                    && !credit.revoked
+                    && credit.reserved_by.is_none()
             })
             .nth(index)
             .ok_or("no current unreserved owner Credit at CREDIT_INDEX")?;

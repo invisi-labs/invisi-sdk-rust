@@ -79,6 +79,7 @@ pub fn prepare_invisi_request_with<T>(
             .parse::<U256>()
             .map_err(|_| Error::InvalidMessage)?;
         credit(sdk::CreateCreditRequest {
+            grant_id: None,
             token,
             credit_shared_key: Some(key),
             initial_payment: if let Some(payment) = d.get("initialPayment") {

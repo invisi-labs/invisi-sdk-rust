@@ -111,36 +111,18 @@ impl WalletSession {
                 (
                     sdk::word_address(n.owner_wallet_identity)?,
                     token,
-                    n.revocation_shard,
-                    n.revocation_slot,
+                    n.grant_id,
                 ),
-                credit.revoked,
+                credit.status,
             );
-        }
-        for token in tokens {
-            let cached = previous.and_then(|p| {
-                p.facts
-                    .allocations
-                    .iter()
-                    .find(|(o, t, _, _)| *o == self.scope.owner_address && *t == token)
-                    .map(|(_, _, s, l)| (*s, *l))
-            });
-            let (shard, slot) = cached.map(Ok).unwrap_or_else(|| {
-                chain.credit_allocation(self.scope.owner_address, token, block)
-            })?;
-            facts
-                .allocations
-                .push((self.scope.owner_address, token, shard, slot));
         }
         for (tree, root) in roots {
             facts.roots.push((tree, root, true));
         }
         facts.spent.extend(nullifiers);
-        facts.revocations.extend(
-            revocations
-                .into_iter()
-                .map(|((o, t, s, l), v)| (o, t, s, l, v)),
-        );
+        facts
+            .credit_statuses
+            .extend(revocations.into_iter().map(|((o, t, id), v)| (o, t, id, v)));
         chain.canonical(block)?;
         if chain.context() != self.scope.context {
             return Err("preparation chain identity changed".into());

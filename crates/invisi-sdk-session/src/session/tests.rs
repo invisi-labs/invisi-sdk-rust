@@ -52,7 +52,7 @@ struct Chain {
     offline: AtomicBool,
     preparation_enabled: AtomicBool,
     nonce: std::sync::atomic::AtomicU64,
-    allocation_slot: std::sync::atomic::AtomicU64,
+    grant_two_status: std::sync::atomic::AtomicU64,
     revoked: AtomicBool,
     insufficient_funds: AtomicBool,
     nonce_hook: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
@@ -121,17 +121,16 @@ impl ChainState for Chain {
         self.online()?;
         Ok(self.spent.lock().unwrap().contains(&n))
     }
-    fn credit_revoked(
-        &self,
-        _: Address,
-        _: Address,
-        _: u64,
-        _: u16,
-        _: &CanonicalBlock,
-    ) -> Result<bool> {
+    fn credit_status(&self, _: Address, _: Address, id: u128, _: &CanonicalBlock) -> Result<u8> {
         self.revocation_reads.fetch_add(1, Ordering::SeqCst);
         self.online()?;
-        Ok(self.revoked.load(Ordering::SeqCst))
+        Ok(if self.revoked.load(Ordering::SeqCst) {
+            2
+        } else if id == 1 {
+            1
+        } else {
+            self.grant_two_status.load(Ordering::SeqCst) as u8
+        })
     }
     fn token_balance_allowance(
         &self,
@@ -155,10 +154,6 @@ impl ChainState for Chain {
             hook();
         }
         Ok(U256::from(self.nonce.load(Ordering::SeqCst)))
-    }
-    fn credit_allocation(&self, _: Address, _: Address, _: &CanonicalBlock) -> Result<(u64, u16)> {
-        self.online()?;
-        Ok((1, self.allocation_slot.load(Ordering::SeqCst) as u16))
     }
 }
 struct Source {
@@ -825,8 +820,7 @@ fn credit_inventory_is_separate_and_canonical_draw_recovers_owned_successor_with
             token_address: h.note.token_address,
             spender_wallet_identity: sdk::address_word(bob.owner_address()),
             owner_wallet_identity: sdk::address_word(alice.owner_address()),
-            revocation_shard: 1,
-            revocation_slot: 0,
+            grant_id: 1,
             nonce: U256::from(74),
             expiry: 2_100_000_000,
             credit_shared_key: U256::from(75),
@@ -875,8 +869,7 @@ fn credit_inventory_is_separate_and_canonical_draw_recovers_owned_successor_with
         token: sdk::word_address(h.note.token_address).unwrap(),
         owner: alice.owner_address(),
         outputTreeId: U256::from(2),
-        revocationShard: 1,
-        revocationSlot: 0,
+        grantId: 1,
         creditCommitment: commitment,
         leafIndex: 0,
         deliveries: vec![
@@ -966,8 +959,7 @@ fn credit_inventory_is_separate_and_canonical_draw_recovers_owned_successor_with
         }],
         grantRefs: vec![abi::CreditGrantRef {
             payerIndex: U256::ZERO,
-            shard: 1,
-            slot: 0,
+            grantId: 1,
         }],
         nullifiers: vec![sdk::field_word(transition.nullifier)],
         creditCommitments: vec![credit_commitment],
@@ -1259,8 +1251,7 @@ fn credit_relay_context_survives_encrypted_restart_and_fences_uncertain_submissi
             token_address: h.note.token_address,
             spender_wallet_identity: sdk::address_word(bob.owner_address()),
             owner_wallet_identity: sdk::address_word(alice.owner_address()),
-            revocation_shard: 1,
-            revocation_slot: 0,
+            grant_id: 2,
             nonce: U256::from(74),
             expiry: 2100000000,
             credit_shared_key: U256::from(75),
@@ -1677,8 +1668,7 @@ fn managed_note_and_credit_estimate_without_externalizing() {
                     token_address: h.note.token_address,
                     spender_wallet_identity: sdk::address_word(wallet(2).owner_address()),
                     owner_wallet_identity: sdk::address_word(caller),
-                    revocation_shard: 1,
-                    revocation_slot: 0,
+                    grant_id: 2,
                     nonce: U256::from(74),
                     expiry: 2100000000,
                     credit_shared_key: U256::from(75),
@@ -2019,8 +2009,7 @@ fn reverse_credit_discovery_case(same_wallet: bool, benchmark: bool) {
             token_address: h.note.token_address,
             spender_wallet_identity: sdk::address_word(bob.owner_address()),
             owner_wallet_identity: sdk::address_word(alice.owner_address()),
-            revocation_shard: 1,
-            revocation_slot: 0,
+            grant_id: 1,
             nonce: U256::from(74),
             expiry: 2_100_000_000,
             credit_shared_key: U256::from(75),
@@ -2069,8 +2058,7 @@ fn reverse_credit_discovery_case(same_wallet: bool, benchmark: bool) {
         token: sdk::word_address(h.note.token_address).unwrap(),
         owner: alice.owner_address(),
         outputTreeId: U256::from(2),
-        revocationShard: 1,
-        revocationSlot: 0,
+        grantId: 1,
         creditCommitment: commitment,
         leafIndex: 0,
         deliveries: vec![
@@ -2159,8 +2147,7 @@ fn reverse_credit_discovery_case(same_wallet: bool, benchmark: bool) {
         }],
         grantRefs: vec![abi::CreditGrantRef {
             payerIndex: U256::ZERO,
-            shard: 1,
-            slot: 0,
+            grantId: 1,
         }],
         nullifiers: vec![sdk::field_word(transition.nullifier)],
         creditCommitments: vec![credit_commitment],
@@ -3598,7 +3585,7 @@ fn encrypted_reopen_prepares_all_credit_operations_offline_and_live_gate_rejects
     for kind in ["create", "update", "draw", "revoke"] {
         let h = harness();
         h.chain.preparation_enabled.store(true, Ordering::SeqCst);
-        h.chain.allocation_slot.store(1, Ordering::SeqCst);
+        h.chain.grant_two_status.store(0, Ordering::SeqCst);
         let records = Arc::new(MemoryAtomicRecords::default());
         let session = offline_session(&h, records.clone());
         let token = sdk::word_address(h.note.token_address).unwrap();
@@ -3609,8 +3596,7 @@ fn encrypted_reopen_prepares_all_credit_operations_offline_and_live_gate_rejects
                 token_address: h.note.token_address,
                 owner_wallet_identity: identity,
                 spender_wallet_identity: identity,
-                revocation_shard: 1,
-                revocation_slot: 0,
+                grant_id: 1,
                 nonce: U256::from(74),
                 expiry: 2_100_000_000,
                 credit_shared_key: U256::from(75),
@@ -3643,6 +3629,7 @@ fn encrypted_reopen_prepares_all_credit_operations_offline_and_live_gate_rejects
                     transaction_hash: B256::repeat_byte(9),
                     role,
                     consumed: false,
+                    status: 1,
                     revoked: false,
                     reserved_by: None,
                 },
@@ -3654,13 +3641,24 @@ fn encrypted_reopen_prepares_all_credit_operations_offline_and_live_gate_rejects
             .unwrap()
             .decrypt(&AppDecryptor::default())
             .unwrap();
+        if kind == "create" {
+            let mut state = session.snapshot().unwrap();
+            state
+                .preparation_snapshot
+                .as_mut()
+                .unwrap()
+                .facts
+                .credit_statuses
+                .push((session.wallet.owner_address(), token, 2, 0));
+            session.commit(state).unwrap();
+        }
         drop(session);
         h.chain.offline.store(true, Ordering::SeqCst);
         let session = offline_session(&h, records.clone());
         let operation = match kind {
             "create" => {
                 let mut created = delivery.clone();
-                created.note.revocation_slot = 1;
+                created.note.grant_id = 2;
                 created.note.nonce += U256::from(1);
                 session
                     .prepare_create_credit_explicit(created, 2_000_000_100, sdk::Fee::default())
@@ -3687,7 +3685,7 @@ fn encrypted_reopen_prepares_all_credit_operations_offline_and_live_gate_rejects
                 )
                 .unwrap(),
             _ => session
-                .prepare_revoke_credit_explicit(token, 1, 0, 2_000_000_100, sdk::Fee::default())
+                .prepare_revoke_credit_explicit(token, 1, 2_000_000_100, sdk::Fee::default())
                 .unwrap(),
         };
         let operation = if kind == "revoke" {
@@ -3726,12 +3724,12 @@ fn encrypted_reopen_prepares_all_credit_operations_offline_and_live_gate_rejects
             .contains("reorg"));
         h.chain.reorg.store(false, Ordering::SeqCst);
         if kind == "create" {
-            h.chain.allocation_slot.store(2, Ordering::SeqCst);
+            h.chain.grant_two_status.store(2, Ordering::SeqCst);
             assert!(operation
                 .validate_submission(session.wallet.owner_address())
                 .unwrap_err()
-                .contains("allocation"));
-            h.chain.allocation_slot.store(1, Ordering::SeqCst);
+                .contains("grant ID"));
+            h.chain.grant_two_status.store(0, Ordering::SeqCst);
         } else {
             h.chain.revoked.store(true, Ordering::SeqCst);
             let error = operation
@@ -3744,12 +3742,8 @@ fn encrypted_reopen_prepares_all_credit_operations_offline_and_live_gate_rejects
             h.chain.revoked.store(false, Ordering::SeqCst);
         }
         if kind == "revoke" {
-            h.chain.allocation_slot.store(0, Ordering::SeqCst);
-            assert!(operation
-                .validate_submission(session.wallet.owner_address())
-                .unwrap_err()
-                .contains("unallocated"));
-            h.chain.allocation_slot.store(1, Ordering::SeqCst);
+            // A revocation may target an unknown ID: pre-revocation permanently disables it.
+            h.chain.grant_two_status.store(0, Ordering::SeqCst);
         }
         if kind == "draw" || kind == "update" {
             h.chain
@@ -4069,6 +4063,7 @@ fn archived_history_keeps_its_captured_public_generation() {
 fn session_preparation_preserves_structured_recipient_and_selection_errors() {
     let h = synced();
     let request = sdk::CreateCreditRequest {
+        grant_id: None,
         credit_shared_key: None,
         initial_payment: None,
         token: sdk::word_address(h.note.token_address).unwrap(),

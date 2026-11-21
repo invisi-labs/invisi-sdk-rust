@@ -100,12 +100,12 @@ fn matches(row: &Value, shape: &Map<String, Value>) -> bool {
 /// Local receipt-calibrated preview; this is not a transaction gas limit or RPC simulation.
 pub fn estimate_gas(q: &Map<String, Value>) -> ModelResult<GasEstimate> {
     use serde_json::json;
+    if q.contains_key("creationAbi") || q.contains_key("bitmapWord") {
+        return Err(ModelError::Invalid("retired gas shape field"));
+    }
     let m = model();
     let kind = q.get("kind").and_then(Value::as_str).unwrap_or("");
-    if kind == "create-credit-initial-payment"
-        || kind == "create-credit"
-            && q.get("creationAbi").and_then(Value::as_str) == Some("initial-payment")
-    {
+    if kind == "create-credit-initial-payment" || kind == "create-credit" {
         let data: Value = serde_json::from_str(include_str!(
             "../assets/gas/initial-payment-measurements.json"
         ))
@@ -119,7 +119,7 @@ pub fn estimate_gas(q: &Map<String, Value>) -> ModelResult<GasEstimate> {
             .ok_or_else(invalid)?;
         let combined = kind == "create-credit-initial-payment";
         let extra = count(q, "extraDeliveryBytes", Some(0))?
-            + 2 * count(q, "creditCiphertextBytes", Some(485))?.saturating_sub(485)
+            + 2 * count(q, "creditCiphertextBytes", Some(491))?.saturating_sub(491)
             + if combined {
                 count(q, "noteCiphertextBytes", Some(160))?.saturating_sub(160)
             } else {
@@ -232,15 +232,12 @@ pub fn estimate_gas(q: &Map<String, Value>) -> ModelResult<GasEstimate> {
     } else {
         if kind == "revoke-credit" {
             shape["authorization"] = q.get("authorization").cloned().unwrap_or(json!("unknown"));
-            shape["bitmapWord"] = q.get("bitmapWord").cloned().unwrap_or(json!("empty"));
         }
         if let Some(row) = rows.iter().find(|r| matches(r, shape.as_object().unwrap())) {
             gas = row["gasUnits"].as_f64().unwrap();
         } else if kind == "revoke-credit" {
             let auth = shape["authorization"].as_str().ok_or_else(invalid)?;
-            if !["direct", "eoa", "erc1271", "unknown"].contains(&auth)
-                || !["empty", "nonempty"].contains(&shape["bitmapWord"].as_str().unwrap_or(""))
-            {
+            if !["direct", "eoa", "erc1271", "unknown"].contains(&auth) {
                 return Err(invalid());
             }
             let row = rows
@@ -274,7 +271,7 @@ pub fn estimate_gas(q: &Map<String, Value>) -> ModelResult<GasEstimate> {
     };
     let extra_bytes = count(q, "extraDeliveryBytes", Some(0))? as f64
         + notes as f64 * count(q, "noteCiphertextBytes", Some(160))?.saturating_sub(160) as f64
-        + credits as f64 * count(q, "creditCiphertextBytes", Some(485))?.saturating_sub(485) as f64
+        + credits as f64 * count(q, "creditCiphertextBytes", Some(491))?.saturating_sub(491) as f64
         + (notes + credits) as f64 * count(q, "clueBytes", Some(68))?.saturating_sub(68) as f64;
     let extra = extra_bytes * 32.0
         + if flag(q, "permit", false) {

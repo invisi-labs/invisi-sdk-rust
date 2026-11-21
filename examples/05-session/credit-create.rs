@@ -74,20 +74,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         session.resume(&id, Some(&prover))?
     } else {
-        // Allocate a fresh public revocation reference before freezing the grant and both role
-        // deliveries.
+        // Select a random grant ID once before freezing both role deliveries.
         let wallet = session.wallet();
         let spender = Wallet::from_address(&env::var("SPENDER_ADDRESS")?)?;
-        let anchor = chain.snapshot()?;
-        let (shard, slot) = chain.credit_allocation(wallet.owner_address(), token, &anchor)?;
+        let grant_id = sdk::random_grant_id();
         let state = invisi_sdk::delivery::CreditDeliveryState {
             note: invisi_sdk::credit::CreditState {
                 context: chain.context(),
                 token_address: sdk::address_word(token),
                 owner_wallet_identity: sdk::address_word(wallet.owner_address()),
                 spender_wallet_identity: sdk::address_word(spender.owner_address()),
-                revocation_shard: shard,
-                revocation_slot: slot,
+                grant_id,
                 nonce: invisi_sdk::note::generate_nonce(),
                 expiry: env::var("EXPIRES_AT")?.parse()?,
                 credit_shared_key: invisi_sdk::note::generate_credit_shared_key(),

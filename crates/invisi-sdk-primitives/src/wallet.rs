@@ -132,8 +132,18 @@ pub fn open(key: &[u8], request: &Value) -> Result<Zeroizing<Vec<u8>>, String> {
     let role = text(request, "role")?;
     let (header, role_byte, domain, minimum) = match role {
         "funds" => (1, 0, b"Invisi.NoteDelivery.v1".as_slice(), 160),
-        "owner" => (130, 1, b"Invisi.CreditDelivery.v2".as_slice(), 485),
-        "spender" => (130, 2, b"Invisi.CreditDelivery.v2".as_slice(), 485),
+        "owner" => (
+            132,
+            1,
+            b"Invisi.CreditDelivery.v4.GrantId.Uint128".as_slice(),
+            491,
+        ),
+        "spender" => (
+            132,
+            2,
+            b"Invisi.CreditDelivery.v4.GrantId.Uint128".as_slice(),
+            491,
+        ),
         _ => return Err("PRIVACY_INVALID_ROLE".into()),
     };
     if data.len() < minimum || data.len() > 4096 || data[0] != header {
@@ -174,8 +184,8 @@ pub fn open(key: &[u8], request: &Value) -> Result<Zeroizing<Vec<u8>>, String> {
     );
     let (identity_start, payload_offset) = match role {
         "funds" => (0, 80),
-        "owner" => (32, 405),
-        _ => (0, 405),
+        "owner" => (32, crate::delivery::CREDIT_PAYLOAD_LENGTH_OFFSET),
+        _ => (0, crate::delivery::CREDIT_PAYLOAD_LENGTH_OFFSET),
     };
     if plain.len() < payload_offset + 2 {
         return Err("PRIVACY_INVALID_PAYLOAD".into());
@@ -189,7 +199,11 @@ pub fn open(key: &[u8], request: &Value) -> Result<Zeroizing<Vec<u8>>, String> {
         return Err("PRIVACY_INVALID_PAYLOAD".into());
     }
     if role != "funds" {
-        let start = if role == "owner" { 275 } else { 340 };
+        let start = if role == "owner" {
+            crate::delivery::CREDIT_OWNER_KEYS_OFFSET
+        } else {
+            crate::delivery::CREDIT_SPENDER_KEYS_OFFSET
+        };
         if plain[start..start + 33] != public(&*viewing, true)? {
             return Err("PRIVACY_RECIPIENT_MISMATCH".into());
         }
@@ -281,7 +295,11 @@ pub fn authorization_digest(request: &Value) -> Result<[u8; 32], String> {
         keccak256(
             format!(
                 "Invisi.{name}.{}",
-                if operation == "transact" { "v1" } else { "v4" }
+                if operation == "transact" {
+                    "v1"
+                } else {
+                    "GrantId.Uint128.v1"
+                }
             )
             .as_bytes(),
         )

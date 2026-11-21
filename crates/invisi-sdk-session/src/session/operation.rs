@@ -829,19 +829,24 @@ impl WalletSession {
                 grants.insert((
                     sdk::word_address(n.owner_wallet_identity)?,
                     sdk::word_address(n.token_address)?,
-                    n.revocation_shard,
-                    n.revocation_slot,
+                    n.grant_id,
                 ));
             }
-            // Journals retain only their own input facts, rather than copying the whole inventory.
+            if let ManagedPrepared::Credit(credit) = &prepared {
+                for successor in credit.successor_states() {
+                    let note = &successor.note;
+                    grants.insert((
+                        sdk::word_address(note.owner_wallet_identity)?,
+                        sdk::word_address(note.token_address)?,
+                        note.grant_id,
+                    ));
+                }
+            }
+            // Retain input and created-grant facts required to restore this operation.
             cached.facts.roots.retain(|(t, _, _)| trees.contains(t));
             cached.facts.spent.retain(|(n, _)| nullifiers.contains(n));
-            cached
-                .facts
-                .allocations
-                .retain(|(_, t, _, _)| *t == snapshot.token());
-            cached.facts.revocations.retain(|(o, t, s, l, _)| {
-                grants.contains(&(*o, *t, *s, *l))
+            cached.facts.credit_statuses.retain(|(o, t, id, _)| {
+                grants.contains(&(*o, *t, *id))
                     || kind == "revoke-credit"
                         && *o == self.scope.owner_address
                         && *t == snapshot.token()
@@ -999,6 +1004,7 @@ impl WalletSession {
         let credit = state.credits.get(key).ok_or("Credit input not found")?;
         if credit.role != CreditRole::Owner
             || credit.consumed
+            || credit.status != 1
             || credit.revoked
             || credit.reserved_by.is_some()
         {
@@ -1042,6 +1048,7 @@ impl WalletSession {
             let credit = state.credits.get(key).ok_or("Credit input not found")?;
             if credit.role != CreditRole::Spender
                 || credit.consumed
+                || credit.status != 1
                 || credit.revoked
                 || credit.reserved_by.is_some()
             {
@@ -1065,19 +1072,17 @@ impl WalletSession {
     pub fn prepare_revoke_credit_explicit(
         &self,
         token: Address,
-        shard: u64,
-        slot: u16,
+        grant_id: u128,
         deadline: u64,
         fee: sdk::Fee,
     ) -> sdk::PreparationResult<Operation> {
-        self.prepare_revoke_credit_explicit_internal(token, shard, slot, deadline, fee)
+        self.prepare_revoke_credit_explicit_internal(token, grant_id, deadline, fee)
             .map_err(|error| error.with_operation("prepare_revoke_credit"))
     }
     fn prepare_revoke_credit_explicit_internal(
         &self,
         token: Address,
-        shard: u64,
-        slot: u16,
+        grant_id: u128,
         deadline: u64,
         fee: sdk::Fee,
     ) -> sdk::PreparationResult<Operation> {
@@ -1086,8 +1091,7 @@ impl WalletSession {
                 invisi.prepare_revoke_credit_explicit(
                     self.wallet.owner_address(),
                     token,
-                    shard,
-                    slot,
+                    grant_id,
                     deadline,
                     fee.clone(),
                 )?,
@@ -1562,7 +1566,7 @@ fn reserve(state: &mut WalletState, input: &str, id: &str) -> Result<()> {
         if matching.is_empty()
             || matching
                 .iter()
-                .any(|v| v.consumed || v.revoked || v.reserved_by.is_some())
+                .any(|v| v.consumed || v.status != 1 || v.revoked || v.reserved_by.is_some())
         {
             return Err("Credit input already consumed, revoked or reserved".into());
         }
@@ -1577,9 +1581,13 @@ fn reserve(state: &mut WalletState, input: &str, id: &str) -> Result<()> {
 impl WalletSession {
     pub fn prepare_create_credit(
         &self,
-        request: sdk::CreateCreditRequest,
+        mut request: sdk::CreateCreditRequest,
         resolver: Option<&dyn sdk::ReceivingKeyResolver>,
     ) -> sdk::PreparationResult<Operation> {
+        request.grant_id.get_or_insert_with(sdk::random_grant_id);
+        request
+            .credit_shared_key
+            .get_or_insert_with(crate::note::generate_credit_shared_key);
         self.prepare_cached(|invisi| {
             invisi
                 .prepare_create_credit(&self.wallet, request.clone(), resolver)

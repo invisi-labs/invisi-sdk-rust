@@ -1178,6 +1178,17 @@ impl PendingWalletRefresh {
         if !self.offline {
             session.invisi.chain.canonical(&observation)?;
             session.invisi.chain.canonical(&self.anchor)?;
+            if !self.options.reset {
+                if let Some(previous) = &self.base.observed_through {
+                    // An imported/reconciled observation may lie beyond public
+                    // coverage. Recheck it after the read window, even when staging
+                    // validated it before a later fork. Exact end-fenced anchors
+                    // already carry the same canonical evidence.
+                    if previous != &observation && previous != &self.anchor {
+                        session.invisi.chain.canonical(previous)?;
+                    }
+                }
+            }
             if session.invisi.chain.context() != session.scope.context {
                 return Err("refresh chain identity changed".into());
             }

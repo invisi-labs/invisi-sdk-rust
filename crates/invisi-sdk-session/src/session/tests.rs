@@ -61,6 +61,7 @@ struct Chain {
     gas_forbidden: AtomicBool,
     height: std::sync::atomic::AtomicU64,
     reorg: AtomicBool,
+    fork_from: std::sync::atomic::AtomicU64,
     source_anchors: AtomicBool,
     spent: Mutex<BTreeSet<B256>>,
     nullifier_reads: std::sync::atomic::AtomicUsize,
@@ -70,6 +71,17 @@ struct Chain {
     roots: Mutex<BTreeSet<B256>>,
 }
 impl Chain {
+    fn current_block(&self, number: u64) -> CanonicalBlock {
+        let mut value = block(number);
+        let fork = self.fork_from.load(Ordering::SeqCst);
+        if fork != 0 && number >= fork {
+            value.hash = B256::with_last_byte((number as u8).wrapping_add(70));
+            if number > fork {
+                value.parent_hash = B256::with_last_byte((number as u8).wrapping_add(69));
+            }
+        }
+        value
+    }
     fn online(&self) -> Result<()> {
         if self.offline.load(Ordering::SeqCst) {
             Err("offline: live chain access forbidden".into())
@@ -97,11 +109,11 @@ impl ChainState for Chain {
             "estimator read chain"
         );
         self.online()?;
-        Ok(block(self.height.load(Ordering::SeqCst).max(10)))
+        Ok(self.current_block(self.height.load(Ordering::SeqCst).max(10)))
     }
     fn canonical(&self, b: &CanonicalBlock) -> Result<()> {
         self.online()?;
-        let expected = block(b.number);
+        let expected = self.current_block(b.number);
         if self.reorg.load(Ordering::SeqCst) || *b != expected {
             return Err("chain reorg".into());
         }
@@ -5270,4 +5282,76 @@ fn online_refresh_reauthenticates_same_block_cached_root_acceptance() {
         forged
     );
     assert_eq!(h.source.membership_reads.load(Ordering::SeqCst), reads + 1);
+}
+
+fn import_private_note_above_index(h: &Harness) -> B256 {
+    h.chain.height.store(20, Ordering::SeqCst);
+    let mut note = h.note.clone();
+    note.nonce += U256::from(1);
+    let commitment = sdk::field_word(note.commitment().unwrap());
+    let path = [U256::ZERO; 16];
+    let root = sdk::merkle_root(note.commitment().unwrap(), 0, &path).unwrap();
+    h.chain.roots.lock().unwrap().insert(sdk::field_word(root));
+    h.source
+        .proofs
+        .lock()
+        .unwrap()
+        .insert(commitment, (2, 0, path, root));
+    h.session
+        .import_notes(&[NoteInput {
+            note,
+            tree_id: 2,
+            leaf_index: 0,
+            path,
+            root,
+        }])
+        .unwrap();
+    let state = h.session.snapshot().unwrap();
+    assert_eq!(state.observed_through, Some(block(20)));
+    assert_eq!(state.notes[&commitment].block, block(20));
+    assert_eq!(h.source.indexed_height.load(Ordering::SeqCst), 10);
+    commitment
+}
+
+#[test]
+fn inventory_only_fences_private_observation_if_fork_occurs_after_staging() {
+    let h = synced();
+    let imported = import_private_note_above_index(&h);
+    let pending = h
+        .session
+        .refresh_with_behavior(
+            RefreshOptions::from_block(10),
+            RefreshBehavior {
+                inventory_only: true,
+            },
+        )
+        .unwrap();
+    let before = serde_json::to_value(h.session.snapshot().unwrap()).unwrap();
+    h.chain.fork_from.store(20, Ordering::SeqCst);
+    h.chain.height.store(21, Ordering::SeqCst);
+    assert!(pending.decrypt(&AppDecryptor::default()).is_err());
+    assert_eq!(
+        serde_json::to_value(h.session.snapshot().unwrap()).unwrap(),
+        before
+    );
+    assert!(h.session.snapshot().unwrap().notes.contains_key(&imported));
+}
+
+#[test]
+fn empty_scan_fences_private_observation_outside_completed_discovery() {
+    let h = synced();
+    import_private_note_above_index(&h);
+    let before = serde_json::to_value(h.session.snapshot().unwrap()).unwrap();
+    let discovery = h.source.discovery_reads.load(Ordering::SeqCst);
+    h.chain.fork_from.store(20, Ordering::SeqCst);
+    h.chain.height.store(21, Ordering::SeqCst);
+    assert!(h
+        .session
+        .scan(&AppDecryptor::default(), ScanOptions::default())
+        .is_err());
+    assert_eq!(h.source.discovery_reads.load(Ordering::SeqCst), discovery);
+    assert_eq!(
+        serde_json::to_value(h.session.snapshot().unwrap()).unwrap(),
+        before
+    );
 }

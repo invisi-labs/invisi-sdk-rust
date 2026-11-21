@@ -533,7 +533,7 @@ impl PublicHistory {
     ) -> Result<Vec<CanonicalBlock>> {
         let numbers = (from..=to).collect::<Vec<_>>();
         let mut bulk = Vec::with_capacity(numbers.len());
-        for chunk in numbers.chunks(20) {
+        for chunk in numbers.chunks(256) {
             cancel.check()?;
             match self.source.blocks(chunk) {
                 Some(result) => {
@@ -1014,7 +1014,7 @@ mod parallel_header_tests {
         }
         fn blocks(&self, numbers: &[u64]) -> Option<Result<Vec<CanonicalBlock>>> {
             self.batch.then(|| {
-                assert!(numbers.len() <= 20);
+                assert!(numbers.len() <= 256);
                 self.batch_calls.fetch_add(1, Ordering::SeqCst);
                 let result = numbers.iter().map(|n| self.block(*n)).collect();
                 if let Some(cancel) = &self.batch_cancel {
@@ -1092,6 +1092,43 @@ mod parallel_header_tests {
             assert_eq!(source.active.load(Ordering::SeqCst), 0);
         }
     }
+    #[test]
+    fn full_history_page_uses_one_bulk_range_request() {
+        let source = Arc::new(Source {
+            active: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+            broken: false,
+            failed: false,
+            batch: true,
+            batch_cancel: None,
+            batch_calls: AtomicUsize::new(0),
+        });
+        let history = PublicHistory::new(
+            Arc::new(
+                PublicHistoryStore::new(
+                    Arc::new(MemoryAtomicRecords::default()),
+                    Retention::default(),
+                )
+                .unwrap(),
+            ),
+            PublicHistoryScope {
+                chain_id: 97,
+                protocol_address: Address::with_last_byte(1),
+                runtime_code_hash: B256::with_last_byte(42),
+                deployment_block: 100,
+            },
+            source.clone(),
+        )
+        .unwrap();
+        let headers = history
+            .read_headers(100, 355, &CancellationToken::default())
+            .unwrap();
+        assert_eq!(headers.len(), 256);
+        assert_eq!(headers[0].number, 100);
+        assert_eq!(headers[255].number, 355);
+        assert_eq!(source.batch_calls.load(Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn cancelled_bulk_headers_stop_after_one_chunk_and_never_commit_partial_page() {
         let token = CancellationToken::default();

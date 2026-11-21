@@ -24,4 +24,5 @@ sha2 = "0.10"
 decaf377-fmd = "=2.1.1"
 
 alloy-consensus = { version = "=1.7.3", features = ["serde"] }
+alloy-rlp = "=0.3.17"
 alloy-eips = { version = "=1.7.3", default-features = false }

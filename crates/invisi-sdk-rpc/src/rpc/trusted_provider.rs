@@ -2,6 +2,7 @@
 use super::*;
 use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{Address, B256};
+use alloy_rlp::Encodable;
 use serde_json::{json, Value};
 
 /// A read-only provider that trusts Protocol RPC for chain facts and never contacts an Ethereum node.
@@ -20,6 +21,52 @@ impl<T: RpcTransport> TrustedProvider<T> {
             }),
         })
     }
+}
+/// Authenticate the original full header in both historical and live reads.
+/// Pinned Alloy encodes fields through requestsHash; append slotNumber inside
+/// that same RLP list without reconstructing or dropping any earlier fields.
+fn decode_full_header(original: &Value) -> Result<(alloy_consensus::Header, B256)> {
+    let fork_fields = [
+        "baseFeePerGas",
+        "withdrawalsRoot",
+        "blobGasUsed",
+        "excessBlobGas",
+        "parentBeaconBlockRoot",
+        "requestsHash",
+        "slotNumber",
+    ];
+    if let Some(last) = fork_fields
+        .iter()
+        .rposition(|field| !original[field].is_null())
+    {
+        if fork_fields[..=last]
+            .iter()
+            .any(|field| original[field].is_null())
+        {
+            return Err(Error::Invalid("incomplete trusted header fork fields"));
+        }
+    }
+    let header: alloy_consensus::Header = serde_json::from_value(original.clone())
+        .map_err(|_| Error::Invalid("invalid trusted header"))?;
+    let digest = if original["slotNumber"].is_null() {
+        header.hash_slow()
+    } else {
+        let slot = super::client::quantity(&original["slotNumber"])?;
+        let encoded = alloy_rlp::encode(&header);
+        let mut payload = encoded.as_slice();
+        alloy_rlp::Header::decode(&mut payload)
+            .map_err(|_| Error::Invalid("invalid encoded trusted header"))?;
+        let mut extended = Vec::with_capacity(encoded.len() + slot.length());
+        alloy_rlp::Header {
+            list: true,
+            payload_length: payload.len() + slot.length(),
+        }
+        .encode(&mut extended);
+        extended.extend_from_slice(payload);
+        slot.encode(&mut extended);
+        alloy_primitives::keccak256(extended)
+    };
+    Ok((header, digest))
 }
 struct TrustedTransport<T: RpcTransport> {
     rpc: JsonRpc<T>,
@@ -40,6 +87,51 @@ impl<T: RpcTransport> TrustedTransport<T> {
         }
         Ok(())
     }
+    /// Historical storage is a bulk optimization only; single reads stay live.
+    fn historical_headers(&self, from: u64, to: u64) -> Result<Vec<CanonicalBlock>> {
+        let response = self.rpc.call(
+            "invisi_getBlockHeaders",
+            json!([{"fromBlock":from,"toBlock":to}]),
+        )?;
+        self.validate_read(&response)?;
+        if response["range"]["fromBlock"].as_u64() != Some(from)
+            || response["range"]["toBlock"].as_u64() != Some(to)
+        {
+            return Err(Error::Invalid("trusted historical range mismatch"));
+        }
+        let rows = response["headers"]
+            .as_array()
+            .filter(|rows| rows.len() as u64 == to - from + 1)
+            .ok_or(Error::Invalid("trusted historical header count mismatch"))?;
+        let mut headers: Vec<CanonicalBlock> = Vec::with_capacity(rows.len());
+        for (offset, row) in rows.iter().enumerate() {
+            // Deserialize the complete original Ethereum header, including fork fields,
+            // and recompute its RLP hash rather than hashing a reduced canonical block.
+            let (header, digest) = decode_full_header(&row["header"])?;
+            if header.number != from + offset as u64
+                || digest != invisi_sdk_protocol::interfaces::hash(&row["headerHash"])?
+                || headers
+                    .last()
+                    .is_some_and(|previous| header.parent_hash != previous.hash)
+            {
+                return Err(Error::Invalid("trusted historical header binding mismatch"));
+            }
+            headers.push(CanonicalBlock {
+                number: header.number,
+                timestamp: header.timestamp,
+                hash: digest,
+                parent_hash: header.parent_hash,
+            });
+        }
+        if headers.last().map(|h| h.hash)
+            != Some(invisi_sdk_protocol::interfaces::hash(
+                &response["range"]["blockHash"],
+            )?)
+        {
+            return Err(Error::Invalid("trusted historical anchor mismatch"));
+        }
+        Ok(headers)
+    }
     fn header(&self, block: &Value) -> Result<Value> {
         let response = self.read(json!({"kind":"header", "block":block}))?;
         self.validate_header(&response, block)
@@ -50,9 +142,7 @@ impl<T: RpcTransport> TrustedTransport<T> {
         if value.is_null() {
             return Err(Error::Invalid("trusted header missing"));
         }
-        let header: alloy_consensus::Header = serde_json::from_value(value.clone())
-            .map_err(|_| Error::Invalid("invalid trusted header"))?;
-        let digest = header.hash_slow();
+        let (header, digest) = decode_full_header(&value)?;
         if digest != invisi_sdk_protocol::interfaces::hash(&response["headerHash"])? {
             return Err(Error::Invalid("trusted header hash mismatch"));
         }
@@ -126,11 +216,48 @@ impl<T: RpcTransport> RpcTransport for TrustedTransport<T> {
 impl<T: RpcTransport> CanonicalChain for TrustedProvider<T> {
     fn blocks(&self, numbers: &[u64]) -> Option<Result<Vec<CanonicalBlock>>> {
         Some((|| {
-            if numbers.is_empty() || numbers.len() > 256 {
-                return Err(Error::Invalid("header range must contain 1..256 numbers"));
+            if numbers.is_empty() || numbers.iter().any(|n| *n > i64::MAX as u64) {
+                return Err(Error::Invalid(
+                    "nonempty signed-64-bit header numbers required",
+                ));
             }
             let transport = &self.ethereum.rpc.transport;
-            let mut headers = Vec::with_capacity(numbers.len());
+            let mut headers: Vec<CanonicalBlock> = Vec::with_capacity(numbers.len());
+            if numbers
+                .windows(2)
+                .all(|pair| pair[0].checked_add(1) == Some(pair[1]))
+            {
+                let mut compatible = true;
+                for chunk in numbers.chunks(256) {
+                    match transport.historical_headers(chunk[0], chunk[chunk.len() - 1]) {
+                        Ok(batch) => {
+                            if headers
+                                .last()
+                                .is_some_and(|previous| batch[0].parent_hash != previous.hash)
+                            {
+                                return Err(Error::Invalid(
+                                    "trusted historical chunk parent mismatch",
+                                ));
+                            }
+                            headers.extend(batch);
+                        }
+                        Err(Error::Remote {
+                            code: -32601 | -32004,
+                            ..
+                        }) => {
+                            compatible = false;
+                            break;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                if compatible {
+                    return Ok(headers);
+                }
+                // Only explicit unsupported/unavailable history errors permit the
+                // original live batched path. Never mix stored and live history.
+                headers.clear();
+            }
             for chunk in numbers.chunks(20) {
                 let requests = chunk
                     .iter()

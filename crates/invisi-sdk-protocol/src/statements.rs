@@ -24,6 +24,17 @@ pub struct ProofStatement {
     pub vk_sha256: String,
     pub expected_public_inputs: Vec<B256>,
 }
+/// Return the independently pinned binary verification-key digest without
+/// requiring public inputs or loading circuit resources.
+pub fn verification_key_sha256(name: &str, target: &str) -> Result<String> {
+    layouts()?
+        .get(name)
+        .ok_or("unsupported circuit")?
+        .keys
+        .get(target)
+        .cloned()
+        .ok_or_else(|| "unsupported proving target".into())
+}
 pub fn statement(name: &str, target: &str, inputs: Vec<B256>) -> Result<ProofStatement> {
     for input in &inputs {
         invisi_sdk_primitives::note::field(U256::from_be_slice(input.as_slice()), "public field")

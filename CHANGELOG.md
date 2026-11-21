@@ -2,6 +2,8 @@
 
 ## Unreleased (planned 1.3.3)
 
+- Load recursive verification keys on demand through the configured prover assets, authenticate their binary SHA-256 and canonical BN254 fields, and recompute the pinned Poseidon commitment before dedicated or mixed aggregation. Bundle only key hashes and commitments; retain member and outer proof verification, offline/cache/directory policy, and existing resource pins. Authenticate exported VK JSON/binaries before synchronizing metadata; exercise the producer in CI.
+
 - Add Router draft quotation before proof or wallet signing, conservative `payment-router-gas-v1` previews (`source="model"`) over the existing Core baseline, and shared gas/hash parity fixtures. Opaque 0x estimation requires a trusted service-policy route gas budget. Broadcaster prices the model with dynamic chain fees within its operational maximum.
 - Bind Router quotes to `payment-router-intent-v1`, preserving identity through proof/signature completion while amounts, fees, routes, deadlines, nonces, account fields and authorization metadata remain bound. Preserve raw `envelope_hash`; require actual proof/hashes/signatures, pinned runtime, live counters and complete final-call estimation/simulation before submission.
 - Document bounded draft fee convergence under wallet `maxFeeAmount`, all four payment modes and compile-checked quote-before-proof examples. Ordinary Core quote capabilities remain unchanged.

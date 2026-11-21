@@ -584,6 +584,12 @@ fn explicit_not_recipient_is_a_no_match_and_scope_isolation_is_enforced() {
 
 struct Backend;
 impl Prover for Backend {
+    fn load_verification_key(&self, name: &str, target: &str) -> Result<Vec<u8>> {
+        if name != "transact_user_slots1" || target != "noir-recursive" {
+            return Err("unsupported test verification key".into());
+        }
+        Ok(include_bytes!("../../testdata/transact_user_slots1.noir-recursive.vk").to_vec())
+    }
     fn prove(&self, r: &ProvingRequest) -> Result<ProofBundle> {
         let s = &r.statement;
         let proof = vec![

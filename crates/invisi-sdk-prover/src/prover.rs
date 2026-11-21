@@ -166,6 +166,11 @@ pub fn request(
     })
 }
 pub trait Prover: Send + Sync {
+    /// Optional public-key capability for recursive aggregation. Implementations must
+    /// use the same resource policy as prove/verify; unsupported backends fail locally.
+    fn load_verification_key(&self, _name: &str, _target: &str) -> Result<Vec<u8>> {
+        Err("prover does not support verification key loading".into())
+    }
     fn get_provenance_capability(&self) -> Result<Option<ProvenanceCapability>> {
         Ok(None)
     }
@@ -174,6 +179,10 @@ pub trait Prover: Send + Sync {
 }
 // Asset paths are explicit host configuration; integrity comes from the bundled release manifest.
 pub trait Assets: Send + Sync {
+    /// Load just a verification key, without fetching the circuit artifact.
+    fn load_verification_key(&self, _name: &str, _target: &str) -> Result<Vec<u8>> {
+        Err("assets do not support verification key loading".into())
+    }
     fn load_provenance_resource(&self, path: &str) -> Result<Vec<u8>> {
         ResourceProvider::default().load_resource(&format!("provenance/{path}"))
     }
@@ -531,6 +540,14 @@ impl ResourceProvider {
     }
 }
 impl Assets for ResourceProvider {
+    fn load_verification_key(&self, name: &str, target: &str) -> Result<Vec<u8>> {
+        let digest = invisi_sdk_protocol::statements::verification_key_sha256(name, target)?;
+        let bytes = self.load_resource(&format!("circuits/{name}.{target}.vk"))?;
+        if sha256(&bytes) != digest {
+            return Err("verification key checksum mismatch".into());
+        }
+        Ok(bytes)
+    }
     fn load(&self, s: &ProofStatement) -> Result<(Vec<u8>, Vec<u8>)> {
         if statement(&s.circuit_name, &s.target, s.expected_public_inputs.clone())? != *s {
             return Err("untrusted circuit metadata".into());
@@ -551,6 +568,17 @@ pub struct DirectoryAssets {
     pub directory: PathBuf,
 }
 impl Assets for DirectoryAssets {
+    fn load_verification_key(&self, name: &str, target: &str) -> Result<Vec<u8>> {
+        let digest = invisi_sdk_protocol::statements::verification_key_sha256(name, target)?;
+        let bytes = bounded_read(
+            &self.directory.join(format!("{name}.{target}.vk")),
+            1024 * 1024,
+        )?;
+        if sha256(&bytes) != digest {
+            return Err("verification key checksum mismatch".into());
+        }
+        Ok(bytes)
+    }
     fn load(&self, s: &ProofStatement) -> Result<(Vec<u8>, Vec<u8>)> {
         let expected = statement(&s.circuit_name, &s.target, s.expected_public_inputs.clone())?;
         if &expected != s {
@@ -841,6 +869,14 @@ impl NativeProver {
     }
 }
 impl Prover for NativeProver {
+    fn load_verification_key(&self, name: &str, target: &str) -> Result<Vec<u8>> {
+        let digest = invisi_sdk_protocol::statements::verification_key_sha256(name, target)?;
+        let bytes = self.assets.load_verification_key(name, target)?;
+        if sha256(&bytes) != digest {
+            return Err("verification key checksum mismatch".into());
+        }
+        Ok(bytes)
+    }
     fn get_provenance_capability(&self) -> Result<Option<ProvenanceCapability>> {
         self.provenance_capability().map(Some)
     }
@@ -1025,6 +1061,77 @@ fn validate_recursive_member(member: &AggregateMember) -> Result<usize> {
     }
     Ok(capacity)
 }
+// Recursive binary resources consist of 115 canonical BN254 field words.
+#[derive(Debug)]
+struct RecursiveVerificationKey {
+    fields: Vec<String>,
+    hash: String,
+    commitment: String,
+}
+fn canonical_recursive_field(text: &str) -> Result<U256> {
+    let raw = text
+        .strip_prefix("0x")
+        .ok_or("noncanonical recursive key field")?;
+    if raw.len() != 64 || !raw.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("noncanonical recursive key field".into());
+    }
+    let value = U256::from_str_radix(raw, 16).map_err(|_| "noncanonical recursive key field")?;
+    invisi_sdk_primitives::note::field(value, "recursive key field")
+        .map_err(|_| "noncanonical recursive key field")?;
+    Ok(value)
+}
+fn authenticate_recursive_key(
+    bytes: &[u8],
+    digest: &str,
+    metadata: &Value,
+) -> Result<RecursiveVerificationKey> {
+    if sha256(bytes) != digest {
+        return Err("recursive verification key checksum mismatch".into());
+    }
+    if bytes.len() != 115 * 32 {
+        return Err("invalid recursive verification key binary width".into());
+    }
+    let hash = canonical_recursive_field(
+        metadata["keyHash"]
+            .as_str()
+            .ok_or("missing recursive key hash")?,
+    )?;
+    let commitment = canonical_recursive_field(
+        metadata["innerVkCommitment"]
+            .as_str()
+            .ok_or("missing recursive key commitment")?,
+    )?;
+    let mut inputs =
+        vec![U256::from_str_radix("494e564953495f5245435552534956455f564b31", 16).unwrap()];
+    let mut fields = Vec::with_capacity(115);
+    for bytes in bytes.chunks_exact(32) {
+        let text = format!("0x{}", hex::encode(bytes));
+        inputs.push(canonical_recursive_field(&text)?);
+        fields.push(text);
+    }
+    inputs.push(hash);
+    let actual =
+        invisi_sdk_primitives::note::hash_fields(&inputs).map_err(|error| error.to_string())?;
+    if actual != commitment {
+        return Err("recursive verification key commitment mismatch".into());
+    }
+    Ok(RecursiveVerificationKey {
+        fields,
+        hash: format!("{hash:#066x}"),
+        commitment: format!("{commitment:#066x}"),
+    })
+}
+fn load_recursive_key(backend: &dyn Prover, capacity: usize) -> Result<RecursiveVerificationKey> {
+    let name = format!("transact_user_slots{capacity}");
+    if !(1..=10).contains(&capacity) {
+        return Err("unsupported recursive verification key".into());
+    }
+    let digest = invisi_sdk_protocol::statements::verification_key_sha256(&name, "noir-recursive")?;
+    let metadata: Value = serde_json::from_str(RECURSIVE_KEYS)
+        .map_err(|_| "invalid trusted recursive key manifest")?;
+    let bytes = backend.load_verification_key(&name, "noir-recursive")?;
+    authenticate_recursive_key(&bytes, &digest, &metadata[capacity.to_string()])
+}
 pub fn aggregate(backend: &dyn Prover, members: &[AggregateMember]) -> Result<ProofBundle> {
     if members.is_empty() || members.len() > 5 {
         return Err("aggregation requires one through five members".into());
@@ -1074,23 +1181,18 @@ pub fn aggregate(backend: &dyn Prover, members: &[AggregateMember]) -> Result<Pr
     if !dedicated && (members.len() < 2 || capacities.iter().any(|c| *c > 5)) {
         return Err("unsupported aggregate capacity/count combination".into());
     }
-    let keys: Value = serde_json::from_str(RECURSIVE_KEYS)
-        .map_err(|_| "invalid trusted recursive key manifest")?;
     let mut inputs = Vec::new();
     let mut values = json!({"proofs":proof_rows,"statements":statements});
     let name;
     if dedicated {
-        let key = &keys[capacities[0].to_string()];
-        if key["verificationKeyFields"].as_array().map(Vec::len) != Some(115) {
-            return Err("missing pinned recursive key".into());
-        }
+        let key = load_recursive_key(backend, capacities[0])?;
         for m in members {
             inputs.extend_from_slice(&m.bundle.public_inputs);
         }
-        inputs.push(word(&key["innerVkCommitment"])?);
-        values["verification_key"] = key["verificationKeyFields"].clone();
-        values["key_hash"] = key["keyHash"].clone();
-        values["inner_vk_commitment"] = key["innerVkCommitment"].clone();
+        inputs.push(word(&json!(key.commitment))?);
+        values["verification_key"] = json!(key.fields);
+        values["key_hash"] = json!(key.hash);
+        values["inner_vk_commitment"] = json!(key.commitment);
         name = format!("transact_aggregate_{}_{}", capacities[0], members.len());
     } else {
         for c in &capacities {
@@ -1108,14 +1210,11 @@ pub fn aggregate(backend: &dyn Prover, members: &[AggregateMember]) -> Result<Pr
         let mut hashes = Vec::new();
         let mut pins = Vec::new();
         for c in 1..=5 {
-            let key = &keys[c.to_string()];
-            if key["verificationKeyFields"].as_array().map(Vec::len) != Some(115) {
-                return Err("missing pinned mixed recursive key".into());
-            }
-            all_keys.push(key["verificationKeyFields"].clone());
-            hashes.push(key["keyHash"].clone());
-            pins.push(key["innerVkCommitment"].clone());
-            inputs.push(word(&key["innerVkCommitment"])?);
+            let key = load_recursive_key(backend, c)?;
+            inputs.push(word(&json!(key.commitment))?);
+            all_keys.push(key.fields);
+            hashes.push(key.hash);
+            pins.push(key.commitment);
         }
         values["statements"] = json!(statements);
         values["capacities"] = json!(capacities.iter().map(usize::to_string).collect::<Vec<_>>());
@@ -1780,3 +1879,6 @@ mod mixed_resource_location_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod recursive_key_tests;

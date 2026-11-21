@@ -144,6 +144,12 @@ For a mirror serving separate release sets, use an explicit `{pin}` placeholder 
 `INVISI_PROVER_SOURCE` (for example `https://mirror.example/prover/sets/{pin}`).
 A flat mirror may instead serve both pin-named indices and content-addressed objects. `ResourceOptions` configures these explicitly.
 `DirectoryAssets` retains its existing explicit local circuit-directory behavior.
+Recursive aggregation uses the same configured provider to load only the needed
+binary verification keys. It authenticates SHA-256, 115 canonical BN254 words and
+the trusted Poseidon commitment before witness assembly. Dedicated aggregation
+loads one key; mixed aggregation loads C1–C5. Custom backends may implement the
+optional `Prover::load_verification_key` capability; unsupported loaders fail
+locally. Constructors perform no resource I/O. See the [prover documentation](crates/invisi-sdk-prover/README.md#recursive-verification-keys).
 `NativeProver` accepts a host `WitnessExecutor`, including the external Noir CLI adapter;
 a mobile host can use its embedded native ACVM. Blocking RPC/proving work belongs
 off the UI thread.

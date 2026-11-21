@@ -33,3 +33,30 @@ each trusted circuit set. A flat mirror can host pin-named indices and hashed ob
 `ResourceProvider` selects the independent Core catalog for all Core circuits (including initial-payment) and the Provenance catalog for `provenance/` resources. `ResourceOptions` provides `provenance_source`, `provenance_directory` and `provenance_index_sha256` separately from Core. Cache and offline settings are shared. A static Core source is not reused for Provenance; a `{pin}` template explicitly allows a shared mirror.
 
 Provision with `python3 scripts/sync-prover-assets.py CORE_OUTPUT --set core --cache CACHE` and the same command with `PROVENANCE_OUTPUT --set provenance`. The two verified catalogs can share one cache. `legacy_combined: true` selects historical combined snapshots; provision those with `--set legacy` and `--set legacy-initial-payment`. No missing/corrupt catalog automatically downgrades to legacy. New split catalogs require independent publication before SDK release.
+
+## Recursive verification keys
+
+Aggregation loads binary keys through the selected `Prover::load_verification_key`
+capability. `NativeProver` delegates to its configured `Assets`; `ResourceProvider`
+loads just the requested VK from the authenticated catalog and `DirectoryAssets`
+loads the pinned local VK. The capability accepts published Core circuit names and
+targets; `invisi_sdk_protocol::statements::verification_key_sha256` exposes their
+pinned binary identity without loading resources. Custom `Prover` and `Assets`
+implementations remain source compatible: their default loader returns an explicit
+unsupported error. Implement the optional method to enable aggregation.
+
+Constructing a prover performs no I/O. Dedicated aggregation loads one C1–C10
+recursive key; mixed aggregation loads C1–C5. Each key must match its pinned SHA-256,
+contain exactly 115 canonical 32-byte BN254 field words, and reproduce the trusted
+Poseidon commitment over domain `0x494e564953495f5245435552534956455f564b31`, the
+115 fields, and the key hash. Only small key hashes and commitments are bundled.
+Member and resulting outer proofs are still verified independently. The configured
+source, cache, directory, offline and explicit legacy policies also govern these loads.
+
+For producer synchronization, run `python3 scripts/sync-recursive-keys.py CORE_EXPORT_ROOT`
+with an exported `circuits/transact/manifest.json` (or `--manifest RELATIVE_PATH`).
+The script authenticates the binary against the reviewed circuit catalog and the
+VK JSON against its export digest, checks canonical JSON fields equal the binary,
+and validates key hash/commitment trust anchors before writing metadata only.
+It does not update release pins. Run its regression tests with
+`python3 scripts/test-sync-recursive-keys.py`.

@@ -937,6 +937,7 @@ impl WalletSession {
                 return Err("insufficient unreserved known Note balance".into());
             }
         }
+        self.prepare_note_paths(&mut options.inputs)?;
         self.prepare_cached(|invisi| {
             Ok(ManagedPrepared::Funds(
                 invisi.prepare_transfer(&self.wallet, options.clone())?,
@@ -1010,7 +1011,8 @@ impl WalletSession {
         {
             return Err("Credit input is unavailable for owner update".into());
         }
-        let input = credit_input(credit, U256::ZERO);
+        let mut input = credit_input(credit, U256::ZERO);
+        self.prepare_credit_paths(std::slice::from_mut(&mut input))?;
         self.prepare_cached(|invisi| {
             Ok(ManagedPrepared::Credit(
                 invisi.prepare_update_credit_explicit(
@@ -1056,6 +1058,7 @@ impl WalletSession {
             }
             inputs.push(credit_input(credit, *debit));
         }
+        self.prepare_credit_paths(&mut inputs)?;
         self.prepare_cached(|invisi| {
             Ok(ManagedPrepared::Credit(
                 invisi.prepare_draw_credit_explicit(

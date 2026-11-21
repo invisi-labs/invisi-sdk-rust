@@ -169,6 +169,7 @@ impl WalletSession {
                 .ok_or("collection amount overflow")?;
             inputs.push(note.input.clone());
         }
+        self.prepare_note_paths(&mut inputs)?;
         self.prepare_cached(|invisi| {
             let deadline = if options.deadline == 0 {
                 let anchor = invisi.chain.snapshot()?;

@@ -56,6 +56,7 @@ struct Chain {
     revoked: AtomicBool,
     insufficient_funds: AtomicBool,
     nonce_hook: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    nullifier_hook: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     changed_context: AtomicBool,
     gas_forbidden: AtomicBool,
     height: std::sync::atomic::AtomicU64,
@@ -63,6 +64,8 @@ struct Chain {
     source_anchors: AtomicBool,
     spent: Mutex<BTreeSet<B256>>,
     nullifier_reads: std::sync::atomic::AtomicUsize,
+    nonce_reads: std::sync::atomic::AtomicUsize,
+    root_reads: std::sync::atomic::AtomicUsize,
     revocation_reads: std::sync::atomic::AtomicUsize,
     roots: Mutex<BTreeSet<B256>>,
 }
@@ -113,11 +116,15 @@ impl ChainState for Chain {
         self.canonical(&expected)
     }
     fn known_root(&self, _: u64, root: B256, _: &CanonicalBlock) -> Result<bool> {
+        self.root_reads.fetch_add(1, Ordering::SeqCst);
         self.online()?;
         Ok(self.roots.lock().unwrap().contains(&root))
     }
     fn nullifier_spent(&self, n: B256, _: &CanonicalBlock) -> Result<bool> {
         self.nullifier_reads.fetch_add(1, Ordering::SeqCst);
+        if let Some(hook) = self.nullifier_hook.lock().unwrap().take() {
+            hook();
+        }
         self.online()?;
         Ok(self.spent.lock().unwrap().contains(&n))
     }
@@ -146,6 +153,7 @@ impl ChainState for Chain {
         })
     }
     fn funding_nonce(&self, _: Address, _: &CanonicalBlock) -> Result<U256> {
+        self.nonce_reads.fetch_add(1, Ordering::SeqCst);
         self.online()?;
         if !self.preparation_enabled.load(Ordering::SeqCst) {
             return Err("funding nonce reader required".into());
@@ -166,6 +174,7 @@ struct Source {
     block_reads: std::sync::atomic::AtomicUsize,
     read_latency_ms: std::sync::atomic::AtomicU64,
     membership_reads: std::sync::atomic::AtomicUsize,
+    membership_batches: std::sync::atomic::AtomicUsize,
     receipt_reads: std::sync::atomic::AtomicUsize,
     discovery_reads: std::sync::atomic::AtomicUsize,
     chain: Arc<Chain>,
@@ -242,6 +251,17 @@ impl SessionSource for Source {
     }
     fn known_root(&self, tree: u64, root: B256, block: &CanonicalBlock) -> Result<bool> {
         self.chain.known_root(tree, root, block)
+    }
+    fn memberships(
+        &self,
+        inputs: &[MembershipInput],
+        block: &CanonicalBlock,
+    ) -> Result<Vec<Membership>> {
+        self.membership_batches.fetch_add(1, Ordering::SeqCst);
+        inputs
+            .iter()
+            .map(|input| self.membership(input, block))
+            .collect()
     }
     fn membership(&self, i: &MembershipInput, b: &CanonicalBlock) -> Result<Membership> {
         self.chain.online()?;
@@ -363,6 +383,7 @@ fn harness() -> Harness {
         indexed_reads: Default::default(),
         block_reads: Default::default(),
         read_latency_ms: Default::default(),
+        membership_batches: std::sync::atomic::AtomicUsize::new(0),
         membership_reads: Default::default(),
         receipt_reads: Default::default(),
         discovery_reads: Default::default(),
@@ -3930,6 +3951,7 @@ fn record_store_reopen_uses_incrementally_aligned_paths_and_rejects_corrupt_repl
         .insert(h.commitment, (1, 0, old_path, root));
     pending.decrypt(&AppDecryptor::default()).unwrap();
     assert_eq!(h.source.membership_reads.load(Ordering::SeqCst), 3);
+    assert_eq!(h.source.membership_batches.load(Ordering::SeqCst), 2);
     assert_eq!(
         session.snapshot().unwrap().notes[&h.commitment].input.root,
         root
@@ -4915,4 +4937,337 @@ fn scan_rejects_observation_behind_discovery_target_before_private_commit() {
 #[ignore = "credit replay pipeline benchmark; run explicitly with --ignored --nocapture"]
 fn benchmark_credit_replay_pipeline() {
     reverse_credit_discovery_case(false, true);
+}
+
+#[test]
+fn inventory_only_discards_preparation_material_and_fetches_it_lazily() {
+    let h = harness();
+    h.chain.preparation_enabled.store(true, Ordering::SeqCst);
+    h.session
+        .refresh(RefreshOptions::from_block(0))
+        .unwrap()
+        .decrypt(&AppDecryptor::default())
+        .unwrap();
+    assert!(h.session.snapshot().unwrap().preparation_snapshot.is_some());
+    *h.chain.nonce_hook.lock().unwrap() = Some(Box::new(|| {
+        panic!("inventory refresh fetched transaction nonce")
+    }));
+    h.session
+        .refresh_with_behavior(
+            RefreshOptions::from_block(10),
+            RefreshBehavior {
+                inventory_only: true,
+            },
+        )
+        .unwrap()
+        .decrypt(&AppDecryptor::default())
+        .unwrap();
+    assert!(h.session.snapshot().unwrap().preparation_snapshot.is_none());
+    h.chain.nonce_hook.lock().unwrap().take();
+    // Preparation has an online fallback after material was deliberately discarded.
+    assert!(h.session.prepare_transfer(transfer(&h)).is_ok());
+}
+
+#[test]
+fn inventory_only_rechecks_consumption_on_every_refresh_and_rejects_reorg() {
+    let h = harness();
+    for spent in [false, true, false] {
+        if spent {
+            h.chain
+                .spent
+                .lock()
+                .unwrap()
+                .insert(sdk::field_word(h.note.nullifier().unwrap()));
+        } else {
+            h.chain.spent.lock().unwrap().clear();
+        }
+        h.session
+            .refresh_with_behavior(
+                RefreshOptions::from_block(0),
+                RefreshBehavior {
+                    inventory_only: true,
+                },
+            )
+            .unwrap()
+            .decrypt(&AppDecryptor::default())
+            .unwrap();
+        assert_eq!(
+            h.session.snapshot().unwrap().notes[&h.commitment].spent,
+            spent
+        );
+    }
+    let pending = h
+        .session
+        .refresh_with_behavior(
+            RefreshOptions::from_block(10),
+            RefreshBehavior {
+                inventory_only: true,
+            },
+        )
+        .unwrap();
+    let before = h.session.snapshot().unwrap().revision;
+    h.chain.reorg.store(true, Ordering::SeqCst);
+    assert!(pending.decrypt(&AppDecryptor::default()).is_err());
+    assert_eq!(h.session.snapshot().unwrap().revision, before);
+}
+
+#[test]
+fn inventory_only_preparation_lazily_replaces_expired_selected_path() {
+    let h = harness();
+    h.session
+        .refresh_with_behavior(
+            RefreshOptions::from_block(0),
+            RefreshBehavior {
+                inventory_only: true,
+            },
+        )
+        .unwrap()
+        .decrypt(&AppDecryptor::default())
+        .unwrap();
+    let mut path = [U256::ZERO; 16];
+    path[0] = U256::from(123);
+    let root = sdk::merkle_root(h.note.commitment().unwrap(), 0, &path).unwrap();
+    h.chain.roots.lock().unwrap().clear();
+    h.chain.roots.lock().unwrap().insert(sdk::field_word(root));
+    h.source
+        .proofs
+        .lock()
+        .unwrap()
+        .insert(h.commitment, (1, 0, path, root));
+    let before = h.source.membership_reads.load(Ordering::SeqCst);
+    assert!(h.session.prepare_transfer(transfer(&h)).is_ok());
+    assert_eq!(h.source.membership_reads.load(Ordering::SeqCst), before + 1);
+}
+
+#[test]
+fn inventory_only_preserves_primary_deployment_identity_gate() {
+    let h = harness();
+    let pending = h
+        .session
+        .refresh_with_behavior(
+            RefreshOptions::from_block(0),
+            RefreshBehavior {
+                inventory_only: true,
+            },
+        )
+        .unwrap();
+    h.chain.changed_context.store(true, Ordering::SeqCst);
+    assert!(pending.decrypt(&AppDecryptor::default()).is_err());
+    assert_eq!(h.session.snapshot().unwrap().revision, 0);
+}
+
+#[test]
+fn inventory_only_deduplicates_roles_and_rechecks_historical_consumed_credit_revocation() {
+    let h = harness();
+    let identity = sdk::address_word(h.session.wallet.owner_address());
+    let delivery = CreditDeliveryState {
+        note: crate::credit::CreditState {
+            context: context(),
+            token_address: h.note.token_address,
+            owner_wallet_identity: identity,
+            spender_wallet_identity: identity,
+            grant_id: 1,
+            nonce: U256::from(74),
+            expiry: 2_100_000_000,
+            credit_shared_key: U256::from(75),
+            policy: Default::default(),
+            usage: Default::default(),
+            available_credit: U256::from(400),
+            unlimited: false,
+            payload: vec![],
+        },
+        owner_receiving_keys: h.session.wallet.receiving_keys().clone(),
+        spender_receiving_keys: h.session.wallet.receiving_keys().clone(),
+    };
+    let commitment = sdk::field_word(delivery.note.commitment().unwrap());
+    let nullifier = sdk::field_word(delivery.note.nullifier().unwrap());
+    let path = [U256::ZERO; 16];
+    let root = sdk::merkle_root(delivery.note.commitment().unwrap(), 0, &path).unwrap();
+    let mut state = h.session.snapshot().unwrap();
+    for role in [CreditRole::Owner, CreditRole::Spender] {
+        state.credits.insert(
+            credit_key(commitment, role),
+            StoredCredit {
+                delivery: delivery.clone(),
+                commitment,
+                nullifier,
+                tree_id: 2,
+                leaf_index: 0,
+                path,
+                root,
+                block: block(10),
+                transaction_hash: B256::repeat_byte(9),
+                role,
+                consumed: true,
+                status: 1,
+                revoked: false,
+                reserved_by: None,
+            },
+        );
+    }
+    h.session.commit(state).unwrap();
+    h.chain.spent.lock().unwrap().insert(nullifier);
+    for revoked in [false, true, false] {
+        h.chain.revoked.store(revoked, Ordering::SeqCst);
+        let nullifier_before = h.chain.nullifier_reads.load(Ordering::SeqCst);
+        let revocation_before = h.chain.revocation_reads.load(Ordering::SeqCst);
+        h.session
+            .refresh_with_behavior(
+                RefreshOptions::from_block(10),
+                RefreshBehavior {
+                    inventory_only: true,
+                },
+            )
+            .unwrap()
+            .decrypt(&AppDecryptor::default())
+            .unwrap();
+        let state = h.session.snapshot().unwrap();
+        assert!(state
+            .credits
+            .values()
+            .all(|c| c.consumed && c.revoked == revoked));
+        assert_eq!(
+            h.chain.nullifier_reads.load(Ordering::SeqCst) - nullifier_before,
+            2
+        );
+        assert_eq!(
+            h.chain.revocation_reads.load(Ordering::SeqCst) - revocation_before,
+            1
+        );
+    }
+}
+
+#[test]
+fn inventory_read_error_cancellation_and_mid_read_reorg_never_commit() {
+    for failure in ["read", "cancel", "reorg"] {
+        let h = synced();
+        let before = h.session.snapshot().unwrap().revision;
+        let pending = h
+            .session
+            .refresh_with_behavior(
+                RefreshOptions::from_block(10),
+                RefreshBehavior {
+                    inventory_only: true,
+                },
+            )
+            .unwrap();
+        let cancel = crate::public_history::CancellationToken::default();
+        let cancel_for_hook = cancel.clone();
+        let chain = h.chain.clone();
+        *h.chain.nullifier_hook.lock().unwrap() = Some(Box::new(move || match failure {
+            "read" => chain.offline.store(true, Ordering::SeqCst),
+            "cancel" => cancel_for_hook.cancel(),
+            "reorg" => chain.reorg.store(true, Ordering::SeqCst),
+            _ => unreachable!(),
+        }));
+        if failure == "cancel" {
+            assert!(h
+                .session
+                .scan_with_progress(
+                    &AppDecryptor::default(),
+                    ScanOptions::default(),
+                    &cancel,
+                    |_| Ok(())
+                )
+                .is_err());
+        } else {
+            assert!(pending.decrypt(&AppDecryptor::default()).is_err());
+        }
+        h.chain.offline.store(false, Ordering::SeqCst);
+        h.chain.reorg.store(false, Ordering::SeqCst);
+        assert_eq!(h.session.snapshot().unwrap().revision, before);
+    }
+}
+
+#[test]
+#[ignore = "inventory/preparation request and local-time benchmark; run with --ignored --nocapture"]
+fn benchmark_wallet_state_refresh_materialization() {
+    for size in [1, 8, 32, 128, 256] {
+        for inventory_only in [false, true] {
+            let h = harness();
+            h.chain.preparation_enabled.store(true, Ordering::SeqCst);
+            let mut state = h.session.snapshot().unwrap();
+            for index in 0..size {
+                let mut note = h.note.clone();
+                note.nonce = U256::from(index + 500);
+                let commitment = sdk::field_word(note.commitment().unwrap());
+                let path = [U256::ZERO; 16];
+                let root = sdk::merkle_root(note.commitment().unwrap(), 0, &path).unwrap();
+                h.chain.roots.lock().unwrap().insert(sdk::field_word(root));
+                state.notes.insert(
+                    commitment,
+                    StoredNote {
+                        input: NoteInput {
+                            note: note.clone(),
+                            tree_id: (index + 2) as u64,
+                            leaf_index: 0,
+                            path,
+                            root,
+                        },
+                        commitment,
+                        nullifier: sdk::field_word(note.nullifier().unwrap()),
+                        block: block(10),
+                        transaction_hash: B256::repeat_byte(9),
+                        spent: false,
+                        reserved_by: None,
+                    },
+                );
+            }
+            h.session.commit(state).unwrap();
+            let started = std::time::Instant::now();
+            h.session
+                .refresh_with_behavior(
+                    RefreshOptions::from_block(10),
+                    RefreshBehavior { inventory_only },
+                )
+                .unwrap()
+                .decrypt(&AppDecryptor::default())
+                .unwrap();
+            let elapsed = started.elapsed();
+            // The fixture's canonical receipt contributes one additional Note.
+            let state = h.session.snapshot().unwrap();
+            assert_eq!(state.notes.len(), size + 1);
+            assert_eq!(state.preparation_snapshot.is_some(), !inventory_only);
+            assert_eq!(h.chain.nullifier_reads.load(Ordering::SeqCst), size + 1);
+            assert_eq!(
+                h.chain.nonce_reads.load(Ordering::SeqCst),
+                usize::from(!inventory_only)
+            );
+            println!("wallet_notes={} inventory_only={inventory_only} nullifiers={} root_reads={} nonce_reads={} membership_paths={} membership_batches={} local_us={}",size+1,h.chain.nullifier_reads.load(Ordering::SeqCst),h.chain.root_reads.load(Ordering::SeqCst),h.chain.nonce_reads.load(Ordering::SeqCst),h.source.membership_reads.load(Ordering::SeqCst),h.source.membership_batches.load(Ordering::SeqCst),elapsed.as_micros());
+        }
+    }
+}
+
+#[test]
+fn online_refresh_reauthenticates_same_block_cached_root_acceptance() {
+    let h = harness();
+    h.source.receipt.lock().unwrap().block = block(5);
+    h.chain.preparation_enabled.store(true, Ordering::SeqCst);
+    h.session
+        .refresh(RefreshOptions::from_block(0))
+        .unwrap()
+        .decrypt(&AppDecryptor::default())
+        .unwrap();
+    let mut state = h.session.snapshot().unwrap();
+    let note = state.notes.get_mut(&h.commitment).unwrap();
+    note.input.path[0] = U256::from(999);
+    note.input.root = sdk::merkle_root(h.note.commitment().unwrap(), 0, &note.input.path).unwrap();
+    let forged = sdk::field_word(note.input.root);
+    state.preparation_snapshot.as_mut().unwrap().facts.roots = vec![(1, forged, true)];
+    h.session.commit(state).unwrap();
+    let reads = h.source.membership_reads.load(Ordering::SeqCst);
+    h.session
+        .refresh(RefreshOptions::from_block(10))
+        .unwrap()
+        .decrypt(&AppDecryptor::default())
+        .unwrap();
+    assert_ne!(
+        sdk::field_word(
+            h.session.snapshot().unwrap().notes[&h.commitment]
+                .input
+                .root
+        ),
+        forged
+    );
+    assert_eq!(h.source.membership_reads.load(Ordering::SeqCst), reads + 1);
 }

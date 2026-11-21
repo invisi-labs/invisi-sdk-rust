@@ -54,6 +54,94 @@ impl WalletSession {
         }
         Ok(self.register_with_preparation(work(&self.invisi)?, None)?)
     }
+    /// Resolve only selected wallet paths when no retained preparation is usable.
+    /// The detached subset is never committed and cannot preload unrelated inventory.
+    fn selected_preparation_paths(
+        &self,
+        commitments: &BTreeSet<B256>,
+    ) -> Result<Option<WalletState>> {
+        let mut state = self.snapshot()?;
+        if self.cached_preparation(&state)?.is_some() || commitments.is_empty() {
+            return Ok(None);
+        }
+        if state.invalidated {
+            return Err("wallet requires canonical resync".into());
+        }
+        state.notes.retain(|key, _| commitments.contains(key));
+        state
+            .credits
+            .retain(|_, credit| commitments.contains(&credit.commitment));
+        let block = self.invisi.chain.snapshot()?;
+        self.invisi.chain.canonical(&block)?;
+        if self.invisi.chain.context() != self.scope.context
+            || self.source.context() != self.scope.context
+        {
+            return Err("preparation deployment mismatch".into());
+        }
+        self.align_preparation_paths(&mut state, &block, &BTreeSet::new())?;
+        self.invisi.chain.canonical(&block)?;
+        Ok(Some(state))
+    }
+    pub(crate) fn prepare_note_paths(&self, inputs: &mut [NoteInput]) -> Result<()> {
+        let commitments = inputs
+            .iter()
+            .map(|n| {
+                n.note
+                    .commitment()
+                    .map(sdk::field_word)
+                    .map_err(|e| e.to_string())
+            })
+            .collect::<Result<BTreeSet<_>>>()?;
+        if let Some(state) = self.selected_preparation_paths(&commitments)? {
+            for input in inputs {
+                let commitment =
+                    sdk::field_word(input.note.commitment().map_err(|e| e.to_string())?);
+                if let Some(note) = state.notes.get(&commitment) {
+                    // Caller position/opening validation remains the transaction preparer's job.
+                    if note.input.tree_id == input.tree_id
+                        && note.input.leaf_index == input.leaf_index
+                        && note.input.note == input.note
+                    {
+                        input.path = note.input.path;
+                        input.root = note.input.root;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    pub(crate) fn prepare_credit_paths(&self, inputs: &mut [sdk::CreditInput]) -> Result<()> {
+        let commitments = inputs
+            .iter()
+            .map(|c| {
+                c.delivery
+                    .note
+                    .commitment()
+                    .map(sdk::field_word)
+                    .map_err(|e| e.to_string())
+            })
+            .collect::<Result<BTreeSet<_>>>()?;
+        if let Some(state) = self.selected_preparation_paths(&commitments)? {
+            for input in inputs {
+                let commitment = sdk::field_word(
+                    input
+                        .delivery
+                        .note
+                        .commitment()
+                        .map_err(|e| e.to_string())?,
+                );
+                if let Some(credit) = state.credits.values().find(|c| {
+                    c.commitment == commitment
+                        && c.tree_id == input.tree_id
+                        && c.leaf_index == input.leaf_index
+                }) {
+                    input.path = credit.path;
+                    input.root = credit.root;
+                }
+            }
+        }
+        Ok(())
+    }
     pub(crate) fn retain_preparation(
         &self,
         state: &mut WalletState,
@@ -91,7 +179,7 @@ impl WalletSession {
             Err(e) => return Err(e),
         };
         facts.funding_nonces.push((self.scope.owner_address, nonce));
-        self.align_preparation_paths(state, block, previous, fresh_roots)?;
+        self.align_preparation_paths(state, block, fresh_roots)?;
         let mut tokens = BTreeSet::new();
         let mut roots = BTreeSet::new();
         let mut nullifiers = BTreeMap::new();
@@ -142,7 +230,6 @@ impl WalletSession {
         &self,
         state: &mut WalletState,
         block: &CanonicalBlock,
-        previous: Option<&RetainedPreparation>,
         fresh_roots: &BTreeSet<(u64, B256)>,
     ) -> Result<()> {
         let mut records = state
@@ -170,77 +257,115 @@ impl WalletSession {
         });
         records.dedup_by_key(|(tree, index, commitment, _)| (*tree, *index, *commitment));
         let mut pinned = BTreeMap::new();
-        for (tree, index, commitment, root) in records {
-            let selected = pinned.get(&tree).copied();
-            let accepted = if selected == Some(root) {
-                true
-            } else if selected.is_some() {
-                false
-            } else {
-                let cached = if fresh_roots.contains(&(tree, sdk::field_word(root))) {
-                    Some(true)
-                } else {
-                    previous.and_then(|p| {
-                        p.facts
-                            .roots
-                            .iter()
-                            .find(|(t, r, _)| *t == tree && *r == sdk::field_word(root))
-                            .map(|(_, _, v)| *v)
-                    })
-                };
-                cached.map(Ok).unwrap_or_else(|| {
-                    self.invisi
-                        .chain
-                        .known_root(tree, sdk::field_word(root), block)
-                })?
-            };
-            if accepted {
-                pinned.insert(tree, root);
+        let mut leaders = BTreeSet::new();
+        let mut missing = Vec::new();
+        // The highest leaf establishes each tree's root before older paths are considered.
+        for &(tree, index, commitment, root) in &records {
+            if !leaders.insert(tree) {
                 continue;
             }
-            // Reuse valid paths; only changed tree roots or expired roots need membership IO.
-            let input = crate::rpc::MembershipInput {
-                tree_id: tree,
-                leaf_index: u32::from(index),
-                commitment,
-                root: selected.map(sdk::field_word),
-            };
-            let proof = self.source.membership(&input, block)?;
-            if proof.block != *block
-                || proof.tree_id != tree
-                || proof.leaf_index != u32::from(index)
-                || proof.leaf != commitment
-                || selected.is_some_and(|r| sdk::field_word(r) != proof.root)
-            {
-                return Err("preparation membership response binding mismatch".into());
-            }
-            let path: [U256; 16] = proof
-                .path
-                .iter()
-                .map(|v| U256::from_be_slice(v.as_slice()))
-                .collect::<Vec<_>>()
-                .try_into()
-                .map_err(|_| "preparation membership depth mismatch")?;
-            let root = U256::from_be_slice(proof.root.as_slice());
-            if sdk::merkle_root(U256::from_be_slice(commitment.as_slice()), index, &path)? != root
-                || selected.is_none() && !self.invisi.chain.known_root(tree, proof.root, block)?
-            {
-                return Err("preparation membership or canonical root mismatch".into());
-            }
-            pinned.insert(tree, root);
-            if let Some(note) = state.notes.get_mut(&commitment) {
-                note.input.root = root;
-                note.input.path = path;
-            }
-            for credit in state
-                .credits
-                .values_mut()
-                .filter(|c| c.commitment == commitment)
-            {
-                credit.root = root;
-                credit.path = path;
+            // Persisted root acceptance is untrusted on an online refresh, even
+            // when its block/hash matches. Only evidence from this operation may
+            // bypass the current canonical reader.
+            let accepted = fresh_roots.contains(&(tree, sdk::field_word(root)))
+                || self
+                    .invisi
+                    .chain
+                    .known_root(tree, sdk::field_word(root), block)?;
+            if accepted {
+                pinned.insert(tree, root);
+            } else {
+                missing.push(crate::rpc::MembershipInput {
+                    tree_id: tree,
+                    leaf_index: index.into(),
+                    commitment,
+                    root: None,
+                });
             }
         }
-        Ok(())
+        let refreshed = self.fetch_preparation_paths(state, block, &missing)?;
+        for input in &missing {
+            pinned.insert(input.tree_id, refreshed[&input.commitment]);
+        }
+        let mut missing = Vec::new();
+        for (tree, index, commitment, current) in records {
+            if refreshed.contains_key(&commitment) {
+                continue;
+            }
+            let selected = pinned[&tree];
+            if current != selected {
+                missing.push(crate::rpc::MembershipInput {
+                    tree_id: tree,
+                    leaf_index: index.into(),
+                    commitment,
+                    root: Some(sdk::field_word(selected)),
+                });
+            }
+        }
+        self.fetch_preparation_paths(state, block, &missing)
+            .map(|_| ())
+    }
+
+    fn fetch_preparation_paths(
+        &self,
+        state: &mut WalletState,
+        block: &CanonicalBlock,
+        inputs: &[crate::rpc::MembershipInput],
+    ) -> Result<BTreeMap<B256, U256>> {
+        let mut verified_roots = BTreeSet::new();
+        let mut refreshed = BTreeMap::new();
+        for batch in inputs.chunks(256) {
+            let proofs = self.source.memberships(batch, block)?;
+            if proofs.len() != batch.len() {
+                return Err("preparation membership count mismatch".into());
+            }
+            for (input, proof) in batch.iter().zip(proofs) {
+                if proof.block != *block
+                    || proof.tree_id != input.tree_id
+                    || proof.leaf_index != input.leaf_index
+                    || proof.leaf != input.commitment
+                    || input.root.is_some_and(|r| r != proof.root)
+                {
+                    return Err("preparation membership response binding mismatch".into());
+                }
+                let path: [U256; 16] = proof
+                    .path
+                    .iter()
+                    .map(|v| U256::from_be_slice(v.as_slice()))
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .map_err(|_| "preparation membership depth mismatch")?;
+                let root = U256::from_be_slice(proof.root.as_slice());
+                if sdk::merkle_root(
+                    U256::from_be_slice(input.commitment.as_slice()),
+                    u16::try_from(input.leaf_index)
+                        .map_err(|_| "preparation leaf index overflow")?,
+                    &path,
+                )? != root
+                    || !verified_roots.contains(&(input.tree_id, proof.root))
+                        && !self
+                            .invisi
+                            .chain
+                            .known_root(input.tree_id, proof.root, block)?
+                {
+                    return Err("preparation membership or canonical root mismatch".into());
+                }
+                verified_roots.insert((input.tree_id, proof.root));
+                refreshed.insert(input.commitment, root);
+                if let Some(note) = state.notes.get_mut(&input.commitment) {
+                    note.input.root = root;
+                    note.input.path = path;
+                }
+                for credit in state
+                    .credits
+                    .values_mut()
+                    .filter(|c| c.commitment == input.commitment)
+                {
+                    credit.root = root;
+                    credit.path = path;
+                }
+            }
+        }
+        Ok(refreshed)
     }
 }

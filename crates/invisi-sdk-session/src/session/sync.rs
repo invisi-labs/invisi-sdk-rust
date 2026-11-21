@@ -29,6 +29,20 @@ pub trait SessionSource: Send + Sync {
     fn receipt(&self, hash: B256) -> Result<Option<CanonicalReceipt>>;
     fn transaction(&self, hash: B256) -> Result<Option<CanonicalTransaction>>;
     fn membership(&self, input: &MembershipInput, block: &CanonicalBlock) -> Result<Membership>;
+    /// Ordered bounded batch. Implementations may share evidence within this operation only.
+    fn memberships(
+        &self,
+        inputs: &[MembershipInput],
+        block: &CanonicalBlock,
+    ) -> Result<Vec<Membership>> {
+        if inputs.len() > 256 {
+            return Err("membership batch exceeds 256".into());
+        }
+        inputs
+            .iter()
+            .map(|input| self.membership(input, block))
+            .collect()
+    }
     fn known_root(&self, _tree: u64, _root: B256, _block: &CanonicalBlock) -> Result<bool> {
         Err("shared public proofs require canonical root verification".into())
     }
@@ -114,6 +128,14 @@ impl<T: RpcTransport, C: CanonicalHead + ChainReceipts + ChainTransactions> Sess
     fn transaction(&self, hash: B256) -> Result<Option<CanonicalTransaction>> {
         self.chain.transaction(hash).map_err(|e| e.to_string())
     }
+    fn memberships(
+        &self,
+        inputs: &[MembershipInput],
+        block: &CanonicalBlock,
+    ) -> Result<Vec<Membership>> {
+        self.get_memberships(inputs, block)
+            .map_err(|e| e.to_string())
+    }
     fn membership(&self, input: &MembershipInput, block: &CanonicalBlock) -> Result<Membership> {
         self.get_membership(input, block).map_err(|e| e.to_string())
     }
@@ -134,6 +156,12 @@ impl RefreshOptions {
             reset: false,
         }
     }
+}
+/// Optional refresh materialization; default retains full offline preparation support.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RefreshBehavior {
+    /// Skip transaction material preload and discard any earlier preparation snapshot.
+    pub inventory_only: bool,
 }
 #[derive(Clone, Debug)]
 pub struct RefreshResult {
@@ -174,17 +202,22 @@ impl ScanReadSnapshot {
         }
     }
     fn consumed(&self, session: &WalletSession, nullifier: B256) -> Result<bool> {
-        let mut values = self
+        let values = self
             .consumed
             .lock()
             .map_err(|_| "scan consumption cache poisoned")?;
         if let Some(value) = values.get(&nullifier) {
             return Ok(*value);
         }
+        drop(values);
         let value = session
             .invisi
             .chain
             .nullifier_spent(nullifier, &self.block)?;
+        let mut values = self
+            .consumed
+            .lock()
+            .map_err(|_| "scan consumption cache poisoned")?;
         if values.len() < 8192 {
             values.insert(nullifier, value);
         }
@@ -197,7 +230,7 @@ impl ScanReadSnapshot {
         token: Address,
         grant_id: u128,
     ) -> Result<u8> {
-        let mut values = self
+        let values = self
             .revoked
             .lock()
             .map_err(|_| "scan revocation cache poisoned")?;
@@ -205,16 +238,57 @@ impl ScanReadSnapshot {
         if let Some(value) = values.get(&key) {
             return Ok(*value);
         }
+        drop(values);
         let value = session
             .invisi
             .chain
             .credit_status(owner, token, grant_id, &self.block)?;
+        let mut values = self
+            .revoked
+            .lock()
+            .map_err(|_| "scan revocation cache poisoned")?;
         if values.len() < 8192 {
             values.insert(key, value);
         }
         Ok(value)
     }
 }
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum InventoryRead {
+    Consumed(B256),
+    GrantStatus(Address, Address, u128),
+}
+
+// Synchronous provider traits are Send + Sync. Scoped workers borrow them safely,
+// join before returning, and preserve input order independently of completion order.
+fn bounded_reads<T: Sync, R: Send>(
+    tasks: &[T],
+    read: &(impl Fn(&T) -> Result<R> + Sync),
+) -> Result<Vec<R>> {
+    if tasks.len() <= 1 {
+        return tasks.iter().map(read).collect();
+    }
+    std::thread::scope(|scope| {
+        let handles = tasks
+            .chunks(tasks.len().div_ceil(4))
+            .map(|chunk| scope.spawn(move || chunk.iter().map(read).collect::<Result<Vec<_>>>()))
+            .collect::<Vec<_>>();
+        let results = handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|_| Err("inventory read worker panicked".into()))
+            })
+            .collect::<Vec<_>>();
+        let mut output = Vec::with_capacity(tasks.len());
+        for result in results {
+            output.extend(result?);
+        }
+        Ok(output)
+    })
+}
+
 pub struct PendingWalletRefresh {
     session: WalletSession,
     base: WalletState,
@@ -232,6 +306,7 @@ pub struct PendingWalletRefresh {
     pub(super) offline: bool,
     memberships: Vec<crate::public_history::CachedMembership>,
     read_snapshot: Option<Arc<ScanReadSnapshot>>,
+    inventory_only: bool,
 }
 impl std::fmt::Debug for PendingWalletRefresh {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -245,6 +320,17 @@ impl WalletSession {
     pub fn refresh(&self, options: RefreshOptions) -> Result<PendingWalletRefresh> {
         let head = self.source.indexed_head()?;
         self.refresh_at_head(options, &head)
+    }
+    /// Refresh inventory with optional transaction material preloading.
+    /// The original `refresh` API continues to retain offline preparation material.
+    pub fn refresh_with_behavior(
+        &self,
+        options: RefreshOptions,
+        behavior: RefreshBehavior,
+    ) -> Result<PendingWalletRefresh> {
+        let mut pending = self.refresh(options)?;
+        pending.inventory_only = behavior.inventory_only;
+        Ok(pending)
     }
     // The indexed snapshot is immutable for this scan only. Every private commit
     // still performs independent live canonical and consumption/revocation checks.
@@ -408,6 +494,7 @@ impl WalletSession {
             offline: false,
             memberships: vec![],
             read_snapshot: None,
+            inventory_only: false,
             anchor,
             receipts,
             candidates,
@@ -890,38 +977,43 @@ impl PendingWalletRefresh {
                 return Err("primary observation predates wallet inventory".into());
             }
             session.invisi.chain.canonical(&observation)?;
+            let local_reads = ScanReadSnapshot::new(observation.clone());
+            let reads = self.read_snapshot.as_deref().unwrap_or(&local_reads);
+            let mut requests = BTreeSet::new();
+            for note in next.notes.values() {
+                requests.insert(InventoryRead::Consumed(note.nullifier));
+            }
+            for credit in next.credits.values() {
+                requests.insert(InventoryRead::Consumed(credit.nullifier));
+                let n = &credit.delivery.note;
+                requests.insert(InventoryRead::GrantStatus(
+                    sdk::word_address(n.owner_wallet_identity)?,
+                    sdk::word_address(n.token_address)?,
+                    n.grant_id,
+                ));
+            }
+            let requests = requests.into_iter().collect::<Vec<_>>();
+            let values = bounded_reads(&requests, &|request| {
+                if let Some(token) = &self.cancellation {
+                    token.check()?;
+                }
+                match *request {
+                    InventoryRead::Consumed(n) => reads.consumed(session, n).map(u8::from),
+                    InventoryRead::GrantStatus(o, t, id) => reads.revoked(session, o, t, id),
+                }
+            })?;
+            let values = requests.into_iter().zip(values).collect::<BTreeMap<_, _>>();
             for note in next.notes.values_mut() {
-                note.spent = if let Some(reads) = &self.read_snapshot {
-                    reads.consumed(session, note.nullifier)?
-                } else {
-                    session
-                        .invisi
-                        .chain
-                        .nullifier_spent(note.nullifier, &observation)?
-                };
+                note.spent = values[&InventoryRead::Consumed(note.nullifier)] != 0;
             }
             for credit in next.credits.values_mut() {
-                credit.consumed = if let Some(reads) = &self.read_snapshot {
-                    reads.consumed(session, credit.nullifier)?
-                } else {
-                    session
-                        .invisi
-                        .chain
-                        .nullifier_spent(credit.nullifier, &observation)?
-                };
-                let state = &credit.delivery.note;
-                let owner = sdk::word_address(state.owner_wallet_identity)?;
-                let token = sdk::word_address(state.token_address)?;
-                credit.status = if let Some(reads) = &self.read_snapshot {
-                    reads.revoked(session, owner, token, state.grant_id)?
-                } else {
-                    session.invisi.chain.credit_status(
-                        owner,
-                        token,
-                        state.grant_id,
-                        &observation,
-                    )?
-                };
+                credit.consumed = values[&InventoryRead::Consumed(credit.nullifier)] != 0;
+                let n = &credit.delivery.note;
+                credit.status = values[&InventoryRead::GrantStatus(
+                    sdk::word_address(n.owner_wallet_identity)?,
+                    sdk::word_address(n.token_address)?,
+                    n.grant_id,
+                )];
                 if credit.status > 2 {
                     return Err("invalid Credit status".into());
                 }
@@ -1070,7 +1162,7 @@ impl PendingWalletRefresh {
         }
         next.public_history_generation = self.public_generation.or(next.public_history_generation);
         let no_fresh_roots = BTreeSet::new();
-        if self.offline {
+        if self.offline || self.inventory_only {
             next.preparation_snapshot = None;
         } else {
             session.retain_preparation(
@@ -1086,6 +1178,9 @@ impl PendingWalletRefresh {
         if !self.offline {
             session.invisi.chain.canonical(&observation)?;
             session.invisi.chain.canonical(&self.anchor)?;
+            if session.invisi.chain.context() != session.scope.context {
+                return Err("refresh chain identity changed".into());
+            }
         }
         if let (Some(history), Some(generation)) = (&session.public_history, self.public_generation)
         {
@@ -1486,6 +1581,7 @@ impl WalletSession {
                 Some(vec![]),
             )?;
             pending.offline = options.offline;
+            pending.cancellation = Some(cancel.clone());
             pending.read_snapshot = read_snapshot.clone();
             last = Some(pending.decrypt(decryptor)?);
         }
@@ -1635,5 +1731,37 @@ mod replay_schedule_tests {
         assert_eq!(state.credit_replay_through, None);
         assert_eq!(state.credit_replay_from, Some(10));
         assert_eq!(state.credit_replay_target, Some(120));
+    }
+}
+
+#[cfg(test)]
+mod bounded_read_tests {
+    use super::*;
+    #[test]
+    fn four_workers_overlap_and_merge_in_input_order() {
+        let barrier = std::sync::Barrier::new(4);
+        let active = std::sync::atomic::AtomicUsize::new(0);
+        let peak = std::sync::atomic::AtomicUsize::new(0);
+        let output = bounded_reads(&[1, 2, 3, 4, 5, 6, 7, 8], &|value| {
+            let count = active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            peak.fetch_max(count, std::sync::atomic::Ordering::SeqCst);
+            barrier.wait();
+            active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(value * 2)
+        })
+        .unwrap();
+        assert_eq!(output, vec![2, 4, 6, 8, 10, 12, 14, 16]);
+        assert_eq!(peak.load(std::sync::atomic::Ordering::SeqCst), 4);
+    }
+    #[test]
+    fn worker_error_discards_all_results() {
+        assert!(bounded_reads(&[1, 2, 3, 4, 5], &|value| {
+            if *value == 3 {
+                Err("read failed".into())
+            } else {
+                Ok(*value)
+            }
+        })
+        .is_err());
     }
 }

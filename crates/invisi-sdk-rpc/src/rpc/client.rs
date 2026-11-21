@@ -237,6 +237,90 @@ impl<T: RpcTransport, C: CanonicalChain> ProtocolRpcClient<T, C> {
         input: &MembershipInput,
         block: &CanonicalBlock,
     ) -> Result<Membership> {
+        self.get_memberships(std::slice::from_ref(input), block)?
+            .pop()
+            .ok_or(Error::Invalid("missing membership"))
+    }
+    /// Authenticate up to 256 ordered paths with operation-scoped shared root evidence.
+    /// No evidence survives this call; all canonical anchors are fenced before return.
+    pub fn get_memberships(
+        &self,
+        inputs: &[MembershipInput],
+        block: &CanonicalBlock,
+    ) -> Result<Vec<Membership>> {
+        if inputs.len() > 256 {
+            return Err(Error::Invalid("membership batch exceeds 256"));
+        }
+        if inputs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut constraints = HashMap::<u64, (u32, Option<B256>)>::new();
+        for input in inputs {
+            let constraint = constraints
+                .entry(input.tree_id)
+                .or_insert((input.leaf_index, input.root));
+            constraint.0 = constraint.0.max(input.leaf_index);
+            if let Some(root) = input.root {
+                if constraint.1.is_some_and(|r| r != root) {
+                    return Err(Error::Invalid("conflicting membership roots"));
+                }
+                constraint.1 = Some(root);
+            }
+            if input.tree_id == 0
+                || input.tree_id > MAX_SAFE_INTEGER
+                || input.leaf_index >= 1 << TREE_DEPTH
+            {
+                return Err(Error::Invalid("invalid membership position"));
+            }
+            field(input.commitment)?;
+            if let Some(root) = input.root {
+                field(root)?;
+            }
+        }
+        let status = self.get_status()?;
+        self.canonical(block)?;
+        if block.number < self.deployment.protocol.from_block {
+            return Err(Error::Invalid("membership predates deployment"));
+        }
+        let mut roots = HashMap::new();
+        let mut known = HashMap::new();
+        let mut anchors = HashMap::new();
+        let mut proofs = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            let mut bound = input.clone();
+            bound.root = constraints[&input.tree_id].1;
+            let proof = self.membership_in_batch(
+                &bound,
+                block,
+                constraints[&input.tree_id].0,
+                &mut roots,
+                &mut known,
+                &mut anchors,
+            )?;
+            constraints
+                .get_mut(&input.tree_id)
+                .expect("input constraint")
+                .1 = Some(proof.root);
+            proofs.push(proof);
+        }
+        for anchor in anchors.values() {
+            self.canonical(anchor)?;
+        }
+        if let Some(head) = &status.indexed_head {
+            self.canonical(head)?;
+        }
+        self.canonical(block)?;
+        Ok(proofs)
+    }
+    fn membership_in_batch(
+        &self,
+        input: &MembershipInput,
+        block: &CanonicalBlock,
+        highest_leaf: u32,
+        roots_cache: &mut HashMap<u64, Vec<RootAnchor>>,
+        known_cache: &mut HashMap<(u64, B256), bool>,
+        anchors: &mut HashMap<u64, CanonicalBlock>,
+    ) -> Result<Membership> {
         if input.tree_id == 0
             || input.tree_id > MAX_SAFE_INTEGER
             || input.leaf_index >= 1 << TREE_DEPTH
@@ -247,41 +331,59 @@ impl<T: RpcTransport, C: CanonicalChain> ProtocolRpcClient<T, C> {
         if let Some(root) = input.root {
             field(root)?;
         }
-        self.get_status()?;
-        self.canonical(block)?;
-        if block.number < self.deployment.protocol.from_block {
-            return Err(Error::Invalid("membership predates deployment"));
+        if let std::collections::hash_map::Entry::Vacant(entry) = roots_cache.entry(input.tree_id) {
+            let roots = self.rpc.call("invisi_getRoots", json!([input.tree_id]))?;
+            let mut roots = roots
+                .as_array()
+                .ok_or(Error::Invalid("root list required"))?
+                .iter()
+                .map(RootAnchor::parse)
+                .collect::<Result<Vec<_>>>()?;
+            roots.sort_by_key(|r| std::cmp::Reverse((r.block.number, r.leaf_count)));
+            entry.insert(roots);
         }
-        let roots = self.rpc.call("invisi_getRoots", json!([input.tree_id]))?;
-        let mut roots = roots
-            .as_array()
-            .ok_or(Error::Invalid("root list required"))?
-            .iter()
-            .map(RootAnchor::parse)
-            .collect::<Result<Vec<_>>>()?;
-        roots.sort_by_key(|r| std::cmp::Reverse((r.block.number, r.leaf_count)));
+        let roots = &roots_cache[&input.tree_id];
         let mut selected = None;
-        for root in roots {
+        for root in roots.iter().cloned() {
             if root.tree_id != input.tree_id || root.leaf_count > 1 << TREE_DEPTH {
                 return Err(Error::Invalid("invalid root metadata"));
             }
             if root.block.number > block.number
                 || root.block.number < self.deployment.protocol.from_block
-                || root.leaf_count <= input.leaf_index
+                || root.leaf_count <= highest_leaf
                 || input.root.is_some_and(|r| r != root.root)
             {
                 continue;
             }
             field(root.root)?;
-            self.canonical(&root.block)?;
-            let known = self.contract_read(
-                self.deployment.protocol.address,
-                &InvisiCore::rootHistoryCall {
-                    _0: U256::from(input.tree_id),
-                    _1: root.root,
-                },
-                block,
-            )?;
+            match anchors.get(&root.block.number) {
+                Some(previous) if previous != &root.block => {
+                    return Err(Error::Invalid("conflicting root anchors"))
+                }
+                Some(_) => {}
+                None => {
+                    self.canonical(&root.block)?;
+                    anchors.insert(root.block.number, root.block.clone());
+                }
+            }
+            let key = (input.tree_id, root.root);
+            let known = if let Some(value) = known_cache.get(&key) {
+                *value
+            } else {
+                let bytes = self.chain.call(
+                    self.deployment.protocol.address,
+                    &InvisiCore::rootHistoryCall {
+                        _0: U256::from(input.tree_id),
+                        _1: root.root,
+                    }
+                    .abi_encode(),
+                    block.number,
+                )?;
+                let value = InvisiCore::rootHistoryCall::abi_decode_returns_validate(&bytes)
+                    .map_err(|_| Error::Invalid("invalid ABI return"))?;
+                known_cache.insert(key, value);
+                value
+            };
             if known {
                 selected = Some(root);
                 break;
@@ -320,7 +422,6 @@ impl<T: RpcTransport, C: CanonicalChain> ProtocolRpcClient<T, C> {
         if crate::field::field_to_bytes_be(current).as_slice() != root.root.as_slice() {
             return Err(Error::Invalid("invalid Merkle path"));
         }
-        self.canonical(block)?;
         Ok(Membership {
             tree_id: input.tree_id,
             leaf_index: input.leaf_index,

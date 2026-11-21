@@ -9,6 +9,7 @@ publish = false
 path = "support/discovery.rs"
 
 [dependencies]
+invisi-sdk-payment-router = { path = "../crates/invisi-sdk-payment-router", version = "=1.3.2" }
 invisi-sdk-session = { path = "../crates/invisi-sdk-session", version = "=1.3.2" }
 invisi-sdk = { path = "..", version = "=1.3.2" }
 alloy-primitives = { version = "=1.5.7", features = ["serde"] }
@@ -110,3 +111,31 @@ path = "07-broadcaster/confirmation.rs"
 name = "scheduled-broadcaster"
 path = "07-broadcaster/04-scheduled-cancel.rs"
 required-features = ["sqlite"]
+
+[[bin]]
+name = "router-self-token"
+path = "08-payment-router/01-self-token.rs"
+
+[[bin]]
+name = "router-self-native"
+path = "08-payment-router/02-self-native.rs"
+
+[[bin]]
+name = "router-relayed-token"
+path = "08-payment-router/03-relayed-token.rs"
+
+[[bin]]
+name = "router-sponsored-native-7702"
+path = "08-payment-router/04-sponsored-native-7702.rs"
+
+[[bin]]
+name = "router-self-token-zeroex"
+path = "08-payment-router/05-self-token-zeroex.rs"
+
+[[bin]]
+name = "router-output-recognition"
+path = "09-provenance/01-router-output-recognition.rs"
+
+[[bin]]
+name = "recognized-note-spend"
+path = "09-provenance/02-private-note-spend.rs"

@@ -23,6 +23,8 @@ cargo run -p invisi-sdk-examples --features sqlite --bin restore-session -- --ex
 | `05-session` | `restore-session`, `send-session`, `create-credit-session`, `draw-credit-session`, `update-credit-session`, `revoke-credit-session` | Encrypted SQLite inventory, application decryption callbacks, managed operations and recovery |
 | `06-disclosure` | `disclose-note`, `disclose-credit` | Explicit financial opening exports and independent commitment checks |
 | `07-broadcaster` | `prepare-and-broadcast`, `pre-submit-provenance`, `recover-and-submit-provenance`, `scheduled-broadcaster`, `transaction-confirmation` | Client-owned Broadcaster lifecycle, host-paid Source precheck, encrypted recovery and independent confirmation |
+| `08-payment-router` | `router-self-token`, `router-self-native`, `router-relayed-token`, `router-sponsored-native-7702`, `router-self-token-zeroex` | Host recipes for all four canonical funding modes and real V3/0x quotes |
+| `09-provenance` | `router-output-recognition`, `recognized-note-spend` | Host recipes for real Source status and later private Core/Provenance proof submission |
 
 ## Public Wallet initialization
 
@@ -255,3 +257,16 @@ scheduling/aggregation. Native relay uses EIP-7702 and zero outer value; the pay
 balance supplies principal. Host wallets own signing and persistent
 delegation/revocation, and must track independent Router, account action, and EOA
 transaction/authorization nonces.
+
+### Router and recognition scenario binaries
+
+The native [Router recipes](08-payment-router/README.md) cover self ERC20, self
+native, relayed ERC20 and EIP-7702 native sponsorship, including actual V3 and 0x
+route selection. The [Source recipes](09-provenance/README.md) query real Router
+output recognition and show later private Note authorization, Core/Provenance
+proving and independent public Source submission, with the cross-mode scenario
+matrix. These binaries are host-injected, compile-checked recipes: their ordinary
+entry points print guidance only, and their exported functions require real host
+wallet, deployment, proving and submission capabilities. No fake proof, quote or
+7702 authorization is used. Existing `07-broadcaster` and crate examples remain
+available.

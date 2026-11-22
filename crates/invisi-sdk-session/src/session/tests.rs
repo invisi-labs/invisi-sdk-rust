@@ -49,6 +49,7 @@ fn wallet(n: u8) -> Wallet {
 }
 #[derive(Default)]
 struct Chain {
+    deployment: Option<ProtocolContext>,
     offline: AtomicBool,
     preparation_enabled: AtomicBool,
     nonce: std::sync::atomic::AtomicU64,
@@ -97,7 +98,7 @@ impl ChainState for Chain {
             "estimator read chain context"
         );
         self.online().expect("live context access forbidden");
-        let mut value = context();
+        let mut value = self.deployment.unwrap_or_else(context);
         if self.changed_context.load(Ordering::SeqCst) {
             value.chain_id += 1
         }
@@ -196,7 +197,7 @@ struct Source {
 }
 impl SessionSource for Source {
     fn context(&self) -> ProtocolContext {
-        context()
+        self.chain.deployment.unwrap_or_else(context)
     }
     fn deployment_start(&self) -> u64 {
         0
@@ -339,9 +340,12 @@ struct Harness {
     commitment: B256,
 }
 fn harness() -> Harness {
+    harness_in_context(context())
+}
+fn harness_in_context(deployment: ProtocolContext) -> Harness {
     let wallet = wallet(1);
     let note = crate::note::Note {
-        context: context(),
+        context: deployment,
         owner_address: sdk::address_word(wallet.owner_address()),
         token_address: U256::from(22136),
         amount: U256::from(70),
@@ -350,7 +354,7 @@ fn harness() -> Harness {
     };
     let commitment = sdk::field_word(note.commitment().unwrap());
     let delivery = crate::delivery::DeliveryContext {
-        context: context(),
+        context: deployment,
         token_address: note.token_address,
         output_commitment: U256::from_be_slice(commitment.as_slice()),
     };
@@ -360,14 +364,17 @@ fn harness() -> Harness {
     let clue = crate::fmd::create_clue(&keys.clue_key).unwrap();
     let path = [U256::ZERO; 16];
     let root = sdk::merkle_root(U256::from_be_slice(commitment.as_slice()), 0, &path).unwrap();
-    let chain = Arc::new(Chain::default());
+    let chain = Arc::new(Chain {
+        deployment: Some(deployment),
+        ..Default::default()
+    });
     chain.roots.lock().unwrap().insert(sdk::field_word(root));
     let insert = P::CommitmentsInserted {
         treeId: U256::from(1),
         startLeafIndex: 0,
         commitments: vec![commitment],
     };
-    let shield_logs = shield_receipt_logs(
+    let mut shield_logs = shield_receipt_logs(
         note.token_address,
         wallet.owner_address(),
         note.amount,
@@ -378,6 +385,9 @@ fn harness() -> Harness {
         }],
         insert.clone(),
     );
+    for log in &mut shield_logs {
+        log.address = sdk::word_address(deployment.protocol_address).unwrap();
+    }
     let receipt = CanonicalReceipt {
         transaction_hash: B256::with_last_byte(9),
         block: block(10),
@@ -840,13 +850,52 @@ fn durable_snapshot_rejects_corrupted_capacity_sources_and_authorization_flags()
         );
     }
 }
-#[test]
-fn credit_inventory_is_separate_and_canonical_draw_recovers_owned_successor_without_decrypting_new_envelopes(
-) {
+fn credit_delivery(state: &CreditDeliveryState, role: CreditRole) -> abi::Delivery {
+    let keys = if role == CreditRole::Owner {
+        &state.owner_receiving_keys
+    } else {
+        &state.spender_receiving_keys
+    };
+    let context = crate::delivery::DeliveryContext {
+        context: state.note.context,
+        token_address: state.note.token_address,
+        output_commitment: state.note.commitment().unwrap(),
+    };
+    abi::Delivery {
+        ciphertext: crate::delivery::encrypt_credit(
+            &keys.viewing_public_key,
+            state,
+            &context,
+            role,
+        )
+        .unwrap()
+        .into(),
+        clue: crate::fmd::create_clue(&keys.clue_key).unwrap().into(),
+    }
+}
+
+fn synced_credit(same_wallet: bool, encrypted: bool) -> (Harness, CreditDeliveryState, B256) {
     use crate::credit::{CreditPolicy, CreditState, CreditUsage};
-    let h = harness();
+    let mut h = harness();
+    if encrypted {
+        h.session = WalletSession::connect(
+            h.session.invisi.clone(),
+            h.session.wallet.clone(),
+            Arc::new(
+                EncryptedWalletStore::new(Arc::new(MemoryAtomicRecords::default()), [19; 32])
+                    .unwrap(),
+            ),
+            h.source.clone(),
+            "test",
+        )
+        .unwrap();
+    }
     let alice = wallet(1);
-    let bob = wallet(2);
+    let bob = if same_wallet {
+        alice.clone()
+    } else {
+        wallet(2)
+    };
     let state = CreditDeliveryState {
         note: CreditState {
             context: context(),
@@ -866,29 +915,6 @@ fn credit_inventory_is_separate_and_canonical_draw_recovers_owned_successor_with
         owner_receiving_keys: alice.receiving_keys().clone(),
         spender_receiving_keys: bob.receiving_keys().clone(),
     };
-    let delivery_for = |state: &CreditDeliveryState, role: CreditRole| {
-        let keys = if role == CreditRole::Owner {
-            &state.owner_receiving_keys
-        } else {
-            &state.spender_receiving_keys
-        };
-        let context = crate::delivery::DeliveryContext {
-            context: context(),
-            token_address: state.note.token_address,
-            output_commitment: state.note.commitment().unwrap(),
-        };
-        abi::Delivery {
-            ciphertext: crate::delivery::encrypt_credit(
-                &keys.viewing_public_key,
-                state,
-                &context,
-                role,
-            )
-            .unwrap()
-            .into(),
-            clue: crate::fmd::create_clue(&keys.clue_key).unwrap().into(),
-        }
-    };
     let commitment = sdk::field_word(state.note.commitment().unwrap());
     let path = [U256::ZERO; 16];
     let root = sdk::merkle_root(U256::from_be_slice(commitment.as_slice()), 0, &path).unwrap();
@@ -906,8 +932,8 @@ fn credit_inventory_is_separate_and_canonical_draw_recovers_owned_successor_with
         creditCommitment: commitment,
         leafIndex: 0,
         deliveries: vec![
-            delivery_for(&state, CreditRole::Owner),
-            delivery_for(&state, CreditRole::Spender),
+            credit_delivery(&state, CreditRole::Owner),
+            credit_delivery(&state, CreditRole::Spender),
         ],
         deadline: U256::from(2_000_000_100u64),
         feeRecipient: Address::ZERO,
@@ -921,7 +947,181 @@ fn credit_inventory_is_separate_and_canonical_draw_recovers_owned_successor_with
     h.source.receipt.lock().unwrap().logs = vec![log(&insertion, 0), log(&created, 1)];
     let pending = h.session.refresh(RefreshOptions::from_block(0)).unwrap();
     pending.decrypt(&AppDecryptor::default()).unwrap();
+    (h, state, commitment)
+}
+
+fn credit_operation(
+    h: &Harness,
+    state: &CreditDeliveryState,
+    commitment: B256,
+    kind: &str,
+) -> Operation {
+    match kind {
+        "create" => {
+            let mut state = state.clone();
+            state.note.grant_id = 2;
+            h.session
+                .prepare_create_credit_explicit(state, 2_000_000_100, sdk::Fee::default())
+                .unwrap()
+        }
+        "update" => h
+            .session
+            .prepare_update_credit_explicit(
+                &credit_key(commitment, CreditRole::Owner),
+                crate::credit::CreditUpdateChanges::default(),
+                2_000_000_100,
+                sdk::Fee::default(),
+            )
+            .unwrap(),
+        "draw" => h
+            .session
+            .prepare_draw_credit_explicit(
+                &[(credit_key(commitment, CreditRole::Spender), U256::from(30))],
+                &wallet(2),
+                2_000_000_100,
+                sdk::Fee::default(),
+                vec![],
+            )
+            .unwrap(),
+        "revoke" => h
+            .session
+            .prepare_revoke_credit_explicit(
+                sdk::word_address(state.note.token_address).unwrap(),
+                1,
+                2_000_000_100,
+                sdk::Fee::default(),
+            )
+            .unwrap(),
+        _ => panic!("unknown Credit operation"),
+    }
+}
+
+#[test]
+fn credit_resume_cannot_take_over_another_wallet_chain_or_core_in_shared_stores() {
+    let mut other_chain = context();
+    other_chain.chain_id += 1;
+    let mut other_core = context();
+    other_core.protocol_address += U256::from(1);
+    let foreign = [
+        (wallet(2), harness_in_context(context())),
+        (wallet(1), harness_in_context(other_chain)),
+        (wallet(1), harness_in_context(other_core)),
+    ];
+    for encrypted in [false, true] {
+        let (h, state, commitment) = synced_credit(true, encrypted);
+        for kind in ["create", "update", "draw", "revoke"] {
+            let original = credit_operation(&h, &state, commitment, kind);
+            let before = serde_json::to_value(h.session.snapshot().unwrap()).unwrap();
+            for (owner, other) in &foreign {
+                let session = WalletSession::connect(
+                    other.session.invisi.clone(),
+                    owner.clone(),
+                    h.session.store.clone(),
+                    other.source.clone(),
+                    "test",
+                )
+                .unwrap();
+                let foreign_before = serde_json::to_value(session.snapshot().unwrap()).unwrap();
+                assert!(
+                    session.resume(original.id(), Some(&Backend)).is_err(),
+                    "{kind}, encrypted={encrypted}"
+                );
+                assert_eq!(
+                    serde_json::to_value(session.snapshot().unwrap()).unwrap(),
+                    foreign_before
+                );
+                assert_eq!(
+                    serde_json::to_value(h.session.snapshot().unwrap()).unwrap(),
+                    before
+                );
+            }
+            // A rejected foreign resume must leave the original handle usable.
+            original.abandon().unwrap();
+            assert!(h
+                .session
+                .snapshot()
+                .unwrap()
+                .credits
+                .values()
+                .all(|credit| credit.reserved_by.is_none() && !credit.consumed));
+        }
+    }
+}
+
+#[test]
+fn credit_resume_preserves_both_role_reservations_until_current_handle_abandons() {
+    for encrypted in [false, true] {
+        let (h, state, commitment) = synced_credit(true, encrypted);
+        for kind in ["create", "update", "draw", "revoke"] {
+            let original = credit_operation(&h, &state, commitment, kind);
+            let id = original.id().to_owned();
+            let before = h.session.snapshot().unwrap();
+            assert_eq!(before.credits.len(), 2);
+            let reserves_input = matches!(kind, "update" | "draw");
+            assert_eq!(
+                before.operations[&id].inputs,
+                if reserves_input {
+                    vec![format!("credit:{commitment}")]
+                } else {
+                    vec![]
+                }
+            );
+            for role in [CreditRole::Owner, CreditRole::Spender] {
+                assert_eq!(
+                    before.credits[&credit_key(commitment, role)]
+                        .reserved_by
+                        .as_deref(),
+                    reserves_input.then_some(id.as_str())
+                );
+            }
+            let restarted = WalletSession::connect(
+                h.session.invisi.clone(),
+                h.session.wallet.clone(),
+                h.session.store.clone(),
+                h.source.clone(),
+                "test",
+            )
+            .unwrap();
+            let resumed = restarted.resume(&id, None).unwrap();
+            let after = restarted.snapshot().unwrap();
+            assert_eq!(after.revision, before.revision + 1);
+            assert_eq!(
+                after.operations[&id].generation,
+                before.operations[&id].generation + 1
+            );
+            assert_eq!(after.operations[&id].inputs, before.operations[&id].inputs);
+            assert_eq!(
+                serde_json::to_value(&after.credits).unwrap(),
+                serde_json::to_value(&before.credits).unwrap()
+            );
+            assert!(original.abandon().is_err());
+            assert_eq!(
+                serde_json::to_value(restarted.snapshot().unwrap()).unwrap(),
+                serde_json::to_value(&after).unwrap()
+            );
+            resumed.abandon().unwrap();
+            let released = restarted.snapshot().unwrap();
+            assert!(released
+                .credits
+                .values()
+                .all(|credit| credit.reserved_by.is_none() && !credit.consumed && !credit.revoked));
+            assert_eq!(released.operations[&id].status, OperationStatus::Failed);
+            // The operation can be prepared again without consuming the Credit.
+            credit_operation(&h, &state, commitment, kind)
+                .abandon()
+                .unwrap();
+        }
+    }
+}
+
+#[test]
+fn credit_inventory_is_separate_and_canonical_draw_recovers_owned_successor_without_decrypting_new_envelopes(
+) {
+    let (h, state, commitment) = synced_credit(false, false);
+    let alice = wallet(1);
+    let bob = wallet(2);
     let initial = h.session.snapshot().unwrap();
+    let root = initial.credits[&credit_key(commitment, CreditRole::Owner)].root;
     assert_eq!(initial.credits.len(), 1);
     assert!(initial.notes.is_empty());
     assert_eq!(
@@ -1027,8 +1227,8 @@ fn credit_inventory_is_separate_and_canonical_draw_recovers_owned_successor_with
         },
         creditLeafIndices: vec![0],
         creditDeliveries: vec![
-            delivery_for(&successor, CreditRole::Owner),
-            delivery_for(&successor, CreditRole::Spender),
+            credit_delivery(&successor, CreditRole::Owner),
+            credit_delivery(&successor, CreditRole::Spender),
         ],
     };
     let insertion = P::CommitmentsInserted {

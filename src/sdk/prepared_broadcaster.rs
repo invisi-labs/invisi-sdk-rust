@@ -1006,6 +1006,13 @@ impl PreparedTransaction {
         if required != (verified.signed().provenance_required == Some(true)) {
             return Err("broadcaster provenance requirements changed".into());
         }
+        if required && !self.inputs().is_empty() && self.provenance.is_none() {
+            if let Some(factory) = &self.provenance_factory {
+                let capability = factory(self.context)?;
+                capability.validate(self.context, saved.provenance_mode())?;
+                self.provenance = Some(capability);
+            }
+        }
         let cache_valid = self.provenance.as_ref().is_some_and(|cap| {
             !saved.sidecars.is_empty()
                 && saved.sidecars.iter().all(|s| {
@@ -2094,6 +2101,154 @@ mod tests {
             client.cancel(&mut credit).unwrap().state,
             invisi_sdk_rpc::broadcaster::StatusState::Cancelled
         );
+    }
+    #[test]
+    fn signed_source_requirement_resolves_factory_without_legacy_hint() {
+        struct SourceQuoteTransport(ClientQuoteTransport);
+        impl RpcTransport for SourceQuoteTransport {
+            fn send(&self, request: &Value) -> invisi_sdk_rpc::rpc::Result<Value> {
+                if request["method"] == "broadcaster_getStatus" {
+                    let relay = SignedRelay {
+                        fees: 0.into(),
+                        quotes: 0.into(),
+                    };
+                    return Ok(
+                        json!({"jsonrpc":"2.0","id":request["id"],"result":{"apiVersion":"v1","protocolVersion":"1","chainId":self.0.context.chain_id.to_string(),"protocol":word_address(self.0.context.protocol_address).unwrap(),"sender":relay.configuration().quote_signer,"feeRecipient":relay.configuration().fee_recipient,"submissionHalted":false,"provenance":{"enabled":true,"requestHashFormat":invisi_sdk_rpc::broadcaster::REQUEST_HASH_FORMAT,"trackingRequired":true,"trackingSupported":true}}}),
+                    );
+                }
+                let mut response = self.0.send(request)?;
+                if request["method"] == "broadcaster_getQuote" {
+                    let mut signed: SignedQuote =
+                        serde_json::from_value(response["result"].clone()).unwrap();
+                    signed.quote.request_hash =
+                        B256::from(source::provenance_intent_hash(signed.quote.request_hash.0));
+                    signed.request_hash_format =
+                        Some(invisi_sdk_rpc::broadcaster::REQUEST_HASH_FORMAT.into());
+                    signed.provenance_required = Some(true);
+                    let key = k256::ecdsa::SigningKey::from_slice(&[17; 32]).unwrap();
+                    let public = key.verifying_key().to_encoded_point(false);
+                    let trust = Trust {
+                        chain_id: self.0.context.chain_id,
+                        protocol: word_address(self.0.context.protocol_address).unwrap(),
+                        signer: Address::from_slice(&keccak256(&public.as_bytes()[1..])[12..]),
+                    };
+                    let (signature, recovery) = key
+                        .sign_prehash_recoverable(
+                            invisi_sdk_rpc::broadcaster::quote_digest(&signed.quote, &trust)
+                                .unwrap()
+                                .as_slice(),
+                        )
+                        .unwrap();
+                    let mut bytes = signature.to_bytes().to_vec();
+                    bytes.push(recovery.to_byte());
+                    signed.signature = hex(&bytes);
+                    response["result"] = serde_json::to_value(signed).unwrap();
+                }
+                Ok(response)
+            }
+        }
+        let (chain, wallet, mut params, _) = note_fixture();
+        params.outputs = vec![NoteOutput::identity(
+            chain.context(),
+            params.token,
+            U256::from(123),
+            U256::from(1),
+        )
+        .unwrap()];
+        params.withdrawal = None;
+        params.automatic_change = true;
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = calls.clone();
+        let mut runtime = Invisi::new(chain.clone());
+        runtime.provenance_factory = Some(Arc::new(move |_| {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err("source factory reached".into())
+        }));
+        let mut prepared = runtime.prepare_transfer(&wallet, params).unwrap();
+        let relay = SignedRelay {
+            fees: 0.into(),
+            quotes: 0.into(),
+        };
+        let client = crate::broadcaster::BroadcasterClient::new(
+            relay.configuration(),
+            SourceQuoteTransport(ClientQuoteTransport {
+                context: chain.context(),
+                fee: 1,
+            }),
+        )
+        .unwrap();
+        assert!(PreparedBroadcaster::provenance_mode(client.rpc()).is_none());
+        client
+            .quote(
+                &mut prepared,
+                chain.clone(),
+                &BroadcasterOptions {
+                    max_fee_amount: Some(U256::from(10)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let capacity = match &prepared.plan {
+            Plan::Transfer { capacity, .. } => *capacity,
+            _ => unreachable!(),
+        };
+        let statement = prover::statement(
+            &format!("transact_user_slots{capacity}"),
+            "evm",
+            prepared
+                .public_inputs()
+                .unwrap()
+                .into_iter()
+                .map(field_word)
+                .collect(),
+        )
+        .unwrap();
+        let proof = vec![0; 32];
+        prepared.proof = Some(ProofBundle {
+            format_version: 1,
+            circuit_name: statement.circuit_name,
+            target: statement.target,
+            bb_version: "6.0.0".into(),
+            artifact_sha256: statement.artifact_sha256,
+            vk_sha256: statement.vk_sha256,
+            proof_sha256: prover::sha256(&proof),
+            proof,
+            public_inputs: statement.expected_public_inputs,
+        });
+        prepared.phase = Phase::Proved;
+        let error = prepared
+            .freeze_broadcaster_evidence(chain.as_ref(), client.rpc())
+            .unwrap_err();
+        assert!(error.contains("source factory reached"), "{error}");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let mut unauthenticated = prepared.clone();
+        unauthenticated
+            .broadcaster
+            .as_mut()
+            .unwrap()
+            .quote
+            .signature = "0x00".into();
+        assert!(unauthenticated
+            .freeze_broadcaster_evidence(chain.as_ref(), client.rpc())
+            .is_err());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let (_, wrong_trust) = cached_packet_fixture();
+        let wrong_scope = Arc::new(PreparedProvenance {
+            client: Arc::new(ProvenanceClient::new("http://127.0.0.1:1", wrong_trust).unwrap()),
+            manifest: source::authenticate_manifest(
+                include_bytes!("../../provenance/manifest.json"),
+                "6107789c5c0d24c4130bff05da6d389336feb5ccb247c4030eae5198ab05d762",
+            )
+            .unwrap(),
+            prover: Arc::new(NoProver),
+            budgets: SourceReplayBudgets::default(),
+        });
+        prepared.provenance_factory = Some(Arc::new(move |_| Ok(wrong_scope.clone())));
+        assert!(prepared
+            .freeze_broadcaster_evidence(chain.as_ref(), client.rpc())
+            .unwrap_err()
+            .contains("deployment/provenance/manifest mismatch"));
     }
     #[test]
     fn original_preparation_survives_missing_provenance_capability() {

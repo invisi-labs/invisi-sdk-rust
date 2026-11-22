@@ -204,6 +204,11 @@ pub trait RecoveryHost {
 }
 pub trait RecoveryService {
     fn evaluate(&self, data: &str, sidecars: &[ProofSidecar]) -> Result<Value>;
+    /// Deliver replacement evidence for an authenticated, confirmed frozen transaction.
+    /// Adapters must support the historical Source path; pre-send evaluation is not a fallback.
+    fn submit_source_proof(&self, _data: &str, _sidecars: &[ProofSidecar]) -> Result<Value> {
+        Err("historical Source proof delivery capability unavailable".into())
+    }
     fn tracking(&self, id: &str) -> Result<Value>;
     fn submit(
         &self,
@@ -217,6 +222,13 @@ pub trait RecoveryService {
 impl RecoveryService for invisi_sdk_rpc::provenance_client::ProvenanceClient {
     fn evaluate(&self, data: &str, sidecars: &[ProofSidecar]) -> Result<Value> {
         self.evaluate_transaction(json!(data), sidecars)
+    }
+    fn submit_source_proof(&self, data: &str, sidecars: &[ProofSidecar]) -> Result<Value> {
+        invisi_sdk_rpc::provenance_client::ProvenanceClient::submit_source_proof(
+            self,
+            json!(data),
+            sidecars,
+        )
     }
     fn tracking(&self, id: &str) -> Result<Value> {
         self.get_tracking(id)
@@ -449,49 +461,6 @@ impl RecoveryCoordinator<'_> {
             return Err("invalid reconciliation status".into());
         }
         number(&fact.chain_generation, 64)?;
-        let old = r.revision;
-        if r.chain_generation != fact.chain_generation
-            || number(&fact.chain_generation, 64)? != U256::from(self.trust.chain_generation)
-            || fact.status == "reorged"
-            || r.state == "needs_reproof"
-            || (reprove && r.state == "proof_rejected")
-        {
-            r.state = "needs_reproof".into();
-            r.tracking_id = None;
-            r.job_id = None;
-            r.locator = None;
-            r.proof_valid = false;
-            r.proof_job_status = None;
-            r.reason_code = None;
-            r.source_state = None;
-            r.checkpoint_sequence = None;
-            if !reprove
-                || fact.status != "confirmed"
-                || number(&fact.chain_generation, 64)? != U256::from(self.trust.chain_generation)
-            {
-                return self.save(r, old);
-            }
-            r.sidecar = self.host.local_reprove(&r, &fact.chain_generation, stop)?;
-            cancelled(stop)?;
-            r.chain_generation = fact.chain_generation.clone();
-            let mut check = r.clone();
-            check.revision = 0;
-            self.validate(&check)?;
-            if r.delivery_mode == "tracked" {
-                let evaluated = self
-                    .service
-                    .evaluate(&r.intent.calldata, &[r.sidecar.clone()])?;
-                r.tracking_id = Some(
-                    preflight_tracking(
-                        &evaluated,
-                        &r.intent.operation_index,
-                        &r.intent.operation_digest,
-                    )?
-                    .id,
-                );
-            }
-            r.state = "pending".into()
-        }
         if fact.status == "confirmed" {
             let locator = fact
                 .locator
@@ -523,8 +492,69 @@ impl RecoveryCoordinator<'_> {
                 return Err("invalid block hash".into());
             }
             number(block, 256)?;
-            r.transaction_hash = Some(tx.clone());
-            r.locator = Some(locator.clone());
+        }
+        let mut old = r.revision;
+        if r.chain_generation != fact.chain_generation
+            || number(&fact.chain_generation, 64)? != U256::from(self.trust.chain_generation)
+            || fact.status == "reorged"
+            || r.state == "needs_reproof"
+            || (reprove && r.state == "proof_rejected")
+        {
+            r.state = "needs_reproof".into();
+            r.tracking_id = None;
+            r.job_id = None;
+            r.locator = None;
+            r.proof_valid = false;
+            r.proof_job_status = None;
+            r.reason_code = None;
+            r.source_state = None;
+            r.checkpoint_sequence = None;
+            if !reprove
+                || fact.status != "confirmed"
+                || number(&fact.chain_generation, 64)? != U256::from(self.trust.chain_generation)
+            {
+                return self.save(r, old);
+            }
+            r.sidecar = self.host.local_reprove(&r, &fact.chain_generation, stop)?;
+            cancelled(stop)?;
+            r.chain_generation = fact.chain_generation.clone();
+            let mut check = r.clone();
+            check.revision = 0;
+            self.validate(&check)?;
+            if r.delivery_mode == "tracked" {
+                let delivered = self
+                    .service
+                    .submit_source_proof(&r.intent.calldata, &[r.sidecar.clone()])?;
+                let tracking = preflight_tracking(
+                    &delivered,
+                    &r.intent.operation_index,
+                    &r.intent.operation_digest,
+                )?;
+                if let Some(matched) = &tracking.matched {
+                    let locator = fact
+                        .locator
+                        .as_ref()
+                        .ok_or("missing authenticated locator")?;
+                    if Some(&matched.tx_hash) != fact.transaction_hash.as_ref()
+                        || Some(&matched.block_hash) != locator.get("blockHash")
+                        || Some(&matched.operation_index) != locator.get("operationIndex")
+                    {
+                        return Err("historical tracking matched another transaction".into());
+                    }
+                }
+                r.tracking_id = Some(tracking.id);
+                // Persist the accepted replacement before any fallible tracking/recognition read.
+                r.state = "pending".into();
+                r.transaction_hash = fact.transaction_hash.clone();
+                r.locator = fact.locator.clone();
+                r = self.save(r, old)?;
+                old = r.revision;
+            }
+            r.state = "pending".into()
+        }
+        if fact.status == "confirmed" {
+            r.transaction_hash = fact.transaction_hash.clone();
+            r.locator = fact.locator.clone();
         }
         if r.delivery_mode == "tracked" {
             let id = r
@@ -1199,6 +1229,519 @@ mod tests {
             assert!(store.load("terminal").unwrap().is_none());
             assert_eq!(service.submits.get(), 0);
         }
+    }
+    // Keep the real public client, signed proof fixtures and encrypted store in this
+    // regression; only the Source service boundary is supplied locally.
+    struct DeadlineSource {
+        trust: TrustContext,
+        intent: FrozenProvenanceIntent,
+        locator: BTreeMap<String, String>,
+        expired: bool,
+        fail_tracking: AtomicBool,
+        historical_failure: Option<&'static str>,
+        cas_conflict: Option<(Arc<Memory>, RecoveryRecord)>,
+        requests: Arc<Mutex<Vec<Value>>>,
+    }
+    impl invisi_sdk_rpc::rpc::RpcTransport for DeadlineSource {
+        fn send(&self, q: &Value) -> invisi_sdk_rpc::rpc::Result<Value> {
+            self.requests.lock().unwrap().push(q.clone());
+            let method = q["method"].as_str().unwrap();
+            if self.expired && method == "provenance_evaluateTransaction" {
+                return Ok(
+                    json!({"jsonrpc":"2.0","id":q["id"],"error":{"code":-32602,"data":{"code":"INVALID_ARGUMENT"}}}),
+                );
+            }
+            if method == "provenance_getTracking"
+                && self.fail_tracking.swap(false, Ordering::SeqCst)
+            {
+                return Err(invisi_sdk_rpc::rpc::Error::Invalid(
+                    "fixture tracking outage",
+                ));
+            }
+            if method == "provenance_submitSourceProof" && self.historical_failure == Some("remote")
+            {
+                return Ok(
+                    json!({"jsonrpc":"2.0","id":q["id"],"error":{"code":-32603,"data":{"code":"UNAVAILABLE"}}}),
+                );
+            }
+            let t = &self.trust;
+            let digest = format!(
+                "0x{:064x}",
+                number(&self.intent.operation_digest, 256).unwrap()
+            );
+            let id = if t.chain_generation == 1 { "a" } else { "b" }.repeat(48);
+            let mut result = json!({
+                "scope":{"chainId":t.scope.chain_id.to_string(),"protocolAddress":t.scope.protocol_address.to_string()},
+                "chainGeneration":t.chain_generation.to_string(),"providerId":t.provider_id.to_string(),
+                "signingKeyId":t.signing_keys.keys().next().unwrap().to_string(),"manifestSha256":t.manifest_sha256
+            });
+            match method {
+                "provenance_evaluateTransaction" | "provenance_submitSourceProof" => {
+                    assert_eq!(q["params"][0]["data"], self.intent.calldata);
+                    let sidecars: Vec<ProofSidecar> =
+                        serde_json::from_value(q["params"][0]["proofSidecars"].clone()).unwrap();
+                    assert_eq!(sidecars.len(), 1);
+                    assert_eq!(
+                        number(
+                            &sidecars[0].proof_bundle.root_certificates[0].chain_generation,
+                            64
+                        )
+                        .unwrap(),
+                        U256::from(t.chain_generation)
+                    );
+                    result["broadcastDecision"] = json!("allow");
+                    result["operationDigest"] = json!(digest);
+                    result["tracking"] = json!({"id":id,"status":"pending_confirmation","expiresAt":"2000000000","operationDigest":digest});
+                }
+                "provenance_getTracking" => {
+                    assert_eq!(q["params"][0]["trackingId"], id);
+                    result["tracking"] = json!({"id":id,"status":"recognized","expiresAt":"2000000000","operationDigest":digest,"matched":self.locator});
+                }
+                "provenance_submitProof" => result["jobId"] = json!("job1"),
+                "provenance_getProofJob" => result["status"] = json!("valid"),
+                "provenance_getOperationRecognition" => {
+                    let mut operation = serde_json::to_value(&self.intent).unwrap();
+                    for (k, v) in &self.locator {
+                        operation[k] = json!(v);
+                    }
+                    operation["noteNullifiers"] = json!(self.intent.input_nullifiers);
+                    operation["canonical"] = json!(true);
+                    operation["success"] = json!(true);
+                    result["operation"] = operation;
+                    result["recognitionState"] = json!("recognized");
+                    result["recognition"] = json!({"checkpointSequence":"3"});
+                }
+                _ => panic!("unexpected Source call {method}"),
+            }
+            if method == "provenance_submitSourceProof" {
+                if self.historical_failure == Some("invalid_ack") {
+                    result["tracking"] = Value::Null;
+                }
+                if self.historical_failure == Some("wrong_matched") {
+                    result["tracking"]["status"] = json!("recognized");
+                    let mut mismatched = self.locator.clone();
+                    mismatched.insert("txHash".into(), format!("0x{}", "ef".repeat(32)));
+                    result["tracking"]["matched"] = json!(mismatched);
+                }
+                if let Some((records, previous)) = &self.cas_conflict {
+                    let store = EncryptedRecoveryStore::new(records.clone(), [7; 32]);
+                    let mut concurrent = previous.clone();
+                    concurrent.revision += 1;
+                    concurrent.state = "broadcast".into();
+                    assert!(store
+                        .compare_and_swap(&previous.id, previous.revision, &concurrent)
+                        .unwrap());
+                }
+            }
+            Ok(json!({"jsonrpc":"2.0","id":q["id"],"result":result}))
+        }
+    }
+    fn deadline_client(
+        trust: &TrustContext,
+        host: &Host,
+        expired: bool,
+        requests: &Arc<Mutex<Vec<Value>>>,
+    ) -> invisi_sdk_rpc::provenance_client::ProvenanceClient {
+        invisi_sdk_rpc::provenance_client::ProvenanceClient::with_transport(
+            trust.clone(),
+            Arc::new(DeadlineSource {
+                trust: trust.clone(),
+                intent: host.intent.clone(),
+                locator: host.fact.borrow().locator.clone().unwrap(),
+                expired,
+                fail_tracking: AtomicBool::new(false),
+                historical_failure: None,
+                cas_conflict: None,
+                requests: requests.clone(),
+            }),
+        )
+    }
+    #[test]
+    fn confirmed_tracked_reproof_uses_historical_delivery_after_native_deadline() {
+        let (intent, sidecars, trust, host, _) = fixture();
+        let records = Arc::new(Memory::default());
+        let store = EncryptedRecoveryStore::new(records.clone(), [7; 32]);
+        let requests = Arc::new(Mutex::new(vec![]));
+        let initial = deadline_client(&trust, &host, false, &requests);
+        let c = RecoveryCoordinator {
+            store: &store,
+            trust: &trust,
+            host: &host,
+            service: &initial,
+        };
+        let prepared = c
+            .prepare("late", intent.clone(), sidecars[0].clone(), "stable")
+            .unwrap();
+        assert_eq!(prepared.tracking_id, Some("a".repeat(48)));
+        c.mark_broadcast(
+            "late",
+            host.fact.borrow().transaction_hash.as_deref().unwrap(),
+        )
+        .unwrap();
+        host.fact.borrow_mut().chain_generation = "2".into();
+        let mut current = trust.clone();
+        current.chain_generation = 2;
+        let source = deadline_client(&current, &host, true, &requests);
+        let restart_store = EncryptedRecoveryStore::new(records, [7; 32]);
+        let restart = RecoveryCoordinator {
+            store: &restart_store,
+            trust: &current,
+            host: &host,
+            service: &source,
+        };
+        let result = restart
+            .resume("late", true, &AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(result.state, "recognized");
+        assert_eq!(result.tracking_id, Some("b".repeat(48)));
+        assert_eq!(result.intent, intent);
+        assert_eq!(result.delivery_mode, "tracked");
+        assert_eq!(result.idempotency_key, "stable");
+        assert_eq!(
+            serde_json::to_value(&result.sidecar).unwrap(),
+            serde_json::to_value(&sidecars[1]).unwrap()
+        );
+        assert_eq!(
+            restart_store.load("late").unwrap().unwrap().state,
+            "recognized"
+        );
+        let methods: Vec<_> = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|q| q["method"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            methods,
+            [
+                "provenance_evaluateTransaction",
+                "provenance_submitSourceProof",
+                "provenance_getTracking",
+                "provenance_getOperationRecognition"
+            ]
+        );
+    }
+    #[test]
+    fn historical_ack_survives_tracking_outage_and_encrypted_restart() {
+        let (intent, sidecars, trust, host, _) = fixture();
+        let records = Arc::new(Memory::default());
+        let store = EncryptedRecoveryStore::new(records.clone(), [7; 32]);
+        let requests = Arc::new(Mutex::new(vec![]));
+        let initial = deadline_client(&trust, &host, false, &requests);
+        RecoveryCoordinator {
+            store: &store,
+            trust: &trust,
+            host: &host,
+            service: &initial,
+        }
+        .prepare("ack", intent.clone(), sidecars[0].clone(), "stable")
+        .unwrap();
+        host.fact.borrow_mut().chain_generation = "2".into();
+        let mut current = trust.clone();
+        current.chain_generation = 2;
+        let source = invisi_sdk_rpc::provenance_client::ProvenanceClient::with_transport(
+            current.clone(),
+            Arc::new(DeadlineSource {
+                trust: current.clone(),
+                intent: intent.clone(),
+                locator: host.fact.borrow().locator.clone().unwrap(),
+                expired: true,
+                fail_tracking: AtomicBool::new(true),
+                historical_failure: None,
+                cas_conflict: None,
+                requests: requests.clone(),
+            }),
+        );
+        let c = RecoveryCoordinator {
+            store: &store,
+            trust: &current,
+            host: &host,
+            service: &source,
+        };
+        assert!(c
+            .resume("ack", true, &AtomicBool::new(false))
+            .unwrap_err()
+            .contains("fixture tracking outage"));
+        let acknowledged = store.load("ack").unwrap().unwrap();
+        assert_eq!(acknowledged.state, "pending");
+        assert_eq!(acknowledged.chain_generation, "2");
+        assert_eq!(acknowledged.tracking_id, Some("b".repeat(48)));
+        assert_eq!(acknowledged.locator, host.fact.borrow().locator);
+        assert_eq!(
+            acknowledged.transaction_hash,
+            host.fact.borrow().transaction_hash
+        );
+        assert_eq!(
+            serde_json::to_value(&acknowledged.sidecar).unwrap(),
+            serde_json::to_value(&sidecars[1]).unwrap()
+        );
+        let reopened = EncryptedRecoveryStore::new(records, [7; 32]);
+        let result = RecoveryCoordinator {
+            store: &reopened,
+            trust: &current,
+            host: &host,
+            service: &source,
+        }
+        .resume("ack", false, &AtomicBool::new(false))
+        .unwrap();
+        assert_eq!(result.state, "recognized");
+        assert_eq!(result.intent, intent);
+        assert_eq!(result.idempotency_key, "stable");
+        let methods: Vec<_> = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|q| q["method"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            methods,
+            [
+                "provenance_evaluateTransaction",
+                "provenance_submitSourceProof",
+                "provenance_getTracking",
+                "provenance_getTracking",
+                "provenance_getOperationRecognition"
+            ]
+        );
+    }
+    #[test]
+    fn historical_ack_cas_conflict_blocks_poll_and_preserves_concurrent_worker() {
+        let (intent, sidecars, trust, host, _) = fixture();
+        let records = Arc::new(Memory::default());
+        let store = EncryptedRecoveryStore::new(records.clone(), [7; 32]);
+        let requests = Arc::new(Mutex::new(vec![]));
+        let initial = deadline_client(&trust, &host, false, &requests);
+        let previous = RecoveryCoordinator {
+            store: &store,
+            trust: &trust,
+            host: &host,
+            service: &initial,
+        }
+        .prepare("race", intent.clone(), sidecars[0].clone(), "stable")
+        .unwrap();
+        host.fact.borrow_mut().chain_generation = "2".into();
+        let mut current = trust.clone();
+        current.chain_generation = 2;
+        let source = invisi_sdk_rpc::provenance_client::ProvenanceClient::with_transport(
+            current.clone(),
+            Arc::new(DeadlineSource {
+                trust: current.clone(),
+                intent,
+                locator: host.fact.borrow().locator.clone().unwrap(),
+                expired: true,
+                fail_tracking: AtomicBool::new(false),
+                historical_failure: None,
+                cas_conflict: Some((records, previous.clone())),
+                requests: requests.clone(),
+            }),
+        );
+        assert_eq!(
+            RecoveryCoordinator {
+                store: &store,
+                trust: &current,
+                host: &host,
+                service: &source
+            }
+            .resume("race", true, &AtomicBool::new(false))
+            .unwrap_err(),
+            "recovery CAS conflict"
+        );
+        let concurrent = store.load("race").unwrap().unwrap();
+        assert_eq!(concurrent.revision, previous.revision + 1);
+        assert_eq!(concurrent.state, "broadcast");
+        assert_eq!(concurrent.chain_generation, "1");
+        assert_eq!(concurrent.tracking_id, previous.tracking_id);
+        let methods: Vec<_> = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|q| q["method"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            methods,
+            [
+                "provenance_evaluateTransaction",
+                "provenance_submitSourceProof"
+            ]
+        );
+    }
+    #[test]
+    fn failed_historical_submission_preserves_original_encrypted_record() {
+        for failure in ["remote", "invalid_ack", "wrong_matched"] {
+            let (intent, sidecars, trust, host, _) = fixture();
+            let records = Arc::new(Memory::default());
+            let store = EncryptedRecoveryStore::new(records, [7; 32]);
+            let requests = Arc::new(Mutex::new(vec![]));
+            let initial = deadline_client(&trust, &host, false, &requests);
+            let previous = RecoveryCoordinator {
+                store: &store,
+                trust: &trust,
+                host: &host,
+                service: &initial,
+            }
+            .prepare("failure", intent.clone(), sidecars[0].clone(), "stable")
+            .unwrap();
+            host.fact.borrow_mut().chain_generation = "2".into();
+            let mut current = trust.clone();
+            current.chain_generation = 2;
+            let source = invisi_sdk_rpc::provenance_client::ProvenanceClient::with_transport(
+                current.clone(),
+                Arc::new(DeadlineSource {
+                    trust: current.clone(),
+                    intent,
+                    locator: host.fact.borrow().locator.clone().unwrap(),
+                    expired: true,
+                    fail_tracking: AtomicBool::new(false),
+                    historical_failure: Some(failure),
+                    cas_conflict: None,
+                    requests: requests.clone(),
+                }),
+            );
+            assert!(RecoveryCoordinator {
+                store: &store,
+                trust: &current,
+                host: &host,
+                service: &source
+            }
+            .resume("failure", true, &AtomicBool::new(false))
+            .is_err());
+            assert_eq!(
+                serde_json::to_value(store.load("failure").unwrap().unwrap()).unwrap(),
+                serde_json::to_value(previous).unwrap()
+            );
+            assert_eq!(requests.lock().unwrap().len(), 2);
+        }
+    }
+    #[test]
+    fn historical_delivery_requires_confirmed_authenticated_locator() {
+        for status in [
+            "unseen",
+            "pending",
+            "reorged",
+            "missing_locator",
+            "missing_tx",
+            "wrong_tx",
+            "wrong_index",
+            "bad_block",
+            "extra_field",
+        ] {
+            let (intent, sidecars, trust, host, _) = fixture();
+            let store = EncryptedRecoveryStore::new(Arc::new(Memory::default()), [7; 32]);
+            let requests = Arc::new(Mutex::new(vec![]));
+            let initial = deadline_client(&trust, &host, false, &requests);
+            RecoveryCoordinator {
+                store: &store,
+                trust: &trust,
+                host: &host,
+                service: &initial,
+            }
+            .prepare("guard", intent, sidecars[0].clone(), "stable")
+            .unwrap();
+            host.fact.borrow_mut().chain_generation = "2".into();
+            let mut current = trust.clone();
+            current.chain_generation = 2;
+            let source = deadline_client(&current, &host, true, &requests);
+            {
+                let mut fact = host.fact.borrow_mut();
+                match status {
+                    "unseen" | "pending" | "reorged" => fact.status = status.into(),
+                    "missing_locator" => fact.locator = None,
+                    "missing_tx" => fact.transaction_hash = None,
+                    "wrong_tx" => {
+                        fact.locator
+                            .as_mut()
+                            .unwrap()
+                            .insert("txHash".into(), format!("0x{}", "ef".repeat(32)));
+                    }
+                    "wrong_index" => {
+                        fact.locator
+                            .as_mut()
+                            .unwrap()
+                            .insert("operationIndex".into(), "1".into());
+                    }
+                    "bad_block" => {
+                        fact.locator
+                            .as_mut()
+                            .unwrap()
+                            .insert("blockHash".into(), "0x12".into());
+                    }
+                    "extra_field" => {
+                        fact.locator
+                            .as_mut()
+                            .unwrap()
+                            .insert("other".into(), "value".into());
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            let result = RecoveryCoordinator {
+                store: &store,
+                trust: &current,
+                host: &host,
+                service: &source,
+            }
+            .resume("guard", true, &AtomicBool::new(false));
+            if ["unseen", "pending", "reorged"].contains(&status) {
+                assert_eq!(result.unwrap().state, "needs_reproof");
+            } else {
+                assert!(result.is_err(), "{status}");
+            }
+            assert_eq!(
+                requests.lock().unwrap().len(),
+                1,
+                "no Source write for {status}"
+            );
+        }
+    }
+    #[test]
+    fn expired_initial_prepare_stays_strict_and_direct_reproof_keeps_delivery_mode() {
+        let (intent, sidecars, trust, host, _) = fixture();
+        let store = EncryptedRecoveryStore::new(Arc::new(Memory::default()), [7; 32]);
+        let requests = Arc::new(Mutex::new(vec![]));
+        let initial = deadline_client(&trust, &host, true, &requests);
+        let c = RecoveryCoordinator {
+            store: &store,
+            trust: &trust,
+            host: &host,
+            service: &initial,
+        };
+        assert!(c
+            .prepare("expired", intent.clone(), sidecars[0].clone(), "stable")
+            .is_err());
+        assert!(store.load("expired").unwrap().is_none());
+        c.prepare_direct("direct", intent.clone(), sidecars[0].clone(), "stable")
+            .unwrap();
+        host.fact.borrow_mut().chain_generation = "2".into();
+        let mut current = trust.clone();
+        current.chain_generation = 2;
+        let source = deadline_client(&current, &host, true, &requests);
+        let result = RecoveryCoordinator {
+            store: &store,
+            trust: &current,
+            host: &host,
+            service: &source,
+        }
+        .resume("direct", true, &AtomicBool::new(false))
+        .unwrap();
+        assert_eq!(result.state, "recognized");
+        assert_eq!(result.delivery_mode, "direct");
+        assert_eq!(result.intent, intent);
+        assert_eq!(result.idempotency_key, "stable");
+        let methods: Vec<_> = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|q| q["method"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            methods,
+            [
+                "provenance_evaluateTransaction",
+                "provenance_submitProof",
+                "provenance_getProofJob",
+                "provenance_getOperationRecognition"
+            ]
+        );
     }
     #[test]
     fn reserved_idempotency_prefix_is_rejected_before_permit() {

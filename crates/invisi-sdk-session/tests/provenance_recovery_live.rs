@@ -192,6 +192,9 @@ impl RecoveryService for TrackingOnly<'_> {
     fn evaluate(&self, data: &str, sidecars: &[ProofSidecar]) -> Result<Value, String> {
         self.0.evaluate_transaction(json!(data), sidecars)
     }
+    fn submit_source_proof(&self, data: &str, sidecars: &[ProofSidecar]) -> Result<Value, String> {
+        self.0.submit_source_proof(json!(data), sidecars)
+    }
     fn tracking(&self, id: &str) -> Result<Value, String> {
         self.0.get_tracking(id)
     }

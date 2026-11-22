@@ -704,7 +704,7 @@ impl<T: RpcTransport, C: CanonicalChain> ProtocolRpcClient<T, C> {
         grant_id: u128,
         block: &CanonicalBlock,
     ) -> Result<CreditStatus> {
-        if owner == Address::ZERO || token == Address::ZERO || grant_id == 0 {
+        if owner == Address::ZERO || grant_id == 0 {
             return Err(Error::Invalid("invalid Credit scope or grant ID"));
         }
         self.read_at(block)?;

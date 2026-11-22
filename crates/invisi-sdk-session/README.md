@@ -126,6 +126,8 @@ are rejected. To pay a broadcaster from that withdrawal, select
 The frozen gross sum is retained across quote rounds; the final net withdrawal must
 remain positive and still requires owner authorization.
 
+Confirmed tracked Source recovery sends a replacement proof through historical `provenance_submitSourceProof` after authenticating the frozen transaction and mined locator. This permits proof delivery after the original native deadline without rebuilding or rebroadcasting the payment. Accepted replacement evidence, generation, tracking ID and mined locator are persisted before polling, so a tracking outage resumes from that acknowledgement. Initial tracked preparation still uses strict pre-send evaluation; unseen, pending and unconfirmed reorged transactions cannot use historical delivery. Custom `RecoveryService` adapters must implement `submit_source_proof` for this capability (the default returns an unavailable-capability error).
+
 ## Contributing
 
 See the [contribution guidelines](../../README.md#contributing) for issues, pull requests, validation, and handling sensitive material.

@@ -86,6 +86,7 @@ fn combined_history_reuses_one_authenticated_status_and_keeps_anchor_checks() {
 }
 
 struct GrantTransport {
+    token: Address,
     status: Value,
     wrong_block: bool,
 }
@@ -100,7 +101,7 @@ impl RpcTransport for GrantTransport {
                     q["params"],
                     json!([
                         Address::with_last_byte(2),
-                        Address::with_last_byte(3),
+                        self.token,
                         u128::MAX.to_string(),
                         10
                     ])
@@ -117,6 +118,7 @@ fn credit_status_pins_the_scope_full_id_and_exact_canonical_block() {
     for status in [0, 1, 2] {
         let client = ProtocolRpcClient::new(
             GrantTransport {
+                token: Address::with_last_byte(3),
                 status: json!(status),
                 wrong_block: false,
             },
@@ -143,6 +145,7 @@ fn credit_status_pins_the_scope_full_id_and_exact_canonical_block() {
     ] {
         let client = ProtocolRpcClient::new(
             GrantTransport {
+                token: Address::with_last_byte(3),
                 status,
                 wrong_block,
             },
@@ -161,6 +164,7 @@ fn credit_status_pins_the_scope_full_id_and_exact_canonical_block() {
     }
     let client = ProtocolRpcClient::new(
         GrantTransport {
+            token: Address::with_last_byte(3),
             status: json!(0),
             wrong_block: false,
         },
@@ -173,6 +177,54 @@ fn credit_status_pins_the_scope_full_id_and_exact_canonical_block() {
             Address::with_last_byte(2),
             Address::with_last_byte(3),
             0,
+            &block(10)
+        )
+        .is_err());
+}
+
+#[test]
+fn native_credit_status_accepts_zero_token_and_keeps_scope_guards() {
+    let client = ProtocolRpcClient::new(
+        GrantTransport {
+            token: Address::ZERO,
+            status: json!(1),
+            wrong_block: false,
+        },
+        Chain,
+        deployment(),
+    )
+    .unwrap();
+    let status = client
+        .get_credit_status(
+            Address::with_last_byte(2),
+            Address::ZERO,
+            u128::MAX,
+            &block(10),
+        )
+        .unwrap();
+    assert_eq!(status.status, 1);
+    assert_eq!(status.block, block(10));
+    assert!(client
+        .get_credit_status(Address::ZERO, Address::ZERO, u128::MAX, &block(10))
+        .is_err());
+    assert!(client
+        .get_credit_status(Address::with_last_byte(2), Address::ZERO, 0, &block(10))
+        .is_err());
+    let wrong_block = ProtocolRpcClient::new(
+        GrantTransport {
+            token: Address::ZERO,
+            status: json!(1),
+            wrong_block: true,
+        },
+        Chain,
+        deployment(),
+    )
+    .unwrap();
+    assert!(wrong_block
+        .get_credit_status(
+            Address::with_last_byte(2),
+            Address::ZERO,
+            u128::MAX,
             &block(10)
         )
         .is_err());

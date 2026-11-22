@@ -2,6 +2,8 @@
 
 ## 1.3.3
 
+- Repair confirmed tracked Source reproof after a native deadline through historical proof delivery, retaining strict initial evaluation and authenticated mined-locator checks. Persist accepted replacement tracking before polling so interruptions resume without reproof or resubmission. Indexed Credit status accepts the zero native-token address while retaining nonzero owner/grant ID and canonical block validation.
+
 ### Core and Credit protocol migration
 
 - Replace Credit revocation shard/slot references with a positive uint128 `grant_id` across models, commitments, wallet authorization, delivery/disclosure encodings, IPP terms, contract calls/events, RPC discovery, managed operations and recovery. `CreateCreditRequest::grant_id` accepts an explicit ID or selects one once using OS randomness; revocation now takes that ID. Creation, fallback and quote retries preserve the selected ID and shared key.

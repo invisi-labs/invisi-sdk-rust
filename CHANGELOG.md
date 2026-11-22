@@ -1,8 +1,14 @@
 # Changelog
 
-## 1.3.3
+## 1.3.4
 
-- Repair confirmed tracked Source reproof after a native deadline through historical proof delivery, retaining strict initial evaluation and authenticated mined-locator checks. Persist accepted replacement tracking before polling so interruptions resume without reproof or resubmission. Indexed Credit status accepts the zero native-token address while retaining nonzero owner/grant ID and canonical block validation.
+- Recover confirmed tracked Source proofs after a native deadline through historical proof delivery, while retaining strict initial evaluation and authenticated mined-locator checks. Persist accepted replacement tracking before polling so interruptions resume without reproof or resubmission.
+- Accept the zero native-token address in indexed Credit status queries, including fee-free native Credit revocation, while retaining nonzero owner/grant ID and canonical block validation.
+- Initialize the host Provenance capability from authenticated signed Broadcaster quote requirements when no legacy status hint is present. Validate its deployment and mode before freezing evidence; malformed signatures and mismatched capabilities remain rejected.
+- Add Credit recovery coverage across wallet, chain and Core deployment scopes in shared stores. Cover create/update/draw/revoke resume isolation, owner/spender reservations, stale-handle abandonment and canonical successor recovery without decrypting replacement envelopes.
+- Align all nine public crates, exact sibling dependencies, lockfile, private examples and release checks at 1.3.4. The examples package remains private at 0.1.0; the public C ABI, contract bindings and proving asset pins are unchanged.
+
+## 1.3.3
 
 ### Core and Credit protocol migration
 

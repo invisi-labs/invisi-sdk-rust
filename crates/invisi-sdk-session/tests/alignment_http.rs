@@ -461,14 +461,14 @@ fn ordinary_shield_http_alignment() {
                     // API adapter only: both variants request a current signature
                     // nonce. The old API defers its selection to quote; the new
                     // explicit API selects it inside preparation.
-                    #[cfg(invisi_stage_after)]
+                    #[cfg(not(any(invisi_alignment_before, invisi_stage_before)))]
                     return session
                         .prepare_shield_with_signature_funding(
                             options,
                             SignatureFundingNonce::Current,
                         )
                         .unwrap();
-                    #[cfg(not(invisi_stage_after))]
+                    #[cfg(any(invisi_alignment_before, invisi_stage_before))]
                     return session.prepare_shield(options).unwrap();
                 }
                 // Includes current nonce prerequisite and full prepare I/O.
@@ -509,7 +509,7 @@ fn ordinary_shield_http_alignment() {
                 operation
             });
             let id = operation.id().to_owned();
-            if !stage_contract || cfg!(invisi_stage_after) {
+            if !stage_contract || !cfg!(any(invisi_alignment_before, invisi_stage_before)) {
                 assert_operation_nonce(&session, &id, U256::from(if seed == 1 { 7 } else { 14 }));
             }
             phase(&trace, index, "quote", &mut phases, || {

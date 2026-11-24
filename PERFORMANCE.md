@@ -271,3 +271,11 @@ Full workspace validation passed 507 tests with 17 intentional ignores; the
 new unified managed HTTP regression additionally passed its focused test covering
 two failure scenarios. Formatting, Clippy, module boundaries and English checks
 passed. Clippy retains repository warnings and a test-only callback type warning.
+
+The controlled timings above precede integration of receiving-signature-v1 and
+broadcaster fee locks. Initialized broadcaster setup now reuses its authenticated full token-support
+status to publish the fee-lock capability without another HTTP probe. That
+capability and valid signed tariffs are reused; current submission service
+requirements remain live.
+Post-integration zero-delay HTTP checks are functional stage-budget evidence,
+not a replacement elapsed-time comparison. See `test-support/performance/three-sdk-alignment/integration.md`.

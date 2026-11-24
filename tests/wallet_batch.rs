@@ -5,8 +5,11 @@ use invisi_sdk::{
 use serde_json::{json, Value};
 fn full_wallet() -> Wallet {
     let fixture: Value =
-        serde_json::from_str(include_str!("fixtures/current-address.json")).unwrap();
-    Wallet::from_address(fixture["longAddress"].as_str().unwrap()).unwrap()
+        serde_json::from_str(include_str!("fixtures/wallet-wire-vectors.json")).unwrap();
+    let public = &fixture["cases"][0];
+    let request = serde_json::from_value(public["request"].clone()).unwrap();
+    let response = serde_json::from_value(public["response"].clone()).unwrap();
+    Wallet::from_response(&request, &response).unwrap()
 }
 fn key() -> [u8; 32] {
     let mut key = [0; 32];

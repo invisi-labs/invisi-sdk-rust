@@ -275,7 +275,10 @@ mod tests {
                 if let Some(state) = self.retire.as_ref().and_then(std::sync::Weak::upgrade) {
                     state.invalidate();
                 }
-                assert_eq!(request["method"], "broadcaster_getTokenSupport");
+                assert!(matches!(
+                    request["method"].as_str(),
+                    Some("broadcaster_getTokenSupport")
+                ));
                 Ok(json!({"jsonrpc":"2.0","id":request["id"],"result":{
                     "apiVersion":"v1","protocolVersion":"1","chainId":"31337","protocol":Address::repeat_byte(1),"sender":Address::repeat_byte(3),"feeRecipient":Address::repeat_byte(4),
                     "tokenAddress":request["params"][0]["tokenAddress"],"supported":true,"submissionHalted":false,"provenance":{"enabled":false}

@@ -35,6 +35,9 @@ impl InitializedBroadcasters {
         {
             return Err("broadcaster does not support token".into());
         }
+        client
+            .initialize_fee_lock(chain.context().chain_id, deployment.protocol.address)
+            .map_err(|e| e.to_string())?;
         if Self::binding(&chain)? != deployment {
             return Err("initialization binding changed during probe".into());
         }
@@ -60,8 +63,13 @@ impl InitializedBroadcasters {
             .discover_broadcasters(token)
             .map_err(|e| e.to_string())?
             .into_iter()
-            .map(|client| Arc::new(client) as Arc<dyn PreparedBroadcaster>)
-            .collect();
+            .map(|client| {
+                client
+                    .initialize_fee_lock(chain.context().chain_id, deployment.protocol.address)
+                    .map_err(|e| e.to_string())?;
+                Ok(Arc::new(client) as Arc<dyn PreparedBroadcaster>)
+            })
+            .collect::<Result<Vec<_>>>()?;
         if Self::binding(&chain)? != deployment {
             return Err("initialization binding changed during probe".into());
         }

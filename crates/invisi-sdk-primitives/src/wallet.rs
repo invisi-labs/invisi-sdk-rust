@@ -7,13 +7,19 @@ use aes_gcm::{
 use alloy_primitives::{keccak256, U256};
 use hkdf::Hkdf;
 use k256::{
-    ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey},
+    ecdsa::{signature::hazmat::PrehashSigner, Signature},
     elliptic_curve::sec1::ToEncodedPoint,
     PublicKey, SecretKey,
 };
 use serde_json::{json, Value};
 use sha2::Sha256;
 use zeroize::Zeroizing;
+
+mod receiving;
+pub use receiving::{
+    build_receiving_key_message, derive_receiving_keys_from_signature, DerivedReceivingKeys,
+};
+use receiving::{derive_receiving_keys, detection_from_root, viewing_from_root, LocalWallet};
 
 pub const MAX_WALLET_BATCH_ITEMS: usize = 1024;
 pub const MAX_WALLET_BATCH_JSON_BYTES: usize = 16 * 1024 * 1024;
@@ -26,50 +32,12 @@ fn hkdf(key: &[u8], salt: &[u8], info: &[u8]) -> Result<Zeroizing<[u8; 32]>, Str
     Ok(output)
 }
 
-fn root(key: &[u8]) -> Result<Zeroizing<[u8; 32]>, String> {
-    if key.len() != 32 {
-        return Err("WALLET_INVALID_ACCOUNT_KEY".into());
-    }
-    SecretKey::from_slice(key).map_err(|_| "PRIVACY_INVALID_ACCOUNT_KEY")?;
-    hkdf(key, b"Invisi.WalletRoot.v1", b"")
-}
-
 pub fn viewing_key(key: &[u8]) -> Result<Zeroizing<[u8; 32]>, String> {
-    let root = root(key)?;
-    for counter in 0u32..=u32::MAX {
-        let candidate = hkdf(
-            &*root,
-            b"Invisi.WalletViewingKey.v1",
-            &counter.to_be_bytes(),
-        )?;
-        if SecretKey::from_slice(&*candidate).is_ok() {
-            return Ok(candidate);
-        }
-    }
-    Err("PRIVACY_KDF_EXHAUSTED".into())
+    viewing_from_root(LocalWallet::new(key)?.root()?)
 }
 
 pub fn detection_key(key: &[u8]) -> Result<Zeroizing<[u8; 32]>, String> {
-    let root = root(key)?;
-    let seed = hkdf(&*root, b"Invisi.WalletDetectionSeed.v1", b"")?;
-    let modulus = U256::from_str_radix(
-        "2111115437357092606062206234695386632838870926408408195193685246394721360383",
-        10,
-    )
-    .unwrap();
-    for counter in 0u32..=u32::MAX {
-        let mut candidate = hkdf(
-            &*seed,
-            b"Invisi.WalletDetectionKey.v1",
-            &counter.to_be_bytes(),
-        )?;
-        candidate[31] &= 7;
-        let scalar = U256::from_le_slice(&*candidate);
-        if scalar != U256::ZERO && scalar < modulus {
-            return Ok(candidate);
-        }
-    }
-    Err("PRIVACY_KDF_EXHAUSTED".into())
+    detection_from_root(LocalWallet::new(key)?.root()?)
 }
 
 fn decode(value: &str) -> Result<Vec<u8>, String> {
@@ -97,18 +65,6 @@ fn number(value: &str, length: usize) -> Result<Vec<u8>, String> {
     }
     Ok(bytes[32 - length..].to_vec())
 }
-fn public(key: &[u8], compressed: bool) -> Result<Vec<u8>, String> {
-    Ok(SecretKey::from_slice(key)
-        .map_err(|_| "PRIVACY_INVALID_ACCOUNT_KEY")?
-        .public_key()
-        .to_encoded_point(compressed)
-        .as_bytes()
-        .to_vec())
-}
-fn identity(key: &[u8]) -> Result<String, String> {
-    Ok(hex_value(&keccak256(&public(key, false)?[1..])[12..]))
-}
-
 pub fn poseidon(fields: &[String]) -> Result<String, String> {
     if fields.len() > 4096 {
         return Err("PRIVACY_TOO_MANY_FIELDS".into());
@@ -128,6 +84,10 @@ pub fn poseidon(fields: &[String]) -> Result<String, String> {
 }
 
 pub fn open(key: &[u8], request: &Value) -> Result<Zeroizing<Vec<u8>>, String> {
+    open_with_wallet(&LocalWallet::new(key)?, request)
+}
+
+fn open_with_wallet(wallet: &LocalWallet, request: &Value) -> Result<Zeroizing<Vec<u8>>, String> {
     let data = decode(text(request, "envelope")?)?;
     let role = text(request, "role")?;
     let (header, role_byte, domain, minimum) = match role {
@@ -151,12 +111,13 @@ pub fn open(key: &[u8], request: &Value) -> Result<Zeroizing<Vec<u8>>, String> {
     }
     let peer =
         PublicKey::from_sec1_bytes(&data[1..34]).map_err(|_| "PRIVACY_INVALID_EPHEMERAL_KEY")?;
-    let viewing = viewing_key(key)?;
+    let viewing = viewing_from_root(wallet.root()?)?;
     let secret = SecretKey::from_slice(&*viewing).map_err(|_| "PRIVACY_INVALID_VIEWING_KEY")?;
     let shared = k256::ecdh::diffie_hellman(secret.to_nonzero_scalar(), peer.as_affine());
     let mut info = domain.to_vec();
     info.extend_from_slice(&data[1..34]);
-    info.extend_from_slice(&public(&*viewing, true)?);
+    let viewing_public = secret.public_key().to_encoded_point(true);
+    info.extend_from_slice(viewing_public.as_bytes());
     let aes_key = hkdf(shared.raw_secret_bytes(), &data[34..50], &info)?;
     let context = &request["context"];
     let mut aad = domain.to_vec();
@@ -190,8 +151,7 @@ pub fn open(key: &[u8], request: &Value) -> Result<Zeroizing<Vec<u8>>, String> {
     if plain.len() < payload_offset + 2 {
         return Err("PRIVACY_INVALID_PAYLOAD".into());
     }
-    let expected = number(&identity(key)?, 32)?;
-    if plain[identity_start..identity_start + 32] != expected {
+    if &plain[identity_start..identity_start + 32] != wallet.owner.into_word().as_slice() {
         return Err("PRIVACY_RECIPIENT_MISMATCH".into());
     }
     let len = u16::from_be_bytes([plain[payload_offset], plain[payload_offset + 1]]) as usize;
@@ -204,7 +164,7 @@ pub fn open(key: &[u8], request: &Value) -> Result<Zeroizing<Vec<u8>>, String> {
         } else {
             crate::delivery::CREDIT_SPENDER_KEYS_OFFSET
         };
-        if plain[start..start + 33] != public(&*viewing, true)? {
+        if &plain[start..start + 33] != viewing_public.as_bytes() {
             return Err("PRIVACY_RECIPIENT_MISMATCH".into());
         }
     }
@@ -319,36 +279,34 @@ pub fn execute(key: &[u8], request: &Value) -> Result<Value, String> {
         return Err("WALLET_INVALID_ACCOUNT_KEY".into());
     }
     validate_wire(request)?;
-    if request["version"].as_u64() != Some(1) {
-        return Err("WALLET_UNSUPPORTED_VERSION".into());
-    }
-    let id = text(request, "id")?;
-    if id.is_empty() || id.len() > 128 || !id.bytes().all(|b| (0x21..=0x7e).contains(&b)) {
-        return Err("WALLET_INVALID_ID".into());
-    }
-    let owner = text(request, "ownerAddress")?;
-    if owner.len() != 42 || identity(key)? != owner.to_lowercase() {
+    let wallet = LocalWallet::new(key)?;
+    if text(request, "ownerAddress")? != hex_value(wallet.owner.as_slice()) {
         return Err("WALLET_ACCOUNT_MISMATCH".into());
     }
+    execute_validated(&wallet, request)
+}
+
+fn execute_validated(wallet: &LocalWallet, request: &Value) -> Result<Value, String> {
+    let id = text(request, "id")?;
+    let owner = text(request, "ownerAddress")?;
     let params = &request["params"];
-    if !params.is_object() {
-        return Err("WALLET_INVALID_PARAMS".into());
-    }
     let method = text(request, "method")?;
     let result = match method {
         "wallet.public" => {
-            let detection = detection_key(key)?;
-            let detector = decaf377_fmd::DetectionKey::from_bytes(*detection)
-                .map_err(|_| "WALLET_INVALID_DETECTION_KEY")?;
-            let clue = detector.clue_key().0;
-            json!({"spendingPublicKey":hex_value(&public(key,false)?),"viewingPublicKey":hex_value(&public(&*viewing_key(key)?,true)?),"clueKey":hex_value(&clue)})
+            let receiving = derive_receiving_keys(wallet.owner, wallet.root()?)?;
+            let spending = wallet.signing_key.verifying_key().to_encoded_point(false);
+            json!({
+                "spendingPublicKey": hex_value(spending.as_bytes()),
+                "viewingPublicKey": hex_value(&receiving.public_keys().viewing_public_key),
+                "clueKey": hex_value(&receiving.public_keys().clue_key)
+            })
         }
         "wallet.detect" => {
             let clues = params["clues"].as_array().ok_or("WALLET_INVALID_CLUES")?;
             if clues.len() > 1024 {
                 return Err("WALLET_TOO_MANY_CLUES".into());
             }
-            let detection = detection_key(key)?;
+            let detection = detection_from_root(wallet.root()?)?;
             let detector = decaf377_fmd::DetectionKey::from_bytes(*detection)
                 .map_err(|_| "WALLET_INVALID_DETECTION_KEY")?;
             let matches = clues
@@ -375,16 +333,17 @@ pub fn execute(key: &[u8], request: &Value) -> Result<Value, String> {
             } else {
                 params["context"]["role"].clone()
             };
-            let plain = open(key, &input)?;
+            let plain = open_with_wallet(wallet, &input)?;
             json!({"plaintext":hex_value(&plain)})
         }
         "wallet.authorize" => {
             let digest = authorization_digest(params)?;
-            let signing = SigningKey::from_slice(key).map_err(|_| "WALLET_INVALID_ACCOUNT_KEY")?;
-            let signature: Signature = signing
+            let signature: Signature = wallet
+                .signing_key
                 .sign_prehash(&digest)
                 .map_err(|_| "WALLET_SIGN_FAILED")?;
-            json!({"digest":hex_value(&digest),"signature":hex_value(&signature.to_bytes()),"spendingPublicKey":hex_value(&public(key,false)?)})
+            let spending = wallet.signing_key.verifying_key().to_encoded_point(false);
+            json!({"digest":hex_value(&digest),"signature":hex_value(&signature.to_bytes()),"spendingPublicKey":hex_value(spending.as_bytes())})
         }
         _ => return Err("WALLET_UNSUPPORTED_METHOD".into()),
     };
@@ -415,10 +374,14 @@ pub fn execute_batch(key: &[u8], requests: &[Value]) -> Result<Vec<Value>, Strin
             return Err("WALLET_DUPLICATE_ID".into());
         }
     }
-    if key.len() != 32 || identity(key)? != owner {
+    if key.len() != 32 {
         return Err("WALLET_ACCOUNT_MISMATCH".into());
     }
-    let responses: Vec<Value> = requests.iter().map(|request| match execute(key, request) {
+    let wallet = LocalWallet::new(key)?;
+    if hex_value(wallet.owner.as_slice()) != owner {
+        return Err("WALLET_ACCOUNT_MISMATCH".into());
+    }
+    let responses: Vec<Value> = requests.iter().map(|request| match execute_validated(&wallet, request) {
         Ok(response) => response,
         Err(code) => {
             let code = match code.as_str() {

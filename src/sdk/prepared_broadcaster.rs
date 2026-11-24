@@ -415,6 +415,44 @@ impl StockBroadcasterCapability {
     }
 }
 pub trait PreparedBroadcaster: Send + Sync {
+    fn lock_fee(
+        &self,
+        _data: &[u8],
+        _chain_id: u64,
+        _protocol: Address,
+        _now: u64,
+    ) -> Result<Option<invisi_sdk_rpc::broadcaster::VerifiedFeeLock>> {
+        Ok(None)
+    }
+    fn locked_scheduled_fee(
+        &self,
+        token: Address,
+        data: Option<&[u8]>,
+        schedule: Option<&invisi_sdk_rpc::broadcaster::Schedule>,
+        lock: Option<&invisi_sdk_rpc::broadcaster::VerifiedFeeLock>,
+    ) -> Result<RelayFee> {
+        if lock.is_some() {
+            return Err("fee lock capability required".into());
+        }
+        self.scheduled_fee(token, data, schedule)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn locked_scheduled_quote(
+        &self,
+        data: &[u8],
+        chain_id: u64,
+        protocol: Address,
+        now: u64,
+        sidecars: &[ProofSidecar],
+        schedule: Option<&invisi_sdk_rpc::broadcaster::Schedule>,
+        lock: Option<&invisi_sdk_rpc::broadcaster::VerifiedFeeLock>,
+    ) -> Result<VerifiedQuote> {
+        if lock.is_some() {
+            return Err("fee lock capability required".into());
+        }
+        self.scheduled_quote(data, chain_id, protocol, now, sidecars, schedule)
+    }
+
     fn stock_capability(&self) -> Option<StockBroadcasterCapability> {
         None
     }
@@ -506,6 +544,39 @@ pub trait PreparedBroadcaster: Send + Sync {
     ) -> Result<RelayStatus>;
 }
 impl<T: RpcTransport + Send + Sync> PreparedBroadcaster for BroadcasterClient<T> {
+    fn lock_fee(
+        &self,
+        data: &[u8],
+        chain_id: u64,
+        protocol: Address,
+        now: u64,
+    ) -> Result<Option<invisi_sdk_rpc::broadcaster::VerifiedFeeLock>> {
+        BroadcasterClient::lock_fee(self, data, chain_id, protocol, now).map_err(|e| e.to_string())
+    }
+    fn locked_scheduled_fee(
+        &self,
+        token: Address,
+        data: Option<&[u8]>,
+        schedule: Option<&invisi_sdk_rpc::broadcaster::Schedule>,
+        lock: Option<&invisi_sdk_rpc::broadcaster::VerifiedFeeLock>,
+    ) -> Result<RelayFee> {
+        self.fee_with_schedule_and_lock(token, data, schedule, lock)
+            .map_err(|e| e.to_string())
+    }
+    fn locked_scheduled_quote(
+        &self,
+        data: &[u8],
+        chain_id: u64,
+        protocol: Address,
+        now: u64,
+        sidecars: &[ProofSidecar],
+        schedule: Option<&invisi_sdk_rpc::broadcaster::Schedule>,
+        lock: Option<&invisi_sdk_rpc::broadcaster::VerifiedFeeLock>,
+    ) -> Result<VerifiedQuote> {
+        self.quote_with_schedule_and_lock(data, chain_id, protocol, now, sidecars, schedule, lock)
+            .map_err(|e| e.to_string())
+    }
+
     fn stock_capability(&self) -> Option<StockBroadcasterCapability> {
         Some(StockBroadcasterCapability {
             endpoint: self.configuration().endpoint.clone(),
@@ -602,6 +673,46 @@ impl<T: RpcTransport + Send + Sync> PreparedBroadcaster for BroadcasterClient<T>
 impl<T: RpcTransport + Send + Sync + 'static> PreparedBroadcaster
     for crate::broadcaster::BroadcasterClient<T>
 {
+    fn lock_fee(
+        &self,
+        data: &[u8],
+        chain_id: u64,
+        protocol: Address,
+        now: u64,
+    ) -> Result<Option<invisi_sdk_rpc::broadcaster::VerifiedFeeLock>> {
+        PreparedBroadcaster::lock_fee(self.rpc(), data, chain_id, protocol, now)
+    }
+    fn locked_scheduled_fee(
+        &self,
+        token: Address,
+        data: Option<&[u8]>,
+        schedule: Option<&invisi_sdk_rpc::broadcaster::Schedule>,
+        lock: Option<&invisi_sdk_rpc::broadcaster::VerifiedFeeLock>,
+    ) -> Result<RelayFee> {
+        PreparedBroadcaster::locked_scheduled_fee(self.rpc(), token, data, schedule, lock)
+    }
+    fn locked_scheduled_quote(
+        &self,
+        data: &[u8],
+        chain_id: u64,
+        protocol: Address,
+        now: u64,
+        sidecars: &[ProofSidecar],
+        schedule: Option<&invisi_sdk_rpc::broadcaster::Schedule>,
+        lock: Option<&invisi_sdk_rpc::broadcaster::VerifiedFeeLock>,
+    ) -> Result<VerifiedQuote> {
+        PreparedBroadcaster::locked_scheduled_quote(
+            self.rpc(),
+            data,
+            chain_id,
+            protocol,
+            now,
+            sidecars,
+            schedule,
+            lock,
+        )
+    }
+
     fn stock_capability(&self) -> Option<StockBroadcasterCapability> {
         PreparedBroadcaster::stock_capability(self.rpc())
     }
@@ -868,10 +979,17 @@ impl PreparedTransaction {
                 }
             }
         }
-        let mut fee = relay.scheduled_fee(
+        let fee_lock = relay.lock_fee(
+            &self.broadcaster_intent()?.data,
+            self.context.chain_id,
+            word_address(self.context.protocol_address)?,
+            now,
+        )?;
+        let mut fee = relay.locked_scheduled_fee(
             self.token,
             Some(&estimate.broadcaster_intent()?.data),
             schedule.as_ref(),
+            fee_lock.as_ref(),
         )?;
         let mut final_candidate = None;
         let mut ordinary_quote = None;
@@ -997,7 +1115,7 @@ impl PreparedTransaction {
                 );
             }
             let data = candidate.broadcaster_intent()?.data;
-            if ordinary_shield {
+            if ordinary_shield && fee_lock.is_none() {
                 match relay.quote_classified(
                     &data,
                     candidate.context.chain_id,
@@ -1038,7 +1156,12 @@ impl PreparedTransaction {
                     }
                 }
             }
-            let next = relay.scheduled_fee(self.token, Some(&data), schedule.as_ref())?;
+            let next = relay.locked_scheduled_fee(
+                self.token,
+                Some(&data),
+                schedule.as_ref(),
+                fee_lock.as_ref(),
+            )?;
             let next_amount = decimal(&json!(next.fee_amount))?;
             if next.fee_recipient != config.fee_recipient
                 || next_amount == U256::ZERO
@@ -1070,13 +1193,14 @@ impl PreparedTransaction {
         let (quote, now) = match ordinary_quote {
             Some((quote, now)) => (quote, now),
             None => {
-                let quote = relay.scheduled_quote(
+                let quote = relay.locked_scheduled_quote(
                     &data,
                     candidate.context.chain_id,
                     word_address(candidate.context.protocol_address)?,
                     now,
                     &sidecars,
                     schedule.as_ref(),
+                    fee_lock.as_ref(),
                 )?;
                 (quote, now)
             }
@@ -2288,6 +2412,9 @@ mod tests {
                 quotes: 0.into(),
             };
             let result = match request["method"].as_str().unwrap() {
+                "broadcaster_getStatus" => {
+                    json!({"apiVersion":"v1","protocolVersion":"1","chainId":self.context.chain_id.to_string(),"protocol":word_address(self.context.protocol_address).unwrap(),"sender":relay.configuration().quote_signer,"feeRecipient":relay.configuration().fee_recipient,"submissionHalted":false})
+                }
                 "broadcaster_estimateQuote" => json!(RelayFee {
                     fee_recipient: relay.configuration().fee_recipient,
                     fee_amount: self.fee.to_string(),
@@ -2521,9 +2648,13 @@ mod tests {
             .collect();
         assert_eq!(
             methods,
-            vec!["broadcaster_estimateQuote", "broadcaster_getQuote"]
+            vec![
+                "broadcaster_getStatus",
+                "broadcaster_estimateQuote",
+                "broadcaster_getQuote"
+            ]
         );
-        let initial = hex_bytes(calls[0]["params"][0]["data"].as_str().unwrap(), None).unwrap();
+        let initial = hex_bytes(calls[1]["params"][0]["data"].as_str().unwrap(), None).unwrap();
         let intent = invisi_sdk_rpc::broadcaster::decode_intent(&initial).unwrap();
         assert_eq!(intent.fee_amount, U256::from(1));
         assert_eq!(

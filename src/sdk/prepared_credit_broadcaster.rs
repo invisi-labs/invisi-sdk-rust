@@ -116,10 +116,18 @@ impl PreparedCredit {
         if let Some(schedule) = &schedule {
             schedule.validate().map_err(|e| e.to_string())?;
         }
-        let mut fee = relay.scheduled_fee(
+        let initial = self.broadcaster_intent()?.data;
+        let fee_lock = relay.lock_fee(
+            &initial,
+            self.context.chain_id,
+            word_address(self.context.protocol_address)?,
+            now,
+        )?;
+        let mut fee = relay.locked_scheduled_fee(
             self.token,
             Some(&self.broadcaster_intent()?.data),
             schedule.as_ref(),
+            fee_lock.as_ref(),
         )?;
         for _round in 0..options.max_attempts {
             if fee.fee_recipient != config.fee_recipient {
@@ -139,7 +147,12 @@ impl PreparedCredit {
             }
             let mut candidate = self.reprice_credit(template, f)?;
             let data = candidate.broadcaster_intent()?.data;
-            let next = relay.scheduled_fee(self.token, Some(&data), schedule.as_ref())?;
+            let next = relay.locked_scheduled_fee(
+                self.token,
+                Some(&data),
+                schedule.as_ref(),
+                fee_lock.as_ref(),
+            )?;
             let next_amount = decimal(&json!(next.fee_amount))?;
             if next.fee_recipient != config.fee_recipient
                 || next_amount == U256::ZERO
@@ -151,13 +164,14 @@ impl PreparedCredit {
                 fee = next;
                 continue;
             }
-            let quote = relay.scheduled_quote(
+            let quote = relay.locked_scheduled_quote(
                 &data,
                 self.context.chain_id,
                 word_address(self.context.protocol_address)?,
                 now,
                 &[],
                 schedule.as_ref(),
+                fee_lock.as_ref(),
             )?;
             if quote.signed().quote.schedule.as_ref() != schedule.as_ref() {
                 return Err("broadcaster quote schedule mismatch".into());

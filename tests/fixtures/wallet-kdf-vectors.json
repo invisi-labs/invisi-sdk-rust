@@ -1,26 +1,26 @@
 {
-  "source": "Independent Python stdlib hashlib/hmac HKDF-SHA256 reference; inputs are public test keys.",
+  "source": "Public test keys. ethers EIP-191/RFC6979 signatures and independent Node HKDF-SHA256 reference.",
   "vectors": [
     {
       "privateKey": "0x0000000000000000000000000000000000000000000000000000000000000001",
       "spendingPrivateKey": "0000000000000000000000000000000000000000000000000000000000000001",
-      "viewingPrivateKey": "80d9cd50805bf2ff5f95f9a091add4515bebb62293c721362fd077891c23069f",
-      "detectionSeed": "03e8ed527326843b5c2f072c8ca1563283763d8f663b4da48797d722219e7777",
-      "detectionKey": "d8eb060942042c18ae6d75e49b92f32e51d430d7733b715a57315a6472097f02"
+      "viewingPrivateKey": "57f1898fae64848970967e21804b8c1fc08559fea986b2f80644e1da35cbcc7b",
+      "detectionSeed": "473414810b1300cb8b31b5a3d5bf91e069eff72fd3c73dab352db686fd6d99df",
+      "detectionKey": "d1d237089cb38022ed7c10f208c0a35113a80950a7adc133d9e804a21e06ff01"
     },
     {
       "privateKey": "0x1111111111111111111111111111111111111111111111111111111111111111",
       "spendingPrivateKey": "1111111111111111111111111111111111111111111111111111111111111111",
-      "viewingPrivateKey": "2d084af06850328cd915e33f3da77cfaf4dab495fcbd477d98bfc4cb1cd3e658",
-      "detectionSeed": "8480a93c38b479c22119afcd01c0599aa6139617a97224212de7b2c20520b611",
-      "detectionKey": "3e5e2142ad0a8c50cc7209345621119fe48b9589e5f4cf8f97b7f23d9091ca03"
+      "viewingPrivateKey": "9679e37a4c9aedbda11f87710e582d29b7bb37f8c68bbe4c21604c48e7f0d10d",
+      "detectionSeed": "19c22c6864ca26b477b655832c0e51169c4634ffeef8ae925f9105a5a84a6043",
+      "detectionKey": "fcf150aa6a015cc29ed2fd4bc9ad1cbfe8976e1523654151a2aa6529e8df4600"
     },
     {
       "privateKey": "0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364140",
       "spendingPrivateKey": "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364140",
-      "viewingPrivateKey": "aa2090b763b912ab42a80f86af71a30b9bf2dfcc341dea99fd20ab29cefd8c3c",
-      "detectionSeed": "15736fa2b2074efe31281cb1f3d8e859b967cf99a61f9f8b424ce114d4221432",
-      "detectionKey": "ab2d54ad65edf16b8f5e3ef399a511646bb7d2a4e43402f340d13d09ecd48602"
+      "viewingPrivateKey": "d1bbd9c4bad1c00d2d168ca5ea0244ab748f506bf3b619c266d315c6bb249975",
+      "detectionSeed": "72fc6d82683d6ec6e12d743428c7eaf0d455bb0d7253b857218794ab437c5fdc",
+      "detectionKey": "ae667001649c24a7449ba8d573bfa0ef20548f5d279bdb5756f5433ddf7ff402"
     }
   ]
 }

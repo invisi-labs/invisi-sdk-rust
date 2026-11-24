@@ -11,8 +11,66 @@ use std::{
 };
 use zeroize::Zeroizing;
 
+// Share local observations across independently connected sessions and store adapters.
+#[derive(Default)]
+struct WriteActivity {
+    epoch: u64,
+    active: usize,
+}
+#[derive(Default)]
+pub(crate) struct WalletWrites {
+    activity: Mutex<WriteActivity>,
+}
+impl WalletWrites {
+    pub(crate) fn shared(identity: usize, scope: &str) -> Arc<Self> {
+        type Registry = BTreeMap<(usize, String), std::sync::Weak<WalletWrites>>;
+        static WRITES: std::sync::OnceLock<Mutex<Registry>> = std::sync::OnceLock::new();
+        let mut registry = WRITES.get_or_init(Default::default).lock().unwrap();
+        let key = (identity, scope.to_owned());
+        if let Some(clock) = registry.get(&key).and_then(std::sync::Weak::upgrade) {
+            return clock;
+        }
+        registry.retain(|_, value| value.strong_count() > 0);
+        let clock = Arc::new(Self::default());
+        registry.insert(key, Arc::downgrade(&clock));
+        clock
+    }
+    pub(crate) fn idle_epoch(&self) -> Result<u64> {
+        let activity = self.activity.lock().unwrap();
+        if activity.active > 0 {
+            return Err("wallet write in progress before submission".into());
+        }
+        Ok(activity.epoch)
+    }
+}
+/// Marks an SDK wallet write until the backing store finishes its compare-and-swap.
+#[must_use = "keep the mutation guard until the backing write returns"]
+pub struct WalletStoreMutation(Arc<WalletWrites>);
+impl Drop for WalletStoreMutation {
+    fn drop(&mut self) {
+        self.0.activity.lock().unwrap().active -= 1;
+    }
+}
 /// Implementations must atomically compare the revision and replace the complete detached snapshot.
 pub trait WalletStore: Send + Sync {
+    /// In-process identity of the backing store shared by wallet handles.
+    fn mutation_identity(&self) -> usize {
+        self as *const Self as *const () as usize
+    }
+    /// Custom adapters use this for direct writes made outside a WalletSession.
+    fn begin_mutation(&self, scope: &str) -> Result<WalletStoreMutation> {
+        let clock = WalletWrites::shared(self.mutation_identity(), scope);
+        {
+            let mut activity = clock.activity.lock().unwrap();
+            activity.epoch = activity
+                .epoch
+                .checked_add(1)
+                .ok_or("wallet write generation exhausted")?;
+            activity.active += 1;
+        }
+        Ok(WalletStoreMutation(clock))
+    }
+
     fn snapshot(&self, scope: &str) -> Result<WalletState>;
     fn compare_and_swap(
         &self,
@@ -62,6 +120,7 @@ impl WalletStore for MemoryWalletStore {
         expected_revision: u64,
         mut next: WalletState,
     ) -> Result<()> {
+        let _write = self.begin_mutation(scope)?;
         if next.revision != expected_revision {
             return Err("invalid next snapshot revision".into());
         }
@@ -90,6 +149,10 @@ pub struct EncryptedRecord {
 /// Host adapters store opaque bytes. Private wallet values are authenticated ciphertext;
 /// public history uses a separate namespace/table. Missing records have revision zero.
 pub trait AtomicRecords: Send + Sync {
+    /// Shared identity for adapters addressing the same records in this process.
+    fn mutation_identity(&self) -> usize {
+        self as *const Self as *const () as usize
+    }
     fn read(&self, scope: &str) -> Result<Option<EncryptedRecord>>;
     fn compare_and_swap(
         &self,
@@ -239,6 +302,9 @@ impl EncryptedWalletStore {
     }
 }
 impl WalletStore for EncryptedWalletStore {
+    fn mutation_identity(&self) -> usize {
+        self.records.mutation_identity()
+    }
     fn snapshot(&self, scope: &str) -> Result<WalletState> {
         let Some(record) = self.records.read(scope)? else {
             return Ok(WalletState::default());
@@ -273,6 +339,7 @@ impl WalletStore for EncryptedWalletStore {
         Ok(state)
     }
     fn compare_and_swap(&self, scope: &str, expected: u64, mut next: WalletState) -> Result<()> {
+        let _write = self.begin_mutation(scope)?;
         if next.revision != expected || next.format_version != 2 {
             return Err("invalid next wallet state".into());
         }

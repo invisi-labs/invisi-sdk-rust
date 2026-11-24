@@ -2,6 +2,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 /// Stable prefix for Credit usage-period failures returned by the legacy String result API.
+pub const NEEDS_REPREPARATION: &str = "NEEDS_REPREPARATION";
+pub const FINALIZATION_REQUIRED: &str = "FINALIZATION_REQUIRED";
 pub const CREDIT_PERIOD_CHANGED: &str = "CREDIT_PERIOD_CHANGED";
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -12,6 +14,8 @@ pub enum InvisiErrorCode {
     PreparationFailed,
     MissingCapability,
     CreditPeriodChanged,
+    NeedsRepreparation,
+    FinalizationRequired,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[error("{message}")]
@@ -58,6 +62,16 @@ impl From<String> for InvisiError {
             .is_some_and(|suffix| suffix.starts_with(':'))
         {
             InvisiErrorCode::CreditPeriodChanged
+        } else if cause
+            .strip_prefix(NEEDS_REPREPARATION)
+            .is_some_and(|s| s.starts_with(':'))
+        {
+            InvisiErrorCode::NeedsRepreparation
+        } else if cause
+            .strip_prefix(FINALIZATION_REQUIRED)
+            .is_some_and(|s| s.starts_with(':'))
+        {
+            InvisiErrorCode::FinalizationRequired
         } else {
             InvisiErrorCode::PreparationFailed
         };

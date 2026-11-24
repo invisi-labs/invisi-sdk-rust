@@ -214,6 +214,10 @@ impl<T: RpcTransport> RpcTransport for TrustedTransport<T> {
     }
 }
 impl<T: RpcTransport> CanonicalChain for TrustedProvider<T> {
+    fn latest_call(&self, address: Address, data: &[u8]) -> Option<Result<Vec<u8>>> {
+        self.ethereum.latest_call(address, data)
+    }
+
     fn blocks(&self, numbers: &[u64]) -> Option<Result<Vec<CanonicalBlock>>> {
         Some((|| {
             if numbers.is_empty() || numbers.iter().any(|n| *n > i64::MAX as u64) {

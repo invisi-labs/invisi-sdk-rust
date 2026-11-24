@@ -69,6 +69,8 @@ pub(crate) enum CreditPlan {
 }
 #[derive(Clone)]
 pub struct PreparedCredit {
+    pub(crate) fee_capacity: Option<U256>,
+    pub(crate) quote_clock: Option<preparation::QuoteClock>,
     pub(crate) preparation_reads: Option<Arc<PreparationChain>>,
     pub(crate) wallet: Option<Wallet>,
     pub(crate) owner_address: Address,
@@ -89,10 +91,10 @@ pub struct PreparedCredit {
 }
 #[derive(Clone)]
 pub(crate) enum CreditRepriceTemplate {
-    Create(CreditDeliveryState, Option<InitialCreditPayment>, u64),
-    Update(CreditInput, crate::credit::CreditUpdateChanges, u64),
-    Draw(Vec<CreditInput>, Wallet, u64, Vec<u8>),
-    Revoke(Address, u128, u64),
+    Create(CreditDeliveryState, Option<InitialCreditPayment>),
+    Update,
+    Draw(Wallet),
+    Revoke,
 }
 impl std::fmt::Debug for PreparedCredit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -101,7 +103,7 @@ impl std::fmt::Debug for PreparedCredit {
             .finish_non_exhaustive()
     }
 }
-fn credit_deliveries(state: &CreditDeliveryState) -> Result<Vec<abi::Delivery>> {
+pub(super) fn credit_deliveries(state: &CreditDeliveryState) -> Result<Vec<abi::Delivery>> {
     model(state.validate())?;
     let context = DeliveryContext {
         context: state.note.context,
@@ -128,6 +130,23 @@ fn credit_deliveries(state: &CreditDeliveryState) -> Result<Vec<abi::Delivery>> 
             })
         })
         .collect()
+}
+fn prepared_fee_capacity(
+    chain: &dyn ChainState,
+    owner: Address,
+    token: Address,
+    required: U256,
+    block: &CanonicalBlock,
+) -> Result<Option<U256>> {
+    if required == U256::ZERO || chain.historical_preparation() {
+        return Ok(None);
+    }
+    let (balance, allowance) = chain.token_balance_allowance(owner, token, block)?;
+    let capacity = balance.min(allowance);
+    if capacity < required {
+        return Err("ERC20 balance or Protocol allowance insufficient".into());
+    }
+    Ok(Some(capacity))
 }
 fn fee_balance(
     chain: &dyn ChainState,
@@ -183,8 +202,7 @@ impl Invisi {
         fee: Fee,
     ) -> Result<PreparedCredit> {
         let net_amount = initial_payment.as_ref().and_then(|p| p.net_amount);
-        let template =
-            CreditRepriceTemplate::Create(state.clone(), initial_payment.clone(), deadline);
+        let template = CreditRepriceTemplate::Create(state.clone(), initial_payment.clone());
         let reads = Arc::new(PreparationChain::new(self.chain.clone()));
         let chain = &*reads;
         let anchor = chain.snapshot()?;
@@ -208,6 +226,13 @@ impl Invisi {
             return Err("Credit grant ID already used".into());
         }
         let initial_available = state.note.available_credit;
+        let fee_capacity = prepared_fee_capacity(
+            chain,
+            wallet.owner_address,
+            token,
+            initial_payment.as_ref().map_or(fee.amount, |p| p.amount),
+            &anchor,
+        )?;
         let payment = if let Some(payment) = initial_payment {
             if let Some(net) = payment.net_amount {
                 if net == U256::ZERO || net.checked_add(fee.amount) != Some(payment.amount) {
@@ -218,7 +243,6 @@ impl Invisi {
             if payment.amount <= fee.amount {
                 return Err("initial payment must leave a positive Note".into());
             }
-            fee_balance(chain, wallet.owner_address, token, payment.amount, &anchor)?;
             let spender = Wallet::from_keys(
                 word_address(state.note.spender_wallet_identity)?,
                 state.spender_receiving_keys.clone(),
@@ -237,7 +261,6 @@ impl Invisi {
             ))?;
             Some((payment.amount, output))
         } else {
-            fee_balance(chain, wallet.owner_address, token, fee.amount, &anchor)?;
             None
         };
         let s = &state.note;
@@ -259,6 +282,8 @@ impl Invisi {
         }
         chain.canonical(&anchor)?;
         Ok(PreparedCredit {
+            fee_capacity,
+            quote_clock: Some(preparation::QuoteClock::capture(constructed_at)?),
             preparation_reads: Some(reads),
             wallet: Some(wallet.clone()),
             owner_address: wallet.owner_address,
@@ -301,7 +326,7 @@ impl Invisi {
         deadline: u64,
         fee: Fee,
     ) -> Result<PreparedCredit> {
-        let template = CreditRepriceTemplate::Update(input.clone(), changes.clone(), deadline);
+        let template = CreditRepriceTemplate::Update;
         let reads = Arc::new(PreparationChain::new(self.chain.clone()));
         let chain = &*reads;
         let anchor = chain.snapshot()?;
@@ -336,10 +361,13 @@ impl Invisi {
             feeRecipient: fee.recipient,
             feeAmount: fee.amount,
         };
-        fee_balance(chain, wallet.owner_address, token, fee.amount, &anchor)?;
+        let fee_capacity =
+            prepared_fee_capacity(chain, wallet.owner_address, token, fee.amount, &anchor)?;
         let deliveries = credit_deliveries(&next)?;
         chain.canonical(&anchor)?;
         Ok(PreparedCredit {
+            fee_capacity,
+            quote_clock: Some(preparation::QuoteClock::capture(constructed_at)?),
             preparation_reads: Some(reads),
             wallet: Some(wallet.clone()),
             owner_address: wallet.owner_address,
@@ -387,12 +415,7 @@ impl Invisi {
         fee: Fee,
         payload: Vec<u8>,
     ) -> Result<PreparedCredit> {
-        let template = CreditRepriceTemplate::Draw(
-            inputs.clone(),
-            recipient.clone(),
-            deadline,
-            payload.clone(),
-        );
+        let template = CreditRepriceTemplate::Draw(recipient.clone());
         let reads = Arc::new(PreparationChain::new(self.chain.clone()));
         let chain = &*reads;
         let anchor = chain.snapshot()?;
@@ -531,6 +554,8 @@ impl Invisi {
         }
         chain.canonical(&anchor)?;
         Ok(PreparedCredit {
+            fee_capacity: None,
+            quote_clock: Some(preparation::QuoteClock::capture(constructed_at)?),
             preparation_reads: Some(reads),
             wallet: Some(wallet.clone()),
             owner_address: wallet.owner_address,
@@ -577,7 +602,7 @@ impl Invisi {
         if owner_address == Address::ZERO {
             return Err("nonzero owner address required".into());
         }
-        let template = CreditRepriceTemplate::Revoke(token, grant_id, deadline);
+        let template = CreditRepriceTemplate::Revoke;
         let reads = Arc::new(PreparationChain::new(self.chain.clone()));
         let chain = &*reads;
         let anchor = chain.snapshot()?;
@@ -590,9 +615,11 @@ impl Invisi {
             return Err("Credit grant ID disabled or deadline expired".into());
         }
         fee.validate()?;
-        fee_balance(chain, owner_address, token, fee.amount, &anchor)?;
+        let fee_capacity = prepared_fee_capacity(chain, owner_address, token, fee.amount, &anchor)?;
         chain.canonical(&anchor)?;
         Ok(PreparedCredit {
+            fee_capacity,
+            quote_clock: Some(preparation::QuoteClock::capture(constructed_at)?),
             preparation_reads: Some(reads),
             wallet: None,
             owner_address: owner_address,
@@ -640,6 +667,36 @@ fn bool_field(v: bool) -> String {
     if v { "1" } else { "0" }.into()
 }
 impl PreparedCredit {
+    /// Attach a pinned gross spending budget while preparing owner-funded Credit operations.
+    pub fn with_broadcaster_fee_budget(
+        mut self,
+        chain: &dyn ChainState,
+        gross_budget: U256,
+    ) -> Result<Self> {
+        if self.phase != Phase::Prepared
+            || self.broadcaster.is_some()
+            || chain.context() != self.context
+            || gross_budget == U256::ZERO
+            || chain.historical_preparation()
+            || matches!(self.plan, CreditPlan::Draw { .. })
+        {
+            return Err(
+                "live, unsigned owner-funded Credit preparation and positive gross budget required"
+                    .into(),
+            );
+        }
+        let capacity = prepared_fee_capacity(
+            chain,
+            self.owner_address,
+            self.token,
+            gross_budget,
+            &self.anchor,
+        )?;
+        chain.canonical(&self.anchor)?;
+        self.fee_capacity = capacity.map(|c| c.min(gross_budget));
+        Ok(self)
+    }
+
     pub fn phase(&self) -> Phase {
         self.phase
     }
@@ -971,6 +1028,9 @@ impl PreparedCredit {
         self.proof = Some(proof);
         self.authorization = None;
         self.phase = Phase::Proved;
+        if self.broadcaster.is_some() {
+            self.finalize_broadcaster()?;
+        }
         Ok(self)
     }
     pub fn proof(&self) -> Option<&ProofBundle> {
@@ -1354,6 +1414,9 @@ impl PreparedCredit {
         *stored = signature;
         self.phase = Phase::Authorized;
         chain.canonical(&block)?;
+        if self.broadcaster.is_some() {
+            self.finalize_broadcaster()?;
+        }
         Ok(self)
     }
 }
@@ -2038,6 +2101,8 @@ mod lifecycle_tests {
             assert_eq!(decoded.note.credit_shared_key, U256::from(123));
         }
         let prepared_explicit = prepared_explicit
+            .with_broadcaster_fee_budget(chain.as_ref(), U256::from(100))
+            .unwrap()
             .quote_for_broadcaster(
                 chain.clone(),
                 Arc::new(CreditRelay {
@@ -2224,6 +2289,9 @@ mod lifecycle_tests {
                 Fee::default(),
             )
             .unwrap();
+        prepared = prepared
+            .with_broadcaster_fee_budget(chain.as_ref(), U256::from(100))
+            .unwrap();
         let original = prepared.preparation_reads.clone().unwrap();
         let frozen = prepared.successor_states()[0].note.clone();
         for _ in 0..2 {
@@ -2376,6 +2444,13 @@ mod lifecycle_tests {
                 .unwrap(),
         ];
         for original in plans {
+            let original = if matches!(original.plan, CreditPlan::Draw { .. }) {
+                original
+            } else {
+                original
+                    .with_broadcaster_fee_budget(chain.as_ref(), U256::from(100))
+                    .unwrap()
+            };
             chain.credit_statuses.lock().unwrap().insert(
                 (owner.owner_address, original.token, 1001),
                 if matches!(original.plan, CreditPlan::Create { .. }) {
@@ -3510,6 +3585,17 @@ mod revocation_tests {
             fees: std::sync::atomic::AtomicUsize::new(0),
             submits: std::sync::atomic::AtomicUsize::new(0),
         });
+        let options = BroadcasterOptions {
+            max_fee_amount: Some(U256::from(100)),
+            ..Default::default()
+        };
+        assert!(original
+            .quote_for_broadcaster(chain.clone(), relay.clone(), &options)
+            .unwrap_err()
+            .starts_with("NEEDS_REPREPARATION"));
+        let original = original
+            .with_broadcaster_fee_budget(chain.as_ref(), U256::from(100))
+            .unwrap();
         let prepared = original
             .quote_for_broadcaster(
                 chain.clone(),

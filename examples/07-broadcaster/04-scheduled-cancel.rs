@@ -124,7 +124,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let signature = invisi_sdk_examples::sign_authorization(&authorization)?;
     operation = operation
         .with_wallet_signature(&signature)?
-        .prove(prover.as_ref(), false)?;
+        .prove(prover.as_ref(), false)?
+        .ready()?;
     let submitted = relay.submit(&mut operation, chain.as_ref())?;
     println!("Submission state: {:?}", submitted.state);
     // Resume uses the local operation ID; remote status uses the ID returned by the Broadcaster.

@@ -291,9 +291,7 @@ impl Operation {
             .is_some();
         if !attempted {
             match &mut self.prepared {
-                ManagedPrepared::Funds(v) => {
-                    v.freeze_broadcaster_evidence(self.session.invisi.chain.as_ref(), relay)?
-                }
+                ManagedPrepared::Funds(v) => v.validate_broadcaster_evidence()?,
                 ManagedPrepared::Credit(v) => {
                     let saved = v
                         .broadcaster_state()
@@ -301,7 +299,16 @@ impl Operation {
                     if let Some(reason) = &saved.pre_send_refusal {
                         return Err(format!("{reason}: Broadcaster refused before acceptance; abandon and prepare a fresh request"));
                     }
+                    if saved.submitted_data.is_empty() {
+                        return Err(
+                            "FINALIZATION_REQUIRED: finalize Credit packet before submission"
+                                .into(),
+                        );
+                    }
                     let call = v.calldata(self.session.invisi.chain.as_ref(), Address::ZERO)?;
+                    if call.data != saved.submitted_data {
+                        return Err("frozen Credit relay intent mismatch".into());
+                    }
                     let quote = crate::broadcaster::VerifiedQuote::authenticate(
                         saved.quote.clone(),
                         crate::broadcaster::Trust {
@@ -418,10 +425,10 @@ impl Operation {
             return Ok(status);
         }
         let call = match &self.prepared {
-            ManagedPrepared::Funds(v) => crate::protocol::TransactionCall {
+            ManagedPrepared::Funds(_) => crate::protocol::TransactionCall {
                 to: sdk::word_address(self.session.scope.context.protocol_address)?,
                 value: U256::ZERO,
-                data: v.export_broadcaster_submission()?.data,
+                data: saved.submitted_data.clone(),
             },
             ManagedPrepared::Credit(v) => {
                 v.calldata(self.session.invisi.chain.as_ref(), Address::ZERO)?
@@ -459,6 +466,8 @@ impl Operation {
         {
             return Err("recovered broadcaster calldata differs from frozen transaction".into());
         }
+        let chain = self.session.invisi.chain.as_ref();
+        let network = sdk::SubmissionNetworkBinding::capture(chain, self.session.scope.context)?;
         record.snapshot = self.prepared.snapshot()?;
         record.call = Some(stored);
         record.externalized = true;
@@ -471,32 +480,63 @@ impl Operation {
             .checked_add(1)
             .ok_or("operation generation exhausted")?;
         let generation = record.generation;
+        let durable_revision = state
+            .revision
+            .checked_add(1)
+            .ok_or("wallet revision exhausted")?;
         self.session.commit(state)?;
         self.generation = generation;
-        let result = match &mut self.prepared {
-            ManagedPrepared::Funds(v) => {
-                crate::broadcaster::BroadcasterSubmitTarget::submit_for_client(
-                    v,
-                    self.session.invisi.chain.as_ref(),
-                    relay,
-                )
+        network.check(chain)?;
+        let final_fence_entered = std::cell::Cell::new(false);
+        let fence = |check_network: &dyn Fn() -> Result<()>| {
+            final_fence_entered.set(true);
+            let writes = WalletWrites::shared(
+                self.session.store.mutation_identity(),
+                &self.session.scope.key(),
+            );
+            let before_read = writes.idle_epoch()?;
+            let live = self.session.snapshot()?;
+            let record = live
+                .operations
+                .get(id)
+                .ok_or("operation removed before first submission")?;
+            if live.revision != durable_revision
+                || live.invalidated
+                || record.generation != generation
+                || record.status.terminal()
+                || record.broadcaster_id.as_deref() != Some(id)
+            {
+                return Err("wallet authority changed before first submission".into());
             }
-            ManagedPrepared::Credit(v) => {
-                crate::broadcaster::BroadcasterSubmitTarget::submit_for_client(
-                    v,
-                    self.session.invisi.chain.as_ref(),
-                    relay,
-                )
+            check_network()?;
+            network.check(chain)?;
+            if writes.idle_epoch()? != before_read {
+                return Err("wallet changed during final submission network check".into());
             }
+            Ok(())
         };
-        // A rejected preflight never reached transport. Do not let its durable retry
-        // marker bypass live validation on resume. Transport uncertainty retains it.
+        let result = match &mut self.prepared {
+            ManagedPrepared::Funds(v) => v.submit_broadcaster_with_fence(chain, relay, &fence),
+            ManagedPrepared::Credit(v) => v.submit_broadcaster_with_fence(chain, relay, &fence),
+        };
+        // A definite execution refusal releases a fresh handoff. A final authority
+        // fence failure keeps the durable obligation even if transport never ran.
         if !attempted
+            && !previously_externalized
             && result.is_err()
-            && matches!(&self.prepared, ManagedPrepared::Credit(v)
-                if v.broadcaster_state().is_some_and(|saved| !saved.attempted && saved.submission_id.is_none()))
+            && self.broadcaster_state().is_some_and(|saved| {
+                !saved.attempted
+                    && saved.submission_id.is_none()
+                    && (saved.pre_send_refusal.is_some()
+                        || (!final_fence_entered.get()
+                            && network.check(chain).is_ok()
+                            && chain.validate_submission_network().is_ok()))
+            })
         {
             let mut next = self.current()?;
+            if next.revision != durable_revision {
+                return result;
+            }
             let record = next
                 .operations
                 .get_mut(&self.id)
@@ -637,10 +677,46 @@ impl Operation {
         let prepared = self.prepared.clone_for_stage().prove(backend, recursive)?;
         self.persist(prepared)
     }
+    /// Complete a previously unfinalized packet, optionally renewing its same-intent relay quote.
+    pub fn finalize_broadcaster(self, relay: &dyn sdk::PreparedBroadcaster) -> Result<Self> {
+        let state = self.current()?;
+        if state.operations[&self.id].externalized {
+            return Err("cannot finalize an externalized operation".into());
+        }
+        let mut staged = self.prepared.clone_for_stage();
+        match &mut staged {
+            ManagedPrepared::Funds(v) => {
+                v.freeze_broadcaster_evidence(self.session.invisi.chain.as_ref(), relay)?
+            }
+            ManagedPrepared::Credit(v) => v.finalize_broadcaster()?,
+        }
+        self.persist(staged)
+    }
     pub fn ready(self) -> Result<Self> {
-        self.current()?;
-        let prepared = self.prepared.clone_for_stage().ready()?;
+        if self.current()?.operations[&self.id].externalized {
+            return Err("cannot finalize an externalized operation".into());
+        }
+        let prepared = match self.prepared.clone_for_stage() {
+            ManagedPrepared::Funds(mut value) if value.broadcaster_state().is_some() => {
+                value.finalize_broadcaster(self.session.invisi.chain.as_ref())?;
+                ManagedPrepared::Funds(value)
+            }
+            ManagedPrepared::Credit(mut value) if value.broadcaster_state().is_some() => {
+                value.finalize_broadcaster()?;
+                ManagedPrepared::Credit(value)
+            }
+            other => other.ready()?,
+        };
         self.persist(prepared)
+    }
+    pub fn with_broadcaster_fee_budget(self, gross_budget: U256) -> Result<Self> {
+        self.current()?;
+        let ManagedPrepared::Credit(value) = self.prepared.clone_for_stage() else {
+            return Err("Credit fee budget required".into());
+        };
+        let prepared =
+            value.with_broadcaster_fee_budget(self.session.invisi.chain.as_ref(), gross_budget)?;
+        self.persist(ManagedPrepared::Credit(prepared))
     }
     pub fn with_revocation_signature(self, signature: Vec<u8>) -> Result<Self> {
         self.current()?;
@@ -663,6 +739,20 @@ impl Operation {
             ManagedPrepared::Credit(v) => v.export_revocation_authorization(),
             _ => Err("revocation operation required".into()),
         }
+    }
+    /// Attach the explicit fresh nonce prerequisite without another chain read.
+    pub fn with_fresh_funding_nonce(
+        self,
+        fresh: sdk::FreshFundingNonce,
+        deadline: u64,
+    ) -> Result<Self> {
+        self.current()?;
+        let ManagedPrepared::Funds(value) = self.prepared.clone_for_stage() else {
+            return Err("fresh Shield funding nonce required".into());
+        };
+        self.persist(ManagedPrepared::Funds(
+            value.with_fresh_funding_nonce(fresh, deadline)?,
+        ))
     }
     pub fn with_funding_terms(self, deadline: u64) -> Result<Self> {
         self.current()?;
@@ -915,12 +1005,13 @@ impl WalletSession {
         &self,
         options: TransferPreparation,
     ) -> sdk::PreparationResult<Operation> {
-        self.prepare_transfer_internal(options)
+        self.prepare_transfer_internal(options, None)
             .map_err(|error| error.with_operation("prepare_transfer"))
     }
     fn prepare_transfer_internal(
         &self,
         mut options: TransferPreparation,
+        nonce: Option<sdk::SignatureFundingNonce>,
     ) -> sdk::PreparationResult<Operation> {
         if options.inputs.is_empty() {
             let state = self.snapshot()?;
@@ -968,23 +1059,48 @@ impl WalletSession {
         }
         self.prepare_note_paths(&mut options.inputs)?;
         self.prepare_cached(|invisi| {
-            Ok(ManagedPrepared::Funds(
-                invisi.prepare_transfer(&self.wallet, options.clone())?,
-            ))
+            let prepared = invisi.prepare_transfer(&self.wallet, options.clone())?;
+            Ok(ManagedPrepared::Funds(match &nonce {
+                Some(n) => {
+                    prepared.select_signature_funding(self.invisi.chain.as_ref(), n.clone())?
+                }
+                None => prepared,
+            }))
         })
     }
     pub fn prepare_shield(&self, options: ShieldPreparation) -> sdk::PreparationResult<Operation> {
-        self.prepare_shield_internal(options)
+        self.prepare_shield_internal(options, None)
             .map_err(|error| error.with_operation("prepare_shield"))
+    }
+    pub fn prepare_shield_with_signature_funding(
+        &self,
+        options: ShieldPreparation,
+        nonce: sdk::SignatureFundingNonce,
+    ) -> sdk::PreparationResult<Operation> {
+        self.prepare_shield_internal(options, Some(nonce))
+            .map_err(|error| error.with_operation("prepare_shield"))
+    }
+    pub fn prepare_transfer_with_signature_funding(
+        &self,
+        options: TransferPreparation,
+        nonce: sdk::SignatureFundingNonce,
+    ) -> sdk::PreparationResult<Operation> {
+        self.prepare_transfer_internal(options, Some(nonce))
+            .map_err(|error| error.with_operation("prepare_transfer"))
     }
     fn prepare_shield_internal(
         &self,
         options: ShieldPreparation,
+        nonce: Option<sdk::SignatureFundingNonce>,
     ) -> sdk::PreparationResult<Operation> {
         self.prepare_cached(|invisi| {
-            Ok(ManagedPrepared::Funds(
-                invisi.prepare_shield(&self.wallet, options.clone())?,
-            ))
+            let prepared = invisi.prepare_shield(&self.wallet, options.clone())?;
+            Ok(ManagedPrepared::Funds(match &nonce {
+                Some(n) => {
+                    prepared.select_signature_funding(self.invisi.chain.as_ref(), n.clone())?
+                }
+                None => prepared,
+            }))
         })
     }
     pub fn prepare_create_credit_explicit(
@@ -1179,8 +1295,18 @@ impl WalletSession {
         if record.snapshot.context() != self.scope.context {
             return Err("saved operation deployment mismatch".into());
         }
-        let mut prepared = record.snapshot.restore(&self.wallet, backend)?;
-        let capability = self.provenance_capability()?;
+        // Recovery of an existing relay handoff authenticates its frozen public artifacts.
+        let verify = if record.broadcaster_id.is_some() {
+            None
+        } else {
+            backend
+        };
+        let mut prepared = record.snapshot.restore(&self.wallet, verify)?;
+        let capability = if record.broadcaster_id.is_some() {
+            None
+        } else {
+            self.provenance_capability()?
+        };
         if let Some(cap) = capability {
             match &mut prepared {
                 ManagedPrepared::Funds(v) => *v = v.clone().reattach_provenance(cap.clone())?,
@@ -1693,6 +1819,12 @@ impl WalletSession {
 }
 
 impl crate::broadcaster::BroadcasterQuoteTarget for Operation {
+    fn initialization_token(&self) -> Option<Address> {
+        self.prepared
+            .snapshot()
+            .ok()
+            .map(|snapshot| snapshot.token())
+    }
     fn apply_broadcaster_quote(
         &mut self,
         chain: std::sync::Arc<dyn sdk::ChainState>,
@@ -1707,6 +1839,40 @@ impl crate::broadcaster::BroadcasterQuoteTarget for Operation {
 }
 
 impl crate::broadcaster::BroadcasterSubmitTarget for Operation {
+    fn frozen_broadcaster_authority(
+        &self,
+    ) -> Result<Option<crate::broadcaster::FrozenBroadcasterAuthority>> {
+        let state = self.current()?;
+        let record = state
+            .operations
+            .get(&self.id)
+            .ok_or("operation not found")?;
+        let Some(local_id) = &record.broadcaster_id else {
+            return Ok(None);
+        };
+        if local_id != &self.id || !record.externalized {
+            return Err("invalid frozen broadcaster journal authority".into());
+        }
+        let call = record
+            .call
+            .as_ref()
+            .ok_or("saved broadcaster calldata required")?;
+        if sdk::address_word(call.to) != self.session.scope.context.protocol_address
+            || call.value != U256::ZERO
+        {
+            return Err("frozen broadcaster destination mismatch".into());
+        }
+        record
+            .snapshot
+            .authenticate_frozen_broadcaster_authority(&call.data)
+            .map(Some)
+    }
+    fn initialization_token(&self) -> Option<Address> {
+        self.prepared
+            .snapshot()
+            .ok()
+            .map(|snapshot| snapshot.token())
+    }
     fn submit_for_client(
         &mut self,
         _chain: &dyn sdk::ChainState,

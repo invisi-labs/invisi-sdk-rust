@@ -90,6 +90,12 @@ the previous journal and reservations. Use the original local operation ID to
 resume, and the Broadcaster-returned opaque ID to query remote status.
 
 
+For signature funding, `session.prepare_shield_with_signature_funding(options, sdk::SignatureFundingNonce::Current)?` selects the live payer nonce before the journal records the operation. The Transfer equivalent takes the same nonce choice. For owner-funded Credit fees, an unsigned operation can pin a gross budget with `operation.with_broadcaster_fee_budget(gross_budget)?`.
+
+After a private operation's main proof and any funding signature, call `operation.ready()?` to finalize a signed relay quote that requires Source evidence. A failed Source proof leaves the main proof and reservations in the journal. Resume with the main-proof verifier to retry finalization. A new submission requires the finalized packet. An attempted packet retains its original relay, calldata, member proof and sidecars across recovery.
+
+A managed first send compares the wallet revision after its journal write and checks the live network immediately before transport. An overlapping wallet write or retirement of the original initialized chain receipt stops the send and preserves the exact packet and input reservations for recovery. In-process wallet sessions and built-in stores observe writes across handles sharing a backing store and scope. A custom wallet store that accepts direct host writes must hold `self.begin_mutation(scope)?` until each write finishes. Separate custom adapters over the same backing store must return the same `mutation_identity()`. Out-of-process writers require coordination by the host.
+
 ## Host transaction submission
 
 `WalletSession::send_transaction(&mut target, &sender, SessionTransactionOptions { caller, gas_limit })`

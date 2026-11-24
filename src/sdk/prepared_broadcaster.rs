@@ -379,7 +379,57 @@ impl std::fmt::Display for BroadcasterSubmitError {
 }
 impl std::error::Error for BroadcasterSubmitError {}
 
+/// Sealed stock RPC policy, bound to the configured endpoint.
+#[derive(Clone, Debug)]
+pub struct StockBroadcasterCapability {
+    endpoint: String,
+}
+impl StockBroadcasterCapability {
+    pub(super) fn restore(
+        saved: &PreparedBroadcasterState,
+        context: ProtocolContext,
+        data: &[u8],
+    ) -> Result<Self> {
+        Configuration {
+            endpoint: saved.endpoint.clone(),
+            quote_signer: saved.signer,
+            fee_recipient: saved.fee_recipient,
+        }
+        .validate()
+        .map_err(|e| e.to_string())?;
+        VerifiedQuote::authenticate(
+            saved.quote.clone(),
+            Trust {
+                chain_id: context.chain_id,
+                protocol: word_address(context.protocol_address)?,
+                signer: saved.signer,
+            },
+            data,
+            0,
+            saved.provenance_mode(),
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(Self {
+            endpoint: saved.endpoint.clone(),
+        })
+    }
+}
 pub trait PreparedBroadcaster: Send + Sync {
+    fn stock_capability(&self) -> Option<StockBroadcasterCapability> {
+        None
+    }
+    fn quote_classified(
+        &self,
+        data: &[u8],
+        chain_id: u64,
+        protocol: Address,
+        now: u64,
+        sidecars: &[ProofSidecar],
+    ) -> std::result::Result<VerifiedQuote, BroadcasterSubmitError> {
+        self.quote(data, chain_id, protocol, now, sidecars)
+            .map_err(BroadcasterSubmitError::Unknown)
+    }
+
     /// Override only when the transport retains authenticated structured RPC
     /// errors. The default treats every legacy String error as uncertain.
     fn submit_classified(
@@ -456,6 +506,23 @@ pub trait PreparedBroadcaster: Send + Sync {
     ) -> Result<RelayStatus>;
 }
 impl<T: RpcTransport + Send + Sync> PreparedBroadcaster for BroadcasterClient<T> {
+    fn stock_capability(&self) -> Option<StockBroadcasterCapability> {
+        Some(StockBroadcasterCapability {
+            endpoint: self.configuration().endpoint.clone(),
+        })
+    }
+    fn quote_classified(
+        &self,
+        data: &[u8],
+        chain_id: u64,
+        protocol: Address,
+        now: u64,
+        sidecars: &[ProofSidecar],
+    ) -> std::result::Result<VerifiedQuote, BroadcasterSubmitError> {
+        self.quote_with_sidecars(data, chain_id, protocol, now, sidecars)
+            .map_err(BroadcasterSubmitError::Rpc)
+    }
+
     fn submit_classified(
         &self,
         data: &[u8],
@@ -535,6 +602,20 @@ impl<T: RpcTransport + Send + Sync> PreparedBroadcaster for BroadcasterClient<T>
 impl<T: RpcTransport + Send + Sync + 'static> PreparedBroadcaster
     for crate::broadcaster::BroadcasterClient<T>
 {
+    fn stock_capability(&self) -> Option<StockBroadcasterCapability> {
+        PreparedBroadcaster::stock_capability(self.rpc())
+    }
+    fn quote_classified(
+        &self,
+        data: &[u8],
+        chain_id: u64,
+        protocol: Address,
+        now: u64,
+        sidecars: &[ProofSidecar],
+    ) -> std::result::Result<VerifiedQuote, BroadcasterSubmitError> {
+        PreparedBroadcaster::quote_classified(self.rpc(), data, chain_id, protocol, now, sidecars)
+    }
+
     fn submit_classified(
         &self,
         data: &[u8],
@@ -683,6 +764,13 @@ impl PreparedProvenance {
 impl PreparedTransaction {
     /// Export only public relay fields without a chain read or proof generation.
     pub fn export_broadcaster_submission(&self) -> Result<BroadcasterSubmission> {
+        if self
+            .broadcaster
+            .as_ref()
+            .is_some_and(|s| !s.attempted && s.submission_id.is_none())
+        {
+            self.validate_broadcaster_evidence()?;
+        }
         journal::ManagedPrepared::snapshot_funds(self)
             .snapshot()?
             .export_broadcaster_submission()
@@ -704,15 +792,16 @@ impl PreparedTransaction {
         relay: Arc<dyn PreparedBroadcaster>,
         options: &BroadcasterOptions,
     ) -> Result<Self> {
-        if self.provenance.is_none()
-            && relay.provenance_mode().is_some()
-            && !self.inputs().is_empty()
+        if self.funding().amount != U256::ZERO && !self.selected_funding_terms {
+            return Err("NEEDS_REPREPARATION: select signature funding during preparation".into());
+        }
+        if !self.funding().signature.is_empty()
+            || self.proof.is_some()
+            || self.broadcaster.as_ref().is_some_and(|s| {
+                s.attempted || s.submission_id.is_some() || !s.submitted_data.is_empty()
+            })
         {
-            if let Some(factory) = &self.provenance_factory {
-                let mut prepared = self.clone();
-                prepared.provenance = Some(factory(self.context)?);
-                return prepared.quote_for_broadcaster(chain, relay, options);
-            }
+            return Err("cannot reprice an authorized or finalized operation".into());
         }
         if options
             .max_fee_amount
@@ -727,32 +816,24 @@ impl PreparedTransaction {
         {
             return Err("broadcaster requires unsigned EVM preparation and matching chain".into());
         }
+        let initialized_binding = chain.self_contained_shield_capability();
         let config = relay.configuration();
         config.validate().map_err(|e| e.to_string())?;
         let provenance = relay.provenance_mode();
         if provenance.is_some() && !self.inputs().is_empty() {
-            self.provenance
-                .as_ref()
-                .ok_or("provenance capability required")?
-                .validate(self.context, provenance)?;
+            if let Some(cap) = &self.provenance {
+                cap.validate(self.context, provenance)?;
+            } else if self.provenance_factory.is_none() {
+                return Err("provenance capability required".into());
+            }
         }
-        let template = self
-            .reprice
-            .as_ref()
-            .ok_or("original business preparation required for explicit repricing")?;
-        let retained_reads = self
-            .preparation_reads
-            .as_ref()
-            .filter(|reads| reads.matches(&chain))
-            .cloned();
-        let runtime = Invisi {
-            chain: self
-                .preparation_reads
-                .as_ref()
-                .map_or_else(|| chain.clone(), |reads| reads.for_quote(chain.clone())),
-            provenance: self.provenance.clone(),
-            provenance_factory: self.provenance_factory.clone(),
-        };
+        let template = self.reprice.as_ref().ok_or(
+            "NEEDS_REPREPARATION: original business preparation required for explicit repricing",
+        )?;
+        let now = self
+            .quote_clock
+            .ok_or("NEEDS_REPREPARATION: prepared quote clock required")?
+            .now()?;
         let cancellation_token = options
             .schedule
             .as_ref()
@@ -768,13 +849,33 @@ impl PreparedTransaction {
         if let Some(schedule) = &schedule {
             schedule.validate().map_err(|e| e.to_string())?;
         }
+        let ordinary_shield = matches!(template, RepriceTemplate::Shield(p) if p.funding.permit.deadline == U256::ZERO)
+            && schedule.is_none()
+            && options.funding_permit.is_none()
+            && relay
+                .stock_capability()
+                .is_some_and(|cap| cap.endpoint == config.endpoint);
+        let mut estimate = self.clone();
+        if ordinary_shield {
+            if let Plan::Shield {
+                params, funding, ..
+            } = &mut estimate.plan
+            {
+                params.feeRecipient = config.fee_recipient;
+                params.feeAmount = U256::from(1);
+                if funding.amount > U256::ZERO && funding.deadline == U256::ZERO {
+                    funding.deadline = params.deadline;
+                }
+            }
+        }
         let mut fee = relay.scheduled_fee(
             self.token,
-            Some(&self.broadcaster_intent()?.data),
+            Some(&estimate.broadcaster_intent()?.data),
             schedule.as_ref(),
         )?;
         let mut final_candidate = None;
-        for _round in 0..options.max_attempts {
+        let mut ordinary_quote = None;
+        for round in 0..options.max_attempts {
             let amount = decimal(&json!(fee.fee_amount))?;
             if options.max_fee_amount.is_some_and(|cap| amount > cap) {
                 return Err("broadcaster fee exceeds maximum".into());
@@ -786,8 +887,9 @@ impl PreparedTransaction {
                 recipient: fee.fee_recipient,
                 amount,
             };
-            let mut candidate = match template {
+            let candidate = match template {
                 RepriceTemplate::Transfer(p) => {
+                    let original_fee = p.fee.amount;
                     let mut p = p.clone();
                     p.fee = f;
                     let has_funding = p.funding.amount != U256::ZERO;
@@ -843,7 +945,9 @@ impl PreparedTransaction {
                                 .funding
                                 .amount
                                 .checked_add(amount)
-                                .ok_or("funding overflow")?;
+                                .and_then(|n| n.checked_sub(original_fee))
+                                .filter(|n| *n != U256::ZERO)
+                                .ok_or("NEEDS_REPREPARATION: selected public funding cannot cover this fee adjustment")?;
                         }
                         BroadcasterFeeSource::PrivateInputs => {
                             if p.inputs.is_empty() {
@@ -851,11 +955,7 @@ impl PreparedTransaction {
                             }
                         }
                     }
-                    runtime.prepare_transfer_for_owner(
-                        self.owner_address,
-                        self.wallet.as_ref(),
-                        p,
-                    )?
+                    self.reprice_transfer(p)?
                 }
                 RepriceTemplate::Shield(p) => {
                     let mut p = p.clone();
@@ -874,22 +974,70 @@ impl PreparedTransaction {
                     p.funding.amount = sum(p.outputs.iter().map(|o| o.amount))?
                         .checked_add(amount)
                         .ok_or("funding overflow")?;
-                    runtime.prepare_shield(
-                        self.wallet
-                            .as_ref()
-                            .ok_or("complete wallet required for shield")?,
-                        p,
-                    )?
+                    model(crate::note::uint(p.funding.amount, 128, "funding amount"))?;
+                    let mut candidate = self.clone();
+                    let Plan::Shield {
+                        params, funding, ..
+                    } = &mut candidate.plan
+                    else {
+                        return Err("shield repricing shape mismatch".into());
+                    };
+                    params.feeAmount = amount;
+                    params.feeRecipient = fee.fee_recipient;
+                    funding.amount = p.funding.amount;
+                    candidate
                 }
             };
-            if candidate.funding().amount != U256::ZERO {
-                let deadline = match &candidate.plan {
-                    Plan::Transfer { params, .. } => params.deadline,
-                    Plan::Shield { params, .. } => params.deadline,
-                };
-                candidate = candidate.with_funding_terms(chain.as_ref(), deadline.to::<u64>())?;
+            if self.funding().permit.deadline != U256::ZERO
+                && self.funding().amount != candidate.funding().amount
+                && options.funding_permit.is_none()
+            {
+                return Err(
+                    "increased funding requires final gross funding permit callback".into(),
+                );
             }
             let data = candidate.broadcaster_intent()?.data;
+            if ordinary_shield {
+                match relay.quote_classified(
+                    &data,
+                    candidate.context.chain_id,
+                    word_address(candidate.context.protocol_address)?,
+                    now,
+                    &[],
+                ) {
+                    Ok(quote) => {
+                        ordinary_quote = Some((quote, now));
+                        final_candidate = Some(candidate);
+                        break;
+                    }
+                    Err(error) => {
+                        if !matches!(
+                            &error,
+                            BroadcasterSubmitError::Rpc(invisi_sdk_rpc::rpc::Error::Remote {
+                                code: -32000,
+                                ..
+                            })
+                        ) || round + 1 >= options.max_attempts
+                        {
+                            return Err(error.to_string());
+                        }
+                        let refreshed = relay.fee(self.token, Some(&data))?;
+                        let required = decimal(&json!(refreshed.fee_amount))?;
+                        if refreshed.fee_recipient != config.fee_recipient
+                            || options.max_fee_amount.is_some_and(|cap| required > cap)
+                        {
+                            return Err(
+                                "broadcaster fee exceeds maximum or recipient changed".into()
+                            );
+                        }
+                        if required <= amount {
+                            return Err(error.to_string());
+                        }
+                        fee = refreshed;
+                        continue;
+                    }
+                }
+            }
             let next = relay.scheduled_fee(self.token, Some(&data), schedule.as_ref())?;
             let next_amount = decimal(&json!(next.fee_amount))?;
             if next.fee_recipient != config.fee_recipient
@@ -919,15 +1067,20 @@ impl PreparedTransaction {
         }
         let data = candidate.broadcaster_intent()?.data;
         let sidecars = Vec::new();
-        let block = chain.snapshot()?;
-        let quote = relay.scheduled_quote(
-            &data,
-            candidate.context.chain_id,
-            word_address(candidate.context.protocol_address)?,
-            chain.construction_timestamp(&block),
-            &sidecars,
-            schedule.as_ref(),
-        )?;
+        let (quote, now) = match ordinary_quote {
+            Some((quote, now)) => (quote, now),
+            None => {
+                let quote = relay.scheduled_quote(
+                    &data,
+                    candidate.context.chain_id,
+                    word_address(candidate.context.protocol_address)?,
+                    now,
+                    &sidecars,
+                    schedule.as_ref(),
+                )?;
+                (quote, now)
+            }
+        };
         if quote.signed().quote.schedule.as_ref() != schedule.as_ref() {
             return Err("broadcaster quote schedule mismatch".into());
         }
@@ -939,15 +1092,15 @@ impl PreparedTransaction {
                 signer: config.quote_signer,
             },
             &data,
-            chain.construction_timestamp(&block),
+            now,
             provenance,
         )
         .map_err(|e| e.to_string())?;
-        chain.canonical(&block)?;
-        if let Some(reads) = retained_reads.clone() {
-            candidate.preparation_reads = Some(reads);
-        }
         candidate.reprice = self.reprice.clone();
+        if initialized_binding.is_some() && chain.self_contained_shield_capability().is_none() {
+            return Err("deployment receipt invalidated during quote".into());
+        }
+        candidate.stock_broadcaster = relay.stock_capability();
         candidate.broadcaster = Some(PreparedBroadcasterState {
             cancellation_token: cancellation_token.clone(),
             endpoint: config.endpoint,
@@ -964,16 +1117,71 @@ impl PreparedTransaction {
         });
         Ok(candidate)
     }
-    pub fn freeze_broadcaster_evidence(
-        &mut self,
-        chain: &dyn ChainState,
-        relay: &dyn PreparedBroadcaster,
-    ) -> Result<()> {
-        let saved = self
-            .broadcaster
-            .as_ref()
-            .ok_or("saved broadcaster context required")?;
-        let data = self.broadcaster_submission_call(chain)?.data;
+    fn reprice_transfer(&self, p: TransferPreparation) -> Result<Self> {
+        let mut candidate = self.clone();
+        let Plan::Transfer {
+            params,
+            inputs,
+            outputs,
+            funding,
+            capacity: slots,
+        } = &mut candidate.plan
+        else {
+            return Err("transfer repricing shape mismatch".into());
+        };
+        let (recipient, withdrawal) = p.withdrawal.unwrap_or((Address::ZERO, U256::ZERO));
+        model(crate::note::uint(withdrawal, 128, "withdrawal"))?;
+        model(crate::note::uint(p.funding.amount, 128, "funding amount"))?;
+        let available = sum(inputs.iter().map(|i| i.note.amount))?
+            .checked_add(p.funding.amount)
+            .ok_or("amount overflow")?;
+        let requested = sum(p.outputs.iter().map(|o| o.amount))?
+            .checked_add(withdrawal)
+            .and_then(|n| n.checked_add(p.fee.amount))
+            .ok_or("amount overflow")?;
+        let change = available
+            .checked_sub(requested)
+            .ok_or("NEEDS_REPREPARATION: insufficient prepared Note balance")?;
+        let mut repriced_outputs = p.outputs;
+        if change != U256::ZERO {
+            if !p.automatic_change {
+                return Err(
+                    "NEEDS_REPREPARATION: explicit outputs must balance funding and fees".into(),
+                );
+            }
+            let mut output = if let Some(prior) = outputs
+                .iter()
+                .find(|out| out.change && out.amount == change)
+            {
+                prior.clone()
+            } else {
+                let wallet = self
+                    .wallet
+                    .as_ref()
+                    .ok_or("NEEDS_REPREPARATION: receiving keys required for change")?;
+                NoteOutput::for_recipient(self.context, self.token, wallet, change, Vec::new())?
+            };
+            output.change = true;
+            repriced_outputs.push(output);
+        }
+        validate_outputs(&repriced_outputs, self.context, self.token)?;
+        *slots = capacity(inputs.len(), repriced_outputs.len())?;
+        candidate.needs_authorization = !inputs.is_empty()
+            && !(recipient == self.owner_address
+                && withdrawal == available
+                && repriced_outputs.is_empty()
+                && p.funding.amount == U256::ZERO
+                && p.fee.amount == U256::ZERO);
+        params.noteCommitments = repriced_outputs.iter().map(|o| o.commitment).collect();
+        params.withdrawalAddress = recipient;
+        params.withdrawalAmount = withdrawal;
+        params.feeRecipient = p.fee.recipient;
+        params.feeAmount = p.fee.amount;
+        *outputs = repriced_outputs;
+        funding.amount = p.funding.amount;
+        Ok(candidate)
+    }
+    fn broadcaster_member_proof(&self) -> Result<Option<MemberProof>> {
         let member = if self.target == "noir-recursive" {
             let proof = self.export_aggregate_member()?.bundle;
             Some(MemberProof {
@@ -990,88 +1198,219 @@ impl PreparedTransaction {
         } else {
             None
         };
+        Ok(member)
+    }
+    fn source_required(&self) -> bool {
+        !self.inputs().is_empty()
+            && self
+                .broadcaster
+                .as_ref()
+                .is_some_and(|s| s.provenance_mode().is_some())
+    }
+    fn authenticate_final_call(&self, data: &[u8], now: u64) -> Result<VerifiedQuote> {
+        let saved = self
+            .broadcaster
+            .as_ref()
+            .ok_or("saved broadcaster context required")?;
+        if request_hash(data).map_err(|e| e.to_string())? != saved.intent_hash {
+            return Err("frozen broadcaster intent mismatch".into());
+        }
+        VerifiedQuote::authenticate(
+            saved.quote.clone(),
+            Trust {
+                chain_id: self.context.chain_id,
+                protocol: word_address(self.context.protocol_address)?,
+                signer: saved.signer,
+            },
+            data,
+            now,
+            saved.provenance_mode(),
+        )
+        .map_err(|e| e.to_string())
+    }
+    /// Publish the complete local packet for operations without required Source evidence.
+    pub(super) fn finalize_local_broadcaster(&mut self) -> Result<()> {
+        if self.broadcaster.is_none() || self.source_required() {
+            return Ok(());
+        }
+        let data = self.broadcaster_submission_call(0)?.data;
+        self.authenticate_final_call(&data, 0)?;
+        let member = self.broadcaster_member_proof()?;
+        let saved = self.broadcaster.as_mut().unwrap();
         if !saved.submitted_data.is_empty()
             && (saved.submitted_data != data || saved.member_proof != member)
         {
             return Err("prepared broadcaster submission changed".into());
         }
-        let verified = submission_quote(
-            saved,
-            self.context,
-            relay,
-            &data,
-            chain.snapshot()?.timestamp,
-        )?;
-        let required = relay.submission_requirements(&verified)?;
-        if required != (verified.signed().provenance_required == Some(true)) {
-            return Err("broadcaster provenance requirements changed".into());
+        if !saved.sidecars.is_empty() {
+            return Err("unexpected Source sidecar".into());
         }
-        if required && !self.inputs().is_empty() && self.provenance.is_none() {
-            if let Some(factory) = &self.provenance_factory {
-                let capability = factory(self.context)?;
-                capability.validate(self.context, saved.provenance_mode())?;
-                self.provenance = Some(capability);
-            }
-        }
-        let cache_valid = self.provenance.as_ref().is_some_and(|cap| {
-            !saved.sidecars.is_empty()
-                && saved.sidecars.iter().all(|s| {
-                    source::validate_proof_bundle(&s.proof_bundle, &cap.client.trust).is_ok()
-                })
-        });
-        if required && !self.inputs().is_empty() && !cache_valid {
-            let cap = self
-                .provenance
-                .as_ref()
-                .ok_or("trusted provenance capability required")?;
-            cap.validate(self.context, saved.provenance_mode())?;
-            let packet = self.prove_provenance(chain)?;
-            self.broadcaster.as_mut().unwrap().sidecars = packet.sidecars;
-        }
-        if required && !self.inputs().is_empty() {
-            let cap = self
-                .provenance
-                .as_ref()
-                .ok_or("trusted provenance capability required")?;
-            let capacity = match &self.plan {
-                Plan::Transfer { capacity, .. } => *capacity,
-                _ => return Err("private Note transfer required".into()),
-            };
-            let public = self.public_inputs()?;
-            let digest = U256::from_be_bytes(model(source::operation_digest(
-                &cap.client.trust.scope,
-                capacity,
-                &public,
-            ))?);
-            let nfs = self
-                .inputs()
-                .iter()
-                .map(|i| model(i.note.nullifier()))
-                .collect::<Result<Vec<_>>>()?;
-            let saved = self.broadcaster.as_ref().unwrap();
-            if saved.sidecars.len() != 1 {
-                return Err("one Source sidecar required".into());
-            }
-            let sidecar = &saved.sidecars[0];
-            let pi = &sidecar.proof_bundle.public_inputs;
-            if sidecar.operation_index != "0"
-                || pi.len() != 11
-                || ((source_word(&pi[7])? << 128) | source_word(&pi[8])?) != digest
-                || source_word(&pi[9])? != model(source::input_digest(&nfs))?
-            {
-                return Err("saved Source statement mismatch".into());
-            }
-        }
-        let saved = self.broadcaster.as_mut().unwrap();
-        saved.quote = verified.signed().clone();
         saved.submitted_data = data;
         saved.member_proof = member;
         Ok(())
+    }
+    /// Complete required evidence after the native proof and any funding signature exist.
+    /// On failure the caller retains the original operation and its verified main proof.
+    pub fn finalize_broadcaster(&mut self, chain: &dyn ChainState) -> Result<()> {
+        let saved = self
+            .broadcaster
+            .as_ref()
+            .ok_or("saved broadcaster context required")?;
+        if saved.attempted || saved.submission_id.is_some() {
+            return Err("cannot finalize an attempted packet".into());
+        }
+        if chain.context() != self.context {
+            return Err("finalization deployment mismatch".into());
+        }
+        if !saved.submitted_data.is_empty() {
+            if !self.source_required() {
+                return self.validate_broadcaster_evidence();
+            }
+            if !saved.sidecars.is_empty() {
+                // An explicit Source reproof may have renewed the trusted packet before first send.
+                let packet = self
+                    .export_provenance_proof()?
+                    .ok_or("FINALIZATION_REQUIRED: verified Source packet required")?;
+                let mut candidate = self.clone();
+                candidate.broadcaster.as_mut().unwrap().sidecars = packet.sidecars;
+                candidate.validate_broadcaster_evidence()?;
+                *self = candidate;
+                return Ok(());
+            }
+            if saved.submitted_data != self.broadcaster_submission_call(0)?.data
+                || saved.member_proof != self.broadcaster_member_proof()?
+            {
+                return Err("prepared broadcaster submission changed".into());
+            }
+        }
+        let mut candidate = self.clone();
+        candidate.provenance_packet = Arc::new(std::sync::Mutex::new(
+            self.provenance_packet
+                .lock()
+                .map_err(|_| "provenance cache lock poisoned")?
+                .clone(),
+        ));
+        if matches!(candidate.plan, Plan::Shield { .. }) && candidate.phase == Phase::Prepared {
+            candidate.phase = Phase::Ready;
+        }
+        if candidate.source_required() {
+            let data = candidate.broadcaster_submission_call(0)?.data;
+            candidate.authenticate_final_call(&data, 0)?;
+            if candidate.provenance.is_none() {
+                let factory = candidate
+                    .provenance_factory
+                    .as_ref()
+                    .ok_or("trusted provenance capability required")?;
+                let cap = factory(candidate.context)?;
+                cap.validate(candidate.context, saved.provenance_mode())?;
+                candidate.provenance = Some(cap);
+            }
+            let packet = candidate.prove_provenance(chain)?;
+            let member = candidate.broadcaster_member_proof()?;
+            let saved = candidate.broadcaster.as_mut().unwrap();
+            saved.submitted_data = data;
+            saved.sidecars = packet.sidecars;
+            saved.member_proof = member;
+        } else {
+            candidate.finalize_local_broadcaster()?;
+        }
+        candidate.validate_broadcaster_evidence()?;
+        *self = candidate;
+        Ok(())
+    }
+    /// Explicit pre-submission finalization with relay-bound quote renewal when needed.
+    pub fn freeze_broadcaster_evidence(
+        &mut self,
+        chain: &dyn ChainState,
+        relay: &dyn PreparedBroadcaster,
+    ) -> Result<()> {
+        let saved = self
+            .broadcaster
+            .as_ref()
+            .ok_or("saved broadcaster context required")?;
+        let config = relay.configuration();
+        if config.endpoint != saved.endpoint
+            || config.quote_signer != saved.signer
+            || config.fee_recipient != saved.fee_recipient
+        {
+            return Err("saved broadcaster configuration mismatch".into());
+        }
+        if !saved.submitted_data.is_empty() {
+            return self.validate_broadcaster_evidence();
+        }
+        let now = chain.submission_timestamp()?;
+        let data = self.broadcaster_submission_call(now)?.data;
+        let quote = submission_quote(saved, self.context, relay, &data, now)?;
+        let mut candidate = self.clone();
+        candidate.broadcaster.as_mut().unwrap().quote = quote.signed().clone();
+        candidate.finalize_broadcaster(chain)?;
+        *self = candidate;
+        Ok(())
+    }
+    /// Validate completed immutable artifacts before reserving a first relay handoff.
+    pub fn validate_broadcaster_evidence(&self) -> Result<()> {
+        let s = self
+            .broadcaster
+            .as_ref()
+            .ok_or("saved broadcaster context required")?;
+        if s.submitted_data.is_empty() {
+            return Err(
+                "FINALIZATION_REQUIRED: finalize broadcaster evidence before submission".into(),
+            );
+        }
+        let data = self.broadcaster_submission_call(0)?.data;
+        if s.submitted_data != data || s.member_proof != self.broadcaster_member_proof()? {
+            return Err("prepared broadcaster submission changed".into());
+        }
+        self.authenticate_final_call(&data, 0)?;
+        if self.source_required() {
+            if s.sidecars.len() != 1 {
+                return Err("FINALIZATION_REQUIRED: one Source sidecar required".into());
+            }
+            let packet = self
+                .export_provenance_proof()?
+                .ok_or("FINALIZATION_REQUIRED: verified Source packet required")?;
+            if packet.data != hex(&data)
+                || serde_json::to_vec(&packet.sidecars).map_err(|e| e.to_string())?
+                    != serde_json::to_vec(&s.sidecars).map_err(|e| e.to_string())?
+            {
+                return Err("finalized Source packet differs from native submission".into());
+            }
+        } else if !s.sidecars.is_empty() {
+            return Err("unexpected Source sidecar".into());
+        }
+        Ok(())
+    }
+    fn delegates_broadcaster_execution(
+        &self,
+        chain: &dyn ChainState,
+        relay: &dyn PreparedBroadcaster,
+        saved: &PreparedBroadcasterState,
+    ) -> bool {
+        self.self_contained_shield()
+            && chain
+                .self_contained_shield_capability()
+                .is_some_and(|cap| cap.context == self.context)
+            && relay
+                .stock_capability()
+                .is_some_and(|cap| cap.endpoint == saved.endpoint)
+            && saved.quote.quote.execution == invisi_sdk_rpc::broadcaster::Execution::Direct
+            && saved.sidecars.is_empty()
+            && !self.funding().signature.is_empty()
     }
     pub(crate) fn submit_for_broadcaster(
         &mut self,
         chain: &dyn ChainState,
         relay: &dyn PreparedBroadcaster,
+    ) -> Result<RelayStatus> {
+        self.submit_broadcaster_with_fence(chain, relay, &|network| network())
+    }
+    #[doc(hidden)]
+    pub fn submit_broadcaster_with_fence(
+        &mut self,
+        chain: &dyn ChainState,
+        relay: &dyn PreparedBroadcaster,
+        fence: &SubmissionFence<'_>,
     ) -> Result<RelayStatus> {
         let saved = self
             .broadcaster
@@ -1125,7 +1464,20 @@ impl PreparedTransaction {
             self.broadcaster.as_mut().unwrap().submission_id = Some(result.id.clone());
             return Ok(result);
         }
-        self.freeze_broadcaster_evidence(chain, relay)?;
+        if chain.historical_preparation() {
+            return Err("live chain required for broadcaster submission validation".into());
+        }
+        let delegation_entered =
+            self.delegates_broadcaster_execution(chain, relay, self.broadcaster.as_ref().unwrap());
+        if delegation_entered {
+            chain
+                .delegated_network_fence()
+                .ok_or("deployment receipt invalidated before submission entry")??;
+        }
+        // Managed sessions freeze before committing their journal. Reuse only the
+        // immutable evidence; requirements and all live state are checked below
+        // after that commit, never cached across the persistence boundary.
+        self.validate_broadcaster_evidence()?;
         let s = self
             .broadcaster
             .as_ref()
@@ -1137,61 +1489,48 @@ impl PreparedTransaction {
         {
             return Err("broadcaster saved configuration mismatch".into());
         }
-        let block = chain.snapshot()?;
-        let data = self.broadcaster_submission_call(chain)?.data;
-        if request_hash(&data).map_err(|e| e.to_string())? != s.intent_hash {
-            return Err("frozen broadcaster intent mismatch".into());
+        if s.provenance_mode().is_some() && !self.inputs().is_empty() && s.sidecars.len() != 1 {
+            return Err("one Source sidecar required".into());
         }
-        let generated;
-        let sidecars = if s.provenance_mode().is_some()
-            && !self.inputs().is_empty()
-            && s.sidecars.is_empty()
+        let frozen_quote = VerifiedQuote::authenticate(
+            s.quote.clone(),
+            Trust {
+                chain_id: self.context.chain_id,
+                protocol: word_address(self.context.protocol_address)?,
+                signer: s.signer,
+            },
+            &s.submitted_data,
+            0,
+            s.provenance_mode(),
+        )
+        .map_err(|e| e.to_string())?;
+        if relay.submission_requirements(&frozen_quote)?
+            != (s.quote.provenance_required == Some(true))
         {
-            generated = vec![
-                self.build_source_sidecar(
-                    chain,
-                    self.provenance
-                        .as_ref()
-                        .ok_or("trusted provenance capability required")?,
-                )?
-                .0,
-            ];
-            &generated
-        } else {
-            &s.sidecars
-        };
-        if !sidecars.is_empty() {
-            let cap = self
-                .provenance
-                .as_ref()
-                .ok_or("reattach trusted provenance capability before submission")?;
-            cap.validate(self.context, s.provenance_mode())?;
-            for sidecar in sidecars {
-                source::validate_proof_bundle(&sidecar.proof_bundle, &cap.client.trust)
-                    .map_err(|e| e.to_string())?;
-                let capacity = match &self.plan {
-                    Plan::Transfer { capacity, .. } => *capacity,
-                    _ => return Err("unexpected shield source proof".into()),
-                };
-                let digest = model(source::operation_digest(
-                    &cap.client.trust.scope,
-                    capacity,
-                    &self.public_inputs()?,
-                ))?;
-                let pi = &sidecar.proof_bundle.public_inputs;
-                let actual = (source_word(&pi[7])? << 128) | source_word(&pi[8])?;
-                let nfs = self
-                    .inputs()
-                    .iter()
-                    .map(|i| model(i.note.nullifier()))
-                    .collect::<Result<Vec<_>>>()?;
-                if sidecar.operation_index != "0"
-                    || actual != U256::from_be_bytes(digest)
-                    || source_word(&pi[9])? != model(source::input_digest(&nfs))?
-                {
-                    return Err("saved sidecar statement mismatch".into());
-                }
+            return Err("broadcaster provenance requirements changed".into());
+        }
+        let data = s.submitted_data.clone();
+        // All immutable proofs and service requirements are resolved first.
+        // Capture live state once after the journal commit, just before transport.
+        let (current, now) = if delegation_entered {
+            if !self.delegates_broadcaster_execution(chain, relay, s) {
+                return Err("deployment receipt invalidated during submission".into());
             }
+            self.validate_broadcaster_execution()?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| "system clock before epoch")?
+                .as_secs();
+            (self.encode_operation_call(Address::ZERO, true, now)?, now)
+        } else {
+            let block = chain.snapshot()?;
+            (
+                self.broadcaster_submission_call_at(chain, &block)?,
+                block.timestamp,
+            )
+        };
+        if current.data != data {
+            return Err("prepared broadcaster submission changed".into());
         }
         let quote = VerifiedQuote::authenticate(
             s.quote.clone(),
@@ -1201,23 +1540,24 @@ impl PreparedTransaction {
                 signer: s.signer,
             },
             &data,
-            block.timestamp,
+            now,
             s.provenance_mode(),
         )
         .map_err(|e| e.to_string())?;
-        chain.canonical(&block)?;
-        let frozen_sidecars = sidecars.to_vec();
+        fence(&|| {
+            if delegation_entered {
+                chain
+                    .delegated_network_fence()
+                    .ok_or("deployment receipt invalidated before final submission fence")?
+            } else {
+                chain.validate_submission_network()
+            }
+        })?;
         let saved = self.broadcaster.as_mut().unwrap();
-        saved.sidecars = frozen_sidecars.clone();
-        saved.submitted_data = data.clone();
         saved.attempted = true;
-        let result = relay.submit_member(
-            &data,
-            &quote,
-            &frozen_sidecars,
-            self.broadcaster.as_ref().unwrap().member_proof.as_ref(),
-        )?;
-        self.broadcaster.as_mut().unwrap().submission_id = Some(result.id.clone());
+        let result =
+            relay.submit_member(&data, &quote, &saved.sidecars, saved.member_proof.as_ref())?;
+        saved.submission_id = Some(result.id.clone());
         Ok(result)
     }
     /// Exports the public packet without reading the chain or invoking a prover.
@@ -1254,7 +1594,10 @@ impl PreparedTransaction {
         invisi_sdk_rpc::provenance_packet::validate_provenance_proof(packet, &cap.client.trust)?;
         self.validate_cached_native_statement(packet)
     }
-    fn validate_cached_native_statement(&self, packet: &source::ProvenanceProof) -> Result<()> {
+    pub(super) fn validate_cached_native_statement(
+        &self,
+        packet: &source::ProvenanceProof,
+    ) -> Result<()> {
         if self
             .provenance_data
             .as_ref()
@@ -1305,6 +1648,13 @@ impl PreparedTransaction {
     }
     /// Replaces cached evidence only after fresh proving and local validation succeed.
     pub fn reprove_provenance(&self, chain: &dyn ChainState) -> Result<source::ProvenanceProof> {
+        if self.source_required()
+            && self.funding().amount != U256::ZERO
+            && self.funding().signature.is_empty()
+        {
+            return Err("final funding signature required before Source finalization".into());
+        }
+
         if self.provenance.is_none() {
             if let Some(factory) = &self.provenance_factory {
                 let mut prepared = self.clone();
@@ -1969,6 +2319,277 @@ mod tests {
         }
     }
     #[test]
+    fn stock_shield_price_refresh_requires_structured_refusal_and_increase_under_cap() {
+        struct DriftTransport {
+            context: ProtocolContext,
+            mode: &'static str,
+            estimates: Arc<std::sync::atomic::AtomicUsize>,
+            quotes: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl RpcTransport for DriftTransport {
+            fn send(&self, request: &Value) -> invisi_sdk_rpc::rpc::Result<Value> {
+                let fee = if request["method"] == "broadcaster_estimateQuote" {
+                    let count = self
+                        .estimates
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if count == 0 || self.mode == "unchanged" {
+                        2
+                    } else {
+                        5
+                    }
+                } else {
+                    5
+                };
+                if request["method"] == "broadcaster_getQuote"
+                    && self
+                        .quotes
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                        == 0
+                {
+                    if self.mode == "transport" {
+                        return Err(invisi_sdk_rpc::rpc::Error::Transport(
+                            "lost quote response".into(),
+                        ));
+                    }
+                    if self.mode == "bad-signature" {
+                        let mut result = ClientQuoteTransport {
+                            context: self.context,
+                            fee,
+                        }
+                        .send(request)?;
+                        result["result"]["signature"] = json!("0x00");
+                        return Ok(result);
+                    }
+                    return Ok(
+                        json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":if self.mode == "other-code" {-32602} else {-32000},"message":"Request rejected"}}),
+                    );
+                }
+                ClientQuoteTransport {
+                    context: self.context,
+                    fee,
+                }
+                .send(request)
+            }
+        }
+        for (mode, cap, succeeds, expected_estimates) in [
+            ("increase", 10, true, 2),
+            ("increase", 4, false, 2),
+            ("unchanged", 10, false, 2),
+            ("transport", 10, false, 1),
+            ("bad-signature", 10, false, 1),
+            ("other-code", 10, false, 1),
+        ] {
+            let (chain, wallet, p, _) = note_fixture();
+            let prepared = Invisi::new(chain.clone())
+                .prepare_shield_with_signature_funding(
+                    &wallet,
+                    ShieldPreparation {
+                        token: p.token,
+                        outputs: vec![NoteOutput::identity(
+                            chain.context,
+                            p.token,
+                            U256::from(123),
+                            U256::from(20),
+                        )
+                        .unwrap()],
+                        funding: abi::FundingParams {
+                            amount: U256::from(20),
+                            payer: wallet.owner_address,
+                            ..empty_funding()
+                        },
+                        fee: Fee::default(),
+                        deadline: 100,
+                    },
+                    SignatureFundingNonce::Current,
+                )
+                .unwrap();
+            let estimates = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let quotes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let relay = BroadcasterClient::new(
+                SignedRelay {
+                    fees: 0.into(),
+                    quotes: 0.into(),
+                }
+                .configuration(),
+                DriftTransport {
+                    context: chain.context,
+                    mode,
+                    estimates: estimates.clone(),
+                    quotes: quotes.clone(),
+                },
+            )
+            .unwrap();
+            let result = prepared.quote_for_broadcaster(
+                chain,
+                Arc::new(relay),
+                &BroadcasterOptions {
+                    max_fee_amount: Some(U256::from(cap)),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(result.is_ok(), succeeds, "{mode} cap={cap}");
+            assert_eq!(
+                estimates.load(std::sync::atomic::Ordering::SeqCst),
+                expected_estimates,
+                "{mode}"
+            );
+            assert!(
+                prepared.broadcaster_state().is_none(),
+                "failed candidate altered original"
+            );
+            if let Ok(finalized) = result {
+                assert_eq!(finalized.funding().amount, U256::from(25));
+                assert_eq!(quotes.load(std::sync::atomic::Ordering::SeqCst), 2);
+            }
+        }
+    }
+    #[test]
+    fn stock_plain_shield_quotes_paid_features_with_one_estimate() {
+        struct ObservedTransport {
+            inner: ClientQuoteTransport,
+            calls: Arc<std::sync::Mutex<Vec<Value>>>,
+        }
+        impl RpcTransport for ObservedTransport {
+            fn send(&self, request: &Value) -> invisi_sdk_rpc::rpc::Result<Value> {
+                self.calls.lock().unwrap().push(request.clone());
+                self.inner.send(request)
+            }
+        }
+        let (chain, fixture_wallet, p, _) = note_fixture();
+        let signing = k256::ecdsa::SigningKey::from_slice(&[1; 32]).unwrap();
+        let public = signing.verifying_key().to_encoded_point(false);
+        let wallet = Wallet::from_keys(
+            Address::from_slice(&keccak256(&public.as_bytes()[1..])[12..]),
+            fixture_wallet.receiving_keys().clone(),
+        )
+        .unwrap();
+        let prepared = Invisi::new(chain.clone())
+            .prepare_shield_with_signature_funding(
+                &wallet,
+                ShieldPreparation {
+                    token: p.token,
+                    outputs: vec![NoteOutput::for_recipient(
+                        chain.context,
+                        p.token,
+                        &wallet,
+                        U256::from(20),
+                        Vec::new(),
+                    )
+                    .unwrap()],
+                    funding: abi::FundingParams {
+                        amount: U256::from(20),
+                        payer: wallet.owner_address,
+                        ..empty_funding()
+                    },
+                    fee: Fee::default(),
+                    deadline: 100,
+                },
+                SignatureFundingNonce::Current,
+            )
+            .unwrap();
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let relay = BroadcasterClient::new(
+            SignedRelay {
+                fees: 0.into(),
+                quotes: 0.into(),
+            }
+            .configuration(),
+            ObservedTransport {
+                inner: ClientQuoteTransport {
+                    context: chain.context,
+                    fee: 2,
+                },
+                calls: calls.clone(),
+            },
+        )
+        .unwrap();
+        let authority = chain.clone();
+        let quoted = prepared
+            .quote_for_broadcaster(
+                chain,
+                Arc::new(relay),
+                &BroadcasterOptions {
+                    max_fee_amount: Some(U256::from(10)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let calls = calls.lock().unwrap();
+        let methods: Vec<_> = calls
+            .iter()
+            .map(|r| r["method"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            methods,
+            vec!["broadcaster_estimateQuote", "broadcaster_getQuote"]
+        );
+        let initial = hex_bytes(calls[0]["params"][0]["data"].as_str().unwrap(), None).unwrap();
+        let intent = invisi_sdk_rpc::broadcaster::decode_intent(&initial).unwrap();
+        assert_eq!(intent.fee_amount, U256::from(1));
+        assert_eq!(
+            intent.fee_recipient,
+            quoted.broadcaster_state().unwrap().fee_recipient
+        );
+        assert_eq!(quoted.funding().amount, U256::from(22));
+        let snapshot = journal::ManagedPrepared::snapshot_funds(&quoted)
+            .snapshot()
+            .unwrap();
+        let mut saved = serde_json::to_value(&snapshot).unwrap();
+        let restored: journal::PreparedSnapshot = serde_json::from_value(saved.clone()).unwrap();
+        let journal::ManagedPrepared::Funds(restored) = restored.restore(&wallet, None).unwrap()
+        else {
+            panic!("funds expected")
+        };
+        assert!(restored.outputs()[0].self_contained);
+        assert!(restored.stock_broadcaster.is_some());
+        assert!(quoted.clone().ready().is_err());
+        let request = quoted
+            .export_funding_authorization(authority.as_ref())
+            .unwrap();
+        let (sig, id) = signing
+            .sign_prehash_recoverable(request.digest.as_slice())
+            .unwrap();
+        let mut signature = sig.to_bytes().to_vec();
+        signature.push(id.to_byte());
+        let authorized = quoted
+            .clone()
+            .with_funding_signature(authority.as_ref(), signature)
+            .unwrap();
+        let ready = authorized.ready().unwrap();
+        let ready_snapshot = journal::ManagedPrepared::snapshot_funds(&ready)
+            .snapshot()
+            .unwrap();
+        let ready_snapshot: journal::PreparedSnapshot =
+            serde_json::from_slice(&serde_json::to_vec(&ready_snapshot).unwrap()).unwrap();
+        let journal::ManagedPrepared::Funds(ready_restored) =
+            ready_snapshot.restore(&wallet, None).unwrap()
+        else {
+            panic!("funds expected")
+        };
+        assert_eq!(ready_restored.phase(), Phase::Ready);
+        assert!(ready_restored.stock_broadcaster.is_some());
+        assert!(ready_restored.outputs()[0].self_contained);
+        saved["outputs"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("selfContained");
+        saved.as_object_mut().unwrap().remove("stockBroadcaster");
+        saved
+            .as_object_mut()
+            .unwrap()
+            .remove("selectedFundingTerms");
+        let legacy: journal::PreparedSnapshot = serde_json::from_value(saved).unwrap();
+        let journal::ManagedPrepared::Funds(legacy) = legacy.restore(&wallet, None).unwrap() else {
+            panic!("funds expected")
+        };
+        assert!(!legacy.outputs()[0].self_contained);
+        assert!(legacy.stock_broadcaster.is_none());
+        let mut tampered = serde_json::to_value(&snapshot).unwrap();
+        tampered["broadcaster"]["quote"]["quote"]["feeAmount"] = json!("999");
+        let tampered: journal::PreparedSnapshot = serde_json::from_value(tampered).unwrap();
+        assert!(tampered.restore(&wallet, None).is_err());
+    }
+    #[test]
     fn client_lifecycle_accepts_note_and_credit_and_leaves_failed_target_unchanged() {
         let (chain, wallet, mut p, _) = note_fixture();
         p.outputs =
@@ -2028,6 +2649,8 @@ mod tests {
                 chain.snapshot().unwrap().timestamp + 100,
                 Fee::default(),
             )
+            .unwrap()
+            .with_broadcaster_fee_budget(chain.as_ref(), U256::from(10))
             .unwrap();
         let before = serde_json::to_value(
             journal::ManagedPrepared::Credit(credit.clone())
@@ -2244,6 +2867,24 @@ mod tests {
             prover: Arc::new(NoProver),
             budgets: SourceReplayBudgets::default(),
         });
+        // A restored frozen packet must reject duplicate valid Source bundles before
+        // any final capability-specific validation, even when no proving is needed.
+        let mut duplicated = prepared.clone();
+        duplicated.provenance = Some(wrong_scope.clone());
+        let (packet, _) = cached_packet_fixture();
+        source::validate_proof_bundle(&packet.sidecars[0].proof_bundle, &wrong_scope.client.trust)
+            .unwrap();
+        let data = duplicated
+            .encode_operation_call(Address::ZERO, true, chain.snapshot().unwrap().timestamp)
+            .unwrap()
+            .data;
+        let frozen = duplicated.broadcaster.as_mut().unwrap();
+        frozen.submitted_data = data;
+        frozen.sidecars = vec![packet.sidecars[0].clone(), packet.sidecars[0].clone()];
+        assert!(duplicated
+            .submit_for_broadcaster(chain.as_ref(), client.rpc())
+            .unwrap_err()
+            .contains("one Source sidecar required"));
         prepared.provenance_factory = Some(Arc::new(move |_| Ok(wrong_scope.clone())));
         assert!(prepared
             .freeze_broadcaster_evidence(chain.as_ref(), client.rpc())
@@ -2279,7 +2920,7 @@ mod tests {
             quotes: AtomicUsize::new(0),
         });
         let prepared = Invisi::new(chain.clone())
-            .prepare_shield(
+            .prepare_shield_with_signature_funding(
                 &wallet,
                 ShieldPreparation {
                     token: p.token,
@@ -2298,6 +2939,7 @@ mod tests {
                     fee: Fee::default(),
                     deadline: 100,
                 },
+                SignatureFundingNonce::Current,
             )
             .unwrap()
             .quote_for_broadcaster(
@@ -2372,11 +3014,15 @@ mod tests {
     }
     #[test]
     fn fee_convergence_attaches_only_final_signed_intent_and_freezes_funding() {
-        let (chain, wallet, p, _) = note_fixture();
+        let (chain, fixture_wallet, p, _) = note_fixture();
+        let signing = k256::ecdsa::SigningKey::from_slice(&[1; 32]).unwrap();
+        let public = signing.verifying_key().to_encoded_point(false);
+        let owner = Address::from_slice(&keccak256(&public.as_bytes()[1..])[12..]);
+        let wallet = Wallet::from_keys(owner, fixture_wallet.receiving_keys().clone()).unwrap();
         let output =
             NoteOutput::identity(chain.context, p.token, U256::from(123), U256::from(20)).unwrap();
         let prepared = Invisi::new(chain.clone())
-            .prepare_shield(
+            .prepare_shield_with_signature_funding(
                 &wallet,
                 ShieldPreparation {
                     token: p.token,
@@ -2389,6 +3035,7 @@ mod tests {
                     fee: Fee::default(),
                     deadline: 100,
                 },
+                SignatureFundingNonce::Current,
             )
             .unwrap();
         let relay = Arc::new(SignedRelay {
@@ -2445,12 +3092,22 @@ mod tests {
             .cancel(relay.as_ref(), "invented-id")
             .unwrap_err()
             .contains("recover"));
-        let mut attempted = quoted.clone();
-        let data = attempted.broadcaster_intent().unwrap().data;
+        let request = quoted.export_funding_authorization(chain.as_ref()).unwrap();
+        let (sig, recovery) = signing
+            .sign_prehash_recoverable(request.digest.as_slice())
+            .unwrap();
+        let mut signature = sig.to_bytes().to_vec();
+        signature.push(recovery.to_byte());
+        let mut attempted = quoted
+            .clone()
+            .with_funding_signature(chain.as_ref(), signature)
+            .unwrap()
+            .ready()
+            .unwrap();
         let retained = attempted.broadcaster.as_mut().unwrap();
         retained.attempted = true;
-        retained.submitted_data = data.clone();
-        retained.sidecars = vec![ProofSidecar {
+        let mut source_state = retained.clone();
+        source_state.sidecars = vec![ProofSidecar {
             operation_index: "0".into(),
             proof_bundle: source::ProofBundle {
                 format: "retained".into(),
@@ -2462,7 +3119,6 @@ mod tests {
                 root_certificates: vec![],
             },
         }];
-        let mut source_state = retained.clone();
         source_state.quote.provenance_required = Some(true);
         let encoded = serde_json::to_vec(&source_state).unwrap();
         let restored: PreparedBroadcasterState = serde_json::from_slice(&encoded).unwrap();
@@ -2475,11 +3131,17 @@ mod tests {
         assert!(restored.attempted);
         let replay = RetryRelay {
             config: relay.configuration(),
-            data,
-            sidecars: serde_json::to_value(&retained.sidecars).unwrap(),
+            data: retained.submitted_data.clone(),
+            sidecars: serde_json::json!([]),
             lookup: None,
             response: "server-id".into(),
         };
+        let mut tampered = attempted.clone();
+        tampered.broadcaster.as_mut().unwrap().sidecars = source_state.sidecars;
+        assert!(tampered
+            .submit_for_broadcaster(chain.as_ref(), relay.as_ref())
+            .unwrap_err()
+            .contains("unexpected frozen Source evidence"));
         assert_eq!(
             attempted
                 .submit_for_broadcaster(chain.as_ref(), &replay)
@@ -2544,12 +3206,93 @@ mod tests {
         }
     }
     #[test]
+    fn frozen_funds_submit_rejects_changed_call_or_member_before_transport() {
+        let (chain, fixture_wallet, p, _) = note_fixture();
+        let signing = k256::ecdsa::SigningKey::from_slice(&[1; 32]).unwrap();
+        let public = signing.verifying_key().to_encoded_point(false);
+        let owner = Address::from_slice(&keccak256(&public.as_bytes()[1..])[12..]);
+        let wallet = Wallet::from_keys(owner, fixture_wallet.receiving_keys().clone()).unwrap();
+        let relay = Arc::new(SignedRelay {
+            fees: 0.into(),
+            quotes: 0.into(),
+        });
+        let prepared = Invisi::new(chain.clone())
+            .prepare_shield_with_signature_funding(
+                &wallet,
+                ShieldPreparation {
+                    token: p.token,
+                    outputs: vec![NoteOutput::identity(
+                        chain.context,
+                        p.token,
+                        U256::from(123),
+                        U256::from(20),
+                    )
+                    .unwrap()],
+                    funding: abi::FundingParams {
+                        payer: owner,
+                        amount: U256::from(20),
+                        ..empty_funding()
+                    },
+                    fee: Default::default(),
+                    deadline: 100,
+                },
+                SignatureFundingNonce::Current,
+            )
+            .unwrap()
+            .quote_for_broadcaster(
+                chain.clone(),
+                relay.clone(),
+                &BroadcasterOptions {
+                    max_fee_amount: Some(U256::from(100)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let request = prepared
+            .export_funding_authorization(chain.as_ref())
+            .unwrap();
+        let (signature, recovery) = signing
+            .sign_prehash_recoverable(request.digest.as_slice())
+            .unwrap();
+        let mut signature = signature.to_bytes().to_vec();
+        signature.push(recovery.to_byte());
+        let mut prepared = prepared
+            .with_funding_signature(chain.as_ref(), signature)
+            .unwrap()
+            .ready()
+            .unwrap();
+        prepared
+            .freeze_broadcaster_evidence(chain.as_ref(), relay.as_ref())
+            .unwrap();
+        let mut changed = prepared.clone();
+        changed.broadcaster.as_mut().unwrap().submitted_data.push(0);
+        assert!(changed
+            .submit_for_broadcaster(chain.as_ref(), relay.as_ref())
+            .is_err());
+        let mut changed = prepared;
+        changed.broadcaster.as_mut().unwrap().member_proof = Some(MemberProof {
+            format_version: 1,
+            circuit_name: "tampered".into(),
+            target: "noir-recursive".into(),
+            bb_version: "6.0.0".into(),
+            artifact_sha256: "00".repeat(32),
+            vk_sha256: "00".repeat(32),
+            proof_hex: "0x00".into(),
+            proof_sha256: "00".repeat(32),
+            public_inputs: vec![],
+        });
+        assert!(changed
+            .submit_for_broadcaster(chain.as_ref(), relay.as_ref())
+            .is_err());
+    }
+
+    #[test]
     fn failed_fee_convergence_does_not_attach_or_consume_original() {
         let (chain, wallet, p, _) = note_fixture();
         let output =
             NoteOutput::identity(chain.context, p.token, U256::from(123), U256::from(20)).unwrap();
         let prepared = Invisi::new(chain.clone())
-            .prepare_shield(
+            .prepare_shield_with_signature_funding(
                 &wallet,
                 ShieldPreparation {
                     token: p.token,
@@ -2562,6 +3305,7 @@ mod tests {
                     fee: Fee::default(),
                     deadline: 100,
                 },
+                SignatureFundingNonce::Current,
             )
             .unwrap();
         let relay = Arc::new(SignedRelay {
@@ -2984,7 +3728,7 @@ mod tests {
             NoteOutput::identity(chain.context(), p.token, U256::from(123), U256::from(20))
                 .unwrap();
         let mut prepared = Invisi::new(chain.clone())
-            .prepare_shield(
+            .prepare_shield_with_signature_funding(
                 &wallet,
                 ShieldPreparation {
                     token: p.token,
@@ -2997,6 +3741,7 @@ mod tests {
                     fee: Fee::default(),
                     deadline: 100,
                 },
+                SignatureFundingNonce::Current,
             )
             .unwrap();
         let original = prepared.preparation_reads.clone().unwrap();
@@ -3036,7 +3781,7 @@ mod tests {
         p.fee = Fee::default();
         p.automatic_change = false;
         let prepared = Invisi::new(chain.clone())
-            .prepare_transfer(&wallet, p)
+            .prepare_transfer_with_signature_funding(&wallet, p, SignatureFundingNonce::Current)
             .unwrap();
         let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
         let seen = calls.clone();

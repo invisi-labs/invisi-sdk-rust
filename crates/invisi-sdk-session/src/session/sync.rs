@@ -347,8 +347,7 @@ impl WalletSession {
                 .is_some_and(|g| g != generation)
                 && !base.invalidated
             {
-                self.store.recover_reorg(
-                    &self.scope.key(),
+                self.recover_store_reorg(
                     history
                         .snapshot()?
                         .reorg_from

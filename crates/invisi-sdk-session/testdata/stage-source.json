@@ -1,0 +1,26 @@
+{
+  "commitment": "15776510825345466717718265710362907788470623418645913992576938683307078510252",
+  "generations": [
+    {
+      "certificate": {
+        "certificateVersion": "1",
+        "chainGeneration": "1",
+        "chainId": "31337",
+        "confirmedBlockHash": "10",
+        "confirmedBlockNumber": "10",
+        "decisionLogHash": "0",
+        "issuedAt": "2000000010",
+        "leafCount": "1",
+        "previousCheckpointHash": "0",
+        "protocolAddress": "4660",
+        "providerId": "1",
+        "root": "21698878805904889220559867500880537949851458193890552080282414393741624842985",
+        "rootSequence": "1",
+        "signature": "0xb5ef0bf607e02bd02342a3147b6611575629e7601b1f283521b00bead6f8cc333e02075ce89c3891f91c6a7ec3e30393d40e85ea267c7d464f090cf7a9fa6a05",
+        "signingKeyId": "23727096876957060562942109210375565632364241237442306309794035324146978900350",
+        "treeId": "1"
+      },
+      "publicKey": "0x8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
+    }
+  ]
+}

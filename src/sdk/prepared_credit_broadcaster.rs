@@ -85,23 +85,22 @@ impl PreparedCredit {
         if let Some(cap) = &self.provenance {
             cap.validate(self.context, relay.provenance_mode())?;
         }
-        let retained_reads = self
-            .preparation_reads
-            .as_ref()
-            .filter(|reads| reads.matches(&chain))
-            .cloned();
-        let runtime = Invisi {
-            chain: self
-                .preparation_reads
-                .as_ref()
-                .map_or_else(|| chain.clone(), |reads| reads.for_quote(chain.clone())),
-            provenance: self.provenance.clone(),
-            provenance_factory: self.provenance_factory.clone(),
-        };
+        if self.proof.is_some()
+            || self.broadcaster.as_ref().is_some_and(|s| {
+                s.attempted || s.submission_id.is_some() || !s.submitted_data.is_empty()
+            })
+        {
+            return Err("cannot reprice an authorized or finalized Credit".into());
+        }
+        let now = self
+            .quote_clock
+            .ok_or("NEEDS_REPREPARATION: prepared Credit quote clock required")?
+            .now()?;
+        self.validate_usage_timestamp(now)?;
         let template = self
             .reprice
             .as_ref()
-            .ok_or("original Credit business preparation required for explicit repricing")?;
+            .ok_or("NEEDS_REPREPARATION: original Credit business preparation required for explicit repricing")?;
         let cancellation_token = options
             .schedule
             .as_ref()
@@ -138,57 +137,7 @@ impl PreparedCredit {
             if amount == U256::ZERO {
                 return Err("positive Credit relay fee required".into());
             }
-            let mut candidate = match template {
-                CreditRepriceTemplate::Create(state, payment, deadline) => runtime
-                    .prepare_create_credit_with_initial_payment(
-                        self.wallet
-                            .as_ref()
-                            .ok_or("complete wallet required for Credit repricing")?,
-                        state.clone(),
-                        payment
-                            .clone()
-                            .map(|mut p| -> Result<_> {
-                                if let Some(net) = p.net_amount {
-                                    p.amount = net
-                                        .checked_add(amount)
-                                        .ok_or("initial payment gross overflow")?;
-                                }
-                                Ok(p)
-                            })
-                            .transpose()?,
-                        *deadline,
-                        f,
-                    )?,
-                CreditRepriceTemplate::Update(input, changes, deadline) => runtime
-                    .prepare_update_credit_explicit(
-                        self.wallet
-                            .as_ref()
-                            .ok_or("complete wallet required for Credit repricing")?,
-                        input.clone(),
-                        changes.clone(),
-                        *deadline,
-                        f,
-                    )?,
-                CreditRepriceTemplate::Draw(inputs, recipient, deadline, payload) => runtime
-                    .prepare_draw_credit_explicit(
-                        self.wallet
-                            .as_ref()
-                            .ok_or("complete wallet required for Credit repricing")?,
-                        inputs.clone(),
-                        recipient,
-                        *deadline,
-                        f,
-                        payload.clone(),
-                    )?,
-                CreditRepriceTemplate::Revoke(token, grant_id, deadline) => runtime
-                    .prepare_revoke_credit_explicit(
-                        self.owner_address,
-                        *token,
-                        *grant_id,
-                        *deadline,
-                        f,
-                    )?,
-            };
+            let mut candidate = self.reprice_credit(template, f)?;
             let data = candidate.broadcaster_intent()?.data;
             let next = relay.scheduled_fee(self.token, Some(&data), schedule.as_ref())?;
             let next_amount = decimal(&json!(next.fee_amount))?;
@@ -202,12 +151,11 @@ impl PreparedCredit {
                 fee = next;
                 continue;
             }
-            let block = chain.snapshot()?;
             let quote = relay.scheduled_quote(
                 &data,
                 self.context.chain_id,
                 word_address(self.context.protocol_address)?,
-                chain.construction_timestamp(&block),
+                now,
                 &[],
                 schedule.as_ref(),
             )?;
@@ -223,14 +171,10 @@ impl PreparedCredit {
                 quote.signed(),
                 &trust,
                 &data,
-                chain.construction_timestamp(&block),
+                now,
                 relay.provenance_mode(),
             )
             .map_err(|e| e.to_string())?;
-            chain.canonical(&block)?;
-            if let Some(reads) = retained_reads.clone() {
-                candidate.preparation_reads = Some(reads);
-            }
             candidate.broadcaster = Some(PreparedBroadcasterState {
                 cancellation_token: cancellation_token.clone(),
                 endpoint: config.endpoint,
@@ -249,10 +193,162 @@ impl PreparedCredit {
         }
         Err("Credit relay fee convergence budget exceeded".into())
     }
+    fn reprice_credit(&self, original: &CreditRepriceTemplate, fee: Fee) -> Result<Self> {
+        let mut candidate = self.clone();
+        let require_capacity = |amount: U256| {
+            if self.fee_capacity.is_some_and(|cap| amount <= cap) {
+                Ok(())
+            } else {
+                Err(
+                    "NEEDS_REPREPARATION: prepare Credit with a sufficient gross fee budget"
+                        .to_owned(),
+                )
+            }
+        };
+        let resize =
+            |output: &NoteOutput, amount: U256, keys: &ReceivingKeys| -> Result<NoteOutput> {
+                if amount == U256::ZERO {
+                    return Err("Credit fee must leave a positive Note".into());
+                }
+                if output.amount == amount {
+                    return Ok(output.clone());
+                }
+                let mut opening = output
+                    .note
+                    .clone()
+                    .ok_or("NEEDS_REPREPARATION: Credit payment Note opening required")?;
+                opening.amount = amount;
+                NoteOutput::from_note(opening, Some(keys))
+            };
+        match (&mut candidate.plan, original) {
+            (
+                CreditPlan::Create {
+                    params,
+                    created,
+                    initial_payment,
+                },
+                CreditRepriceTemplate::Create(initial, payment),
+            ) => {
+                if let (Some((_, output)), Some(payment)) = (initial_payment, payment) {
+                    let gross = match payment.net_amount {
+                        Some(net) => net
+                            .checked_add(fee.amount)
+                            .ok_or("initial payment gross overflow")?,
+                        None => payment.amount,
+                    };
+                    model(crate::note::uint(gross, 126, "initial payment"))?;
+                    let net = gross
+                        .checked_sub(fee.amount)
+                        .ok_or("initial payment must leave a positive Note")?;
+                    require_capacity(gross)?;
+                    if gross != params.totalAmount {
+                        created.note = model(crate::credit::apply_credit_draw_usage(
+                            &initial.note,
+                            gross,
+                            self.constructed_at,
+                        ))?;
+                        params.creditCommitment = field_word(model(created.note.commitment())?);
+                        candidate.deliveries = credit::credit_deliveries(created)?;
+                    } else {
+                        candidate.deliveries.truncate(2);
+                    }
+                    *output = resize(output, net, &created.spender_receiving_keys)?;
+                    params.totalAmount = gross;
+                    params.noteCommitment = output.commitment;
+                    candidate.deliveries.push(output.delivery.clone());
+                } else {
+                    require_capacity(fee.amount)?;
+                }
+                params.feeRecipient = fee.recipient;
+                params.feeAmount = fee.amount;
+            }
+            (CreditPlan::Update { params, .. }, CreditRepriceTemplate::Update) => {
+                require_capacity(fee.amount)?;
+                params.feeRecipient = fee.recipient;
+                params.feeAmount = fee.amount;
+            }
+            (CreditPlan::Draw { params, output, .. }, CreditRepriceTemplate::Draw(recipient)) => {
+                let net = params
+                    .totalAmount
+                    .checked_sub(fee.amount)
+                    .ok_or("draw fee exceeds gross payment")?;
+                *output = resize(output, net, &recipient.receiving_keys)?;
+                params.noteCommitment = output.commitment;
+                *candidate
+                    .deliveries
+                    .last_mut()
+                    .ok_or("missing Credit draw delivery")? = output.delivery.clone();
+                params.feeRecipient = fee.recipient;
+                params.feeAmount = fee.amount;
+            }
+            (
+                CreditPlan::Revoke {
+                    fee: current,
+                    signature,
+                    ..
+                },
+                CreditRepriceTemplate::Revoke,
+            ) => {
+                if !signature.is_empty() {
+                    return Err("cannot reprice signed Credit revocation".into());
+                }
+                require_capacity(fee.amount)?;
+                *current = fee;
+            }
+            _ => return Err("inconsistent Credit repricing template".into()),
+        }
+        Ok(candidate)
+    }
+    pub fn finalize_broadcaster(&mut self) -> Result<()> {
+        let saved = self
+            .broadcaster
+            .as_ref()
+            .ok_or("saved Credit relay context required")?;
+        if saved.attempted || saved.submission_id.is_some() || saved.pre_send_refusal.is_some() {
+            return Err("cannot finalize an attempted or retired Credit packet".into());
+        }
+        match &self.plan {
+            CreditPlan::Revoke { signature, .. } if !signature.is_empty() => {}
+            CreditPlan::Revoke { .. } => {
+                return Err("revocation signature required before finalization".into())
+            }
+            _ if self.phase == Phase::Proved && self.proof.is_some() => {}
+            _ => return Err("verified Credit proof required before finalization".into()),
+        }
+        let packet = journal::ManagedPrepared::Credit(self.clone())
+            .snapshot()?
+            .export_broadcaster_submission()?;
+        if request_hash(&packet.data).map_err(|e| e.to_string())? != saved.intent_hash {
+            return Err("frozen Credit relay intent mismatch".into());
+        }
+        VerifiedQuote::authenticate(
+            saved.quote.clone(),
+            Trust {
+                chain_id: self.context.chain_id,
+                protocol: word_address(self.context.protocol_address)?,
+                signer: saved.signer,
+            },
+            &packet.data,
+            0,
+            saved.provenance_mode(),
+        )
+        .map_err(|e| e.to_string())?;
+        self.broadcaster.as_mut().unwrap().submitted_data = packet.data;
+        Ok(())
+    }
     pub(crate) fn submit_for_broadcaster(
         &mut self,
         chain: &dyn ChainState,
         relay: &dyn PreparedBroadcaster,
+    ) -> Result<invisi_sdk_rpc::broadcaster::Status> {
+        self.submit_broadcaster_with_fence(chain, relay, &|network| network())
+    }
+    #[doc(hidden)]
+    pub fn submit_broadcaster_with_fence(
+        &mut self,
+        chain: &dyn ChainState,
+        relay: &dyn PreparedBroadcaster,
+        fence: &SubmissionFence<'_>,
     ) -> Result<invisi_sdk_rpc::broadcaster::Status> {
         let state = self
             .broadcaster
@@ -306,9 +402,14 @@ impl PreparedCredit {
         if let Some(reason) = &state.pre_send_refusal {
             return Err(format!("{reason}: Broadcaster refused before acceptance; abandon and prepare a fresh request"));
         }
+        if state.submitted_data.is_empty() {
+            return Err("FINALIZATION_REQUIRED: finalize Credit packet before submission".into());
+        }
         self.validate_usage_period(chain)?;
         let data = self.calldata(chain, Address::ZERO)?.data;
-        if request_hash(&data).map_err(|e| e.to_string())? != state.intent_hash {
+        if state.submitted_data != data
+            || request_hash(&data).map_err(|e| e.to_string())? != state.intent_hash
+        {
             return Err("frozen Credit relay intent mismatch".into());
         }
         let block = chain.snapshot()?;
@@ -324,12 +425,16 @@ impl PreparedCredit {
             state.provenance_mode(),
         )
         .map_err(|e| e.to_string())?;
-        relay.submission_requirements(&quote)?;
+        if relay.submission_requirements(&quote)?
+            != (quote.signed().provenance_required == Some(true))
+        {
+            return Err("broadcaster provenance requirements changed".into());
+        }
         chain.canonical(&block)?;
         self.validate_usage_period(chain)?;
+        fence(&|| chain.validate_submission_network())?;
         let state = self.broadcaster.as_mut().unwrap();
         state.attempted = true;
-        state.submitted_data = data.clone();
         let result = match relay.submit_classified(&data, &quote, &[]) {
             Ok(status) => status,
             Err(error) => {

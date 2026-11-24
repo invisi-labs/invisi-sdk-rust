@@ -5,6 +5,7 @@ use std::{path::Path, sync::Mutex, time::Duration};
 
 pub struct SQLiteRecords {
     connection: Mutex<Connection>,
+    mutation_identity: usize,
     table: &'static str,
 }
 impl SQLiteRecords {
@@ -35,13 +36,31 @@ impl SQLiteRecords {
             .busy_timeout(Duration::from_secs(5))
             .map_err(|e| e.to_string())?;
         connection.execute_batch(&format!("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS {table}(scope TEXT PRIMARY KEY NOT NULL, revision INTEGER NOT NULL CHECK(revision > 0), ciphertext BLOB NOT NULL);")).map_err(|e|e.to_string())?;
+        // Independent connections to the same database/table represent one wallet store.
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        let mut identity = DefaultHasher::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let file = path.metadata().map_err(|e| e.to_string())?;
+            (file.dev(), file.ino()).hash(&mut identity);
+        }
+        #[cfg(not(unix))]
+        path.canonicalize()
+            .map_err(|e| e.to_string())?
+            .hash(&mut identity);
+        table.hash(&mut identity);
         Ok(Self {
             connection: Mutex::new(connection),
+            mutation_identity: identity.finish() as usize,
             table,
         })
     }
 }
 impl AtomicRecords for SQLiteRecords {
+    fn mutation_identity(&self) -> usize {
+        self.mutation_identity
+    }
     fn read(&self, scope: &str) -> Result<Option<EncryptedRecord>> {
         let connection = self
             .connection

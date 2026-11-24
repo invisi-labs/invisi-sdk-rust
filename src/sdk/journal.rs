@@ -39,6 +39,8 @@ impl From<NoteInputRecord> for NoteInput {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OutputSnapshot {
     #[serde(default)]
+    self_contained: bool,
+    #[serde(default)]
     change: bool,
     context: ProtocolContext,
     token: Address,
@@ -54,6 +56,7 @@ pub struct OutputSnapshot {
 impl OutputSnapshot {
     fn capture(v: &NoteOutput) -> Self {
         Self {
+            self_contained: v.self_contained,
             change: v.change,
             context: v.context(),
             token: v.token(),
@@ -79,6 +82,14 @@ impl OutputSnapshot {
             },
         )?;
         output.change = self.change;
+        if self.self_contained
+            && (output.note.is_none()
+                || output.delivery.ciphertext.is_empty()
+                || output.delivery.clue.is_empty())
+        {
+            return Err("invalid embedded recipient origin metadata".into());
+        }
+        output.self_contained = self.self_contained;
         Ok(output)
     }
 }
@@ -124,6 +135,18 @@ impl From<CreditInputSnapshot> for CreditInput {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PreparedSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    transfer_output_policy: Option<(usize, bool)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    quote_clock: Option<preparation::QuoteClock>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    broadcaster_envelope_hash: Option<B256>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fee_capacity: Option<U256>,
+    #[serde(default)]
+    selected_funding_terms: bool,
+    #[serde(default)]
+    stock_broadcaster: bool,
     context: ProtocolContext,
     token: Address,
     anchor: CanonicalBlock,
@@ -189,6 +212,9 @@ impl ManagedPrepared {
 
     pub fn snapshot_funds(value: &PreparedTransaction) -> Self {
         Self::Funds(PreparedTransaction {
+            selected_funding_terms: value.selected_funding_terms,
+            stock_broadcaster: value.stock_broadcaster.clone(),
+            quote_clock: value.quote_clock,
             preparation_reads: value.preparation_reads.clone(),
             wallet: value.wallet.clone(),
             owner_address: value.owner_address,
@@ -229,6 +255,12 @@ impl ManagedPrepared {
     }
     pub fn snapshot(&self) -> Result<PreparedSnapshot> {
         let empty = |context, token, anchor| PreparedSnapshot {
+            transfer_output_policy: None,
+            quote_clock: None,
+            broadcaster_envelope_hash: None,
+            fee_capacity: None,
+            selected_funding_terms: false,
+            stock_broadcaster: false,
             context,
             token,
             anchor,
@@ -253,8 +285,34 @@ impl ManagedPrepared {
         Ok(match self {
             Self::Funds(v) => {
                 let mut s = empty(v.context, v.token, v.anchor.clone());
+                s.selected_funding_terms = v.selected_funding_terms;
+                if v.broadcaster.is_none() {
+                    if let Some(RepriceTemplate::Transfer(p)) = &v.reprice {
+                        s.transfer_output_policy = Some((p.outputs.len(), p.automatic_change));
+                    }
+                }
+                s.stock_broadcaster = v.stock_broadcaster.is_some();
+                s.quote_clock = v.quote_clock;
                 s.broadcaster = v.broadcaster.clone();
-                s.provenance_packet = v.export_provenance_proof()?;
+                s.broadcaster_envelope_hash = s.envelope_hash()?;
+                s.provenance_packet = if v.provenance.is_none()
+                    && v.broadcaster
+                        .as_ref()
+                        .is_some_and(|s| !s.submitted_data.is_empty())
+                {
+                    // Exact relay recovery uses its frozen sidecars independently of current Source trust.
+                    let packet = v
+                        .provenance_packet
+                        .lock()
+                        .map_err(|_| "provenance cache lock poisoned")?
+                        .clone();
+                    if let Some(packet) = &packet {
+                        v.validate_cached_native_statement(packet)?;
+                    }
+                    packet
+                } else {
+                    v.export_provenance_proof()?
+                };
                 s.inputs = v.inputs().iter().map(NoteInputRecord::from).collect();
                 s.outputs = v.outputs().iter().map(OutputSnapshot::capture).collect();
                 s.needs_authorization = v.needs_authorization;
@@ -302,9 +360,12 @@ impl ManagedPrepared {
             }
             Self::Credit(v) => {
                 let mut s = empty(v.context, v.token, v.anchor.clone());
+                s.fee_capacity = v.fee_capacity;
                 s.constructed_at = Some(v.constructed_at);
+                s.quote_clock = v.quote_clock;
                 s.broadcaster = v.broadcaster.clone();
-                if let Some(CreditRepriceTemplate::Draw(_, recipient, _, _)) = &v.reprice {
+                s.broadcaster_envelope_hash = s.envelope_hash()?;
+                if let Some(CreditRepriceTemplate::Draw(recipient)) = &v.reprice {
                     s.credit_recipient = Some(recipient.address()?);
                 }
                 s.proof = v.proof.clone();
@@ -444,12 +505,41 @@ impl PreparedSnapshot {
     ) -> Result<ManagedPrepared> {
         self.restore_with_material(owner_address, None, backend)
     }
+    fn envelope_hash(&self) -> Result<Option<B256>> {
+        let Some(s) = self
+            .broadcaster
+            .as_ref()
+            .filter(|s| !s.submitted_data.is_empty())
+        else {
+            return Ok(None);
+        };
+        let encoded = serde_json::to_vec(&(
+            &s.endpoint,
+            s.signer,
+            s.fee_recipient,
+            &s.quote,
+            &s.submitted_data,
+            &s.member_proof,
+            &s.sidecars,
+        ))
+        .map_err(|e| e.to_string())?;
+        Ok(Some(alloy_primitives::keccak256(encoded)))
+    }
+    fn validate_envelope_hash(&self) -> Result<()> {
+        if self.broadcaster_envelope_hash.is_some()
+            && self.broadcaster_envelope_hash != self.envelope_hash()?
+        {
+            return Err("frozen broadcaster envelope integrity mismatch".into());
+        }
+        Ok(())
+    }
     fn restore_with_material(
         &self,
         owner_address: Address,
         wallet: Option<&Wallet>,
         backend: Option<&dyn Prover>,
     ) -> Result<ManagedPrepared> {
+        self.validate_envelope_hash()?;
         if owner_address == Address::ZERO
             || wallet.is_some_and(|w| w.owner_address() != owner_address)
         {
@@ -537,7 +627,21 @@ impl PreparedSnapshot {
                         return Err("saved shield output mismatch".into());
                     }
                 }
+                let reprice = Some(RepriceTemplate::Shield(ShieldPreparation {
+                    token: self.token,
+                    outputs: outputs.clone(),
+                    funding: c._3.clone(),
+                    fee: Fee {
+                        recipient: c.p.feeRecipient,
+                        amount: c.p.feeAmount,
+                    },
+                    deadline: u64::try_from(c.p.deadline)
+                        .map_err(|_| "saved Shield deadline overflow")?,
+                }));
                 ManagedPrepared::Funds(PreparedTransaction {
+                    selected_funding_terms: self.selected_funding_terms,
+                    stock_broadcaster: None,
+                    quote_clock: self.quote_clock,
                     preparation_reads: None,
                     wallet: wallet.cloned(),
                     owner_address,
@@ -565,7 +669,7 @@ impl PreparedSnapshot {
                         self.provenance_packet.clone(),
                     )),
                     broadcaster: self.broadcaster.clone(),
-                    reprice: None,
+                    reprice,
                 })
             }
             P::InvisiCoreCalls::transact_0(c) => {
@@ -635,7 +739,44 @@ impl PreparedSnapshot {
                         return Err("saved input nullifier mismatch".into());
                     }
                 }
+                let mut reprice = None;
+                if self.broadcaster.is_none() {
+                    if let Some((fixed, automatic_change)) = self.transfer_output_policy {
+                        if fixed > outputs.len()
+                            || outputs[fixed..].len() > 1
+                            || outputs[fixed..].iter().any(|out| {
+                                !automatic_change
+                                    || !out.change
+                                    || out.note.as_ref().is_none_or(|note| {
+                                        note.owner_address != address_word(owner_address)
+                                    })
+                            })
+                        {
+                            return Err("invalid saved transfer change policy".into());
+                        }
+                        reprice = Some(RepriceTemplate::Transfer(TransferPreparation {
+                            token: self.token,
+                            inputs: inputs.clone(),
+                            outputs: outputs[..fixed].to_vec(),
+                            withdrawal: (c.r.params.withdrawalAmount != U256::ZERO).then_some((
+                                c.r.params.withdrawalAddress,
+                                c.r.params.withdrawalAmount,
+                            )),
+                            funding: c.r.funding.clone(),
+                            fee: Fee {
+                                recipient: c.r.params.feeRecipient,
+                                amount: c.r.params.feeAmount,
+                            },
+                            deadline: u64::try_from(c.r.params.deadline)
+                                .map_err(|_| "saved transfer deadline overflow")?,
+                            automatic_change,
+                        }));
+                    }
+                }
                 ManagedPrepared::Funds(PreparedTransaction {
+                    selected_funding_terms: self.selected_funding_terms,
+                    stock_broadcaster: None,
+                    quote_clock: self.quote_clock,
                     preparation_reads: None,
                     wallet: wallet.cloned(),
                     owner_address,
@@ -661,7 +802,7 @@ impl PreparedSnapshot {
                         self.provenance_packet.clone(),
                     )),
                     broadcaster: self.broadcaster.clone(),
-                    reprice: None,
+                    reprice,
                 })
             }
             other => {
@@ -905,26 +1046,9 @@ impl PreparedSnapshot {
                                         .as_ref()
                                         .map_or_else(Vec::new, |n| n.payload.clone()),
                                 }),
-                            u64::try_from(params.deadline)
-                                .map_err(|_| "saved Credit deadline overflow")?,
                         )),
-                        CreditPlan::Update {
-                            params,
-                            input,
-                            changes,
-                            ..
-                        } => Some(CreditRepriceTemplate::Update(
-                            input.clone(),
-                            changes.clone(),
-                            u64::try_from(params.deadline)
-                                .map_err(|_| "saved Credit deadline overflow")?,
-                        )),
-                        CreditPlan::Draw {
-                            params,
-                            inputs,
-                            output,
-                            ..
-                        } => {
+                        CreditPlan::Update { .. } => Some(CreditRepriceTemplate::Update),
+                        CreditPlan::Draw { output, .. } => {
                             let recipient = Wallet::from_address(
                                 self.credit_recipient
                                     .as_deref()
@@ -936,27 +1060,18 @@ impl PreparedSnapshot {
                             if address_word(recipient.owner_address) != note.owner_address {
                                 return Err("saved Credit draw recipient mismatch".into());
                             }
-                            Some(CreditRepriceTemplate::Draw(
-                                inputs.clone(),
-                                recipient,
-                                u64::try_from(params.deadline)
-                                    .map_err(|_| "saved Credit deadline overflow")?,
-                                note.payload.clone(),
-                            ))
+                            Some(CreditRepriceTemplate::Draw(recipient))
                         }
-                        CreditPlan::Revoke {
-                            token,
-                            grant_id,
-                            deadline,
-                            ..
-                        } => Some(CreditRepriceTemplate::Revoke(*token, *grant_id, *deadline)),
+                        CreditPlan::Revoke { .. } => Some(CreditRepriceTemplate::Revoke),
                     }
                 } else {
                     None
                 };
                 ManagedPrepared::Credit(PreparedCredit {
+                    fee_capacity: self.fee_capacity,
                     initial_payment_net_amount: self.initial_payment_net_amount,
                     constructed_at: self.constructed_at.unwrap_or(self.anchor.timestamp),
+                    quote_clock: self.quote_clock,
                     preparation_reads: None,
                     wallet: wallet.cloned(),
                     owner_address,
@@ -1006,6 +1121,25 @@ impl PreparedSnapshot {
                 }
             }
         }
+        if self.selected_funding_terms
+            && !matches!(&managed,ManagedPrepared::Funds(value) if value.funding().amount != U256::ZERO && value.funding().deadline!=U256::ZERO)
+        {
+            return Err("invalid saved funding nonce selection metadata".into());
+        }
+        if self.stock_broadcaster {
+            let ManagedPrepared::Funds(value) = &mut managed else {
+                return Err("invalid stock broadcaster journal policy".into());
+            };
+            let saved = value
+                .broadcaster
+                .as_ref()
+                .ok_or("stock broadcaster journal binding missing")?;
+            value.stock_broadcaster = Some(StockBroadcasterCapability::restore(
+                saved,
+                value.context,
+                &self.unsigned_call,
+            )?);
+        }
         Ok(managed)
     }
 }
@@ -1022,12 +1156,70 @@ impl PreparedSnapshot {
     pub fn broadcaster_execution(&self) -> Option<invisi_sdk_rpc::broadcaster::Execution> {
         self.broadcaster.as_ref().map(|s| s.quote.quote.execution)
     }
+    fn validate_frozen_source(&self, saved: &PreparedBroadcasterState) -> Result<()> {
+        let required = saved.provenance_mode().is_some() && !self.inputs.is_empty();
+        if !required {
+            return if saved.sidecars.is_empty() {
+                Ok(())
+            } else {
+                Err("unexpected frozen Source evidence".into())
+            };
+        }
+        let [sidecar] = saved.sidecars.as_slice() else {
+            return Err("FINALIZATION_REQUIRED: one Source sidecar required".into());
+        };
+        let bundle = &sidecar.proof_bundle;
+        let pi = &bundle.public_inputs;
+        let parse = |s: &str| crate::provenance::parse_integer(s, 256).map_err(|e| e.to_string());
+        let scope = crate::provenance::Scope {
+            chain_id: self.context.chain_id,
+            protocol_address: self.context.protocol_address,
+        };
+        let main = self.proof.as_ref().ok_or("frozen native proof required")?;
+        let words: Vec<_> = main
+            .public_inputs
+            .iter()
+            .map(|n| U256::from_be_slice(n.as_slice()))
+            .collect();
+        let digest = U256::from_be_bytes(model(crate::provenance::operation_digest(
+            &scope,
+            self.capacity,
+            &words,
+        ))?);
+        let nfs = self
+            .inputs
+            .iter()
+            .map(|n| model(n.note.nullifier()))
+            .collect::<Result<Vec<_>>>()?;
+        let raw = bundle
+            .proof
+            .strip_prefix("0x")
+            .ok_or("invalid frozen Source proof")?;
+        if sidecar.operation_index != "0"
+            || pi.len() != 11
+            || raw.is_empty()
+            || raw.len() > 131072
+            || hex::decode(raw).is_err()
+            || parse(&pi[0])? != U256::from(scope.chain_id)
+            || parse(&pi[1])? != scope.protocol_address
+            || parse(&pi[2])? != address_word(self.token)
+            || parse(&pi[6])? != U256::from(nfs.len())
+            || parse(&pi[7])? != digest >> 128
+            || parse(&pi[8])? != (digest & U256::from(u128::MAX))
+            || parse(&pi[9])? != model(crate::provenance::input_digest(&nfs))?
+        {
+            return Err("frozen Source public statement mismatch".into());
+        }
+        Ok(())
+    }
     pub fn export_broadcaster_submission(&self) -> Result<BroadcasterSubmission> {
+        self.validate_envelope_hash()?;
         use invisi_sdk_rpc::broadcaster::{Execution, MemberProof};
         let saved = self
             .broadcaster
             .as_ref()
             .ok_or("saved broadcaster context required")?;
+        self.validate_frozen_source(saved)?;
         let recursive = self.target == "noir-recursive";
         if (saved.quote.quote.execution == Execution::Aggregate) != recursive {
             return Err("broadcaster execution does not match proof target".into());
@@ -1122,6 +1314,33 @@ impl PreparedSnapshot {
             member_proof: member,
         })
     }
+    /// Authenticate frozen relay packet scope. Managed journals separately prove
+    /// prior relay handoff; an ordinary wallet export is not that authority.
+    pub fn authenticate_frozen_broadcaster_authority(
+        &self,
+        data: &[u8],
+    ) -> Result<crate::broadcaster::FrozenBroadcasterAuthority> {
+        let saved = self
+            .broadcaster
+            .as_ref()
+            .ok_or("saved broadcaster context required")?;
+        self.validate_broadcaster_submission(data)?;
+        if invisi_sdk_rpc::broadcaster::request_hash(data).map_err(|e| e.to_string())?
+            != saved.intent_hash
+        {
+            return Err("frozen broadcaster intent mismatch".into());
+        }
+        StockBroadcasterCapability::restore(saved, self.context, data)?;
+        Ok(crate::broadcaster::FrozenBroadcasterAuthority {
+            configuration: invisi_sdk_rpc::broadcaster::Configuration {
+                endpoint: saved.endpoint.clone(),
+                quote_signer: saved.signer,
+                fee_recipient: saved.fee_recipient,
+            },
+            context: self.context,
+            token: self.token,
+        })
+    }
     pub fn validate_broadcaster_submission(&self, data: &[u8]) -> Result<()> {
         if self.export_broadcaster_submission()?.data != data {
             return Err("prepared broadcaster submission changed".into());
@@ -1167,6 +1386,9 @@ impl ManagedPrepared {
     pub fn clone_for_stage(&self) -> Self {
         match self {
             Self::Funds(v) => Self::Funds(PreparedTransaction {
+                selected_funding_terms: v.selected_funding_terms,
+                stock_broadcaster: v.stock_broadcaster.clone(),
+                quote_clock: v.quote_clock,
                 preparation_reads: v.preparation_reads.clone(),
                 wallet: v.wallet.clone(),
                 owner_address: v.owner_address,
@@ -1192,8 +1414,10 @@ impl ManagedPrepared {
                 reprice: v.reprice.clone(),
             }),
             Self::Credit(v) => Self::Credit(PreparedCredit {
+                fee_capacity: v.fee_capacity,
                 initial_payment_net_amount: v.initial_payment_net_amount,
                 constructed_at: v.constructed_at,
+                quote_clock: v.quote_clock,
                 preparation_reads: v.preparation_reads.clone(),
                 wallet: v.wallet.clone(),
                 owner_address: v.owner_address,

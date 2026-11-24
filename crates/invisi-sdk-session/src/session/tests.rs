@@ -59,6 +59,7 @@ struct Chain {
     nonce_hook: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     nullifier_hook: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     changed_context: AtomicBool,
+    network_read_hook: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     gas_forbidden: AtomicBool,
     height: std::sync::atomic::AtomicU64,
     reorg: AtomicBool,
@@ -67,6 +68,9 @@ struct Chain {
     spent: Mutex<BTreeSet<B256>>,
     nullifier_reads: std::sync::atomic::AtomicUsize,
     nonce_reads: std::sync::atomic::AtomicUsize,
+    snapshot_reads: std::sync::atomic::AtomicUsize,
+    balance_reads: std::sync::atomic::AtomicUsize,
+    funding_blocks: Mutex<Vec<(&'static str, u64)>>,
     root_reads: std::sync::atomic::AtomicUsize,
     revocation_reads: std::sync::atomic::AtomicUsize,
     roots: Mutex<BTreeSet<B256>>,
@@ -92,6 +96,13 @@ impl Chain {
     }
 }
 impl ChainState for Chain {
+    fn validate_submission_network(&self) -> Result<()> {
+        self.online()?;
+        if let Some(hook) = self.network_read_hook.lock().unwrap().take() {
+            hook();
+        }
+        Ok(())
+    }
     fn context(&self) -> ProtocolContext {
         assert!(
             !self.gas_forbidden.load(Ordering::SeqCst),
@@ -104,7 +115,14 @@ impl ChainState for Chain {
         }
         value
     }
+    fn submission_timestamp(&self) -> Result<u64> {
+        self.online()?;
+        Ok(self
+            .current_block(self.height.load(Ordering::SeqCst).max(10))
+            .timestamp)
+    }
     fn snapshot(&self) -> Result<CanonicalBlock> {
+        self.snapshot_reads.fetch_add(1, Ordering::SeqCst);
         assert!(
             !self.gas_forbidden.load(Ordering::SeqCst),
             "estimator read chain"
@@ -156,8 +174,13 @@ impl ChainState for Chain {
         &self,
         _: Address,
         _: Address,
-        _: &CanonicalBlock,
+        block: &CanonicalBlock,
     ) -> Result<(U256, U256)> {
+        self.funding_blocks
+            .lock()
+            .unwrap()
+            .push(("balance", block.number));
+        self.balance_reads.fetch_add(1, Ordering::SeqCst);
         self.online()?;
         Ok(if self.insufficient_funds.load(Ordering::SeqCst) {
             (U256::ZERO, U256::ZERO)
@@ -165,7 +188,11 @@ impl ChainState for Chain {
             (U256::MAX, U256::MAX)
         })
     }
-    fn funding_nonce(&self, _: Address, _: &CanonicalBlock) -> Result<U256> {
+    fn funding_nonce(&self, _: Address, block: &CanonicalBlock) -> Result<U256> {
+        self.funding_blocks
+            .lock()
+            .unwrap()
+            .push(("nonce", block.number));
         self.nonce_reads.fetch_add(1, Ordering::SeqCst);
         self.online()?;
         if !self.preparation_enabled.load(Ordering::SeqCst) {
@@ -305,9 +332,11 @@ fn log<E: SolEvent>(event: &E, index: u32) -> CanonicalLog {
 }
 #[derive(Default)]
 struct GasGuardStore {
+    fail_next_snapshot: AtomicBool,
     fail_writes: AtomicBool,
     inner: MemoryWalletStore,
     forbidden: AtomicBool,
+    before_write: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
 impl WalletStore for GasGuardStore {
     fn snapshot(&self, scope: &str) -> Result<WalletState> {
@@ -315,6 +344,9 @@ impl WalletStore for GasGuardStore {
             !self.forbidden.load(Ordering::SeqCst),
             "estimator accessed wallet store"
         );
+        if self.fail_next_snapshot.swap(false, Ordering::SeqCst) {
+            return Err("injected wallet fence read failure".into());
+        }
         self.inner.snapshot(scope)
     }
     fn compare_and_swap(&self, scope: &str, revision: u64, next: WalletState) -> Result<()> {
@@ -324,6 +356,9 @@ impl WalletStore for GasGuardStore {
         );
         if self.fail_writes.load(Ordering::SeqCst) {
             return Err("injected journal save failure".into());
+        }
+        if let Some(hook) = self.before_write.lock().unwrap().take() {
+            hook();
         }
         self.inner.compare_and_swap(scope, revision, next)
     }
@@ -343,12 +378,15 @@ fn harness() -> Harness {
     harness_in_context(context())
 }
 fn harness_in_context(deployment: ProtocolContext) -> Harness {
+    harness_for_note_amount(deployment, 70)
+}
+fn harness_for_note_amount(deployment: ProtocolContext, amount: u64) -> Harness {
     let wallet = wallet(1);
     let note = crate::note::Note {
         context: deployment,
         owner_address: sdk::address_word(wallet.owner_address()),
         token_address: U256::from(22136),
-        amount: U256::from(70),
+        amount: U256::from(amount),
         nonce: U256::from(123),
         payload: vec![1, 2],
     };
@@ -1499,6 +1537,8 @@ fn credit_relay_context_survives_encrypted_restart_and_fences_uncertain_submissi
     };
     let operation = session
         .prepare_create_credit_explicit(state, 2000000100, sdk::Fee::default())
+        .unwrap()
+        .with_broadcaster_fee_budget(U256::from(100))
         .unwrap();
     let id = operation.id().to_string();
     drop(operation);
@@ -6038,6 +6078,47 @@ fn acknowledged_refusal_abandon_requires_canonical_unspent_scope_and_generation(
 }
 
 #[test]
+fn prior_manual_export_retains_uncertainty_after_first_structured_relay_refusal() {
+    let h = harness();
+    let (client, replies) = refusal_client(
+        &h,
+        serde_json::json!({"code":-32025,"message":"INSUFFICIENT_EXECUTION_SLACK: refresh"}),
+        false,
+    );
+    let operation = refusal_credit_operation(&h, &h.session, "initial");
+    let mut operation = quote_and_prove_refusal_operation(&h, operation, &client);
+    let id = operation.id().to_owned();
+    operation.calldata(Address::ZERO).unwrap();
+    let before = h.session.snapshot().unwrap();
+    assert!(before.operations[&id].externalized);
+    assert!(before.operations[&id].broadcaster_id.is_none());
+    let error = client.submit(&mut operation, h.chain.as_ref()).unwrap_err();
+    assert!(
+        error.starts_with("INSUFFICIENT_EXECUTION_SLACK:"),
+        "{error}"
+    );
+    let after = h.session.snapshot().unwrap();
+    let record = &after.operations[&id];
+    assert!(record.externalized);
+    assert_eq!(record.status, OperationStatus::Exported);
+    assert!(
+        record.broadcaster_id.is_some(),
+        "prior exported authority must retain frozen uncertain relay attempt"
+    );
+    assert!(record.snapshot.broadcaster_pre_send_refusal().is_none());
+    assert_eq!(record.call, before.operations[&id].call);
+    assert!(h.session.abandon_operation(&id, None).is_err());
+    replies
+        .lock()
+        .unwrap()
+        .push_back(serde_json::json!({"result":{"id":"after-export","state":"pending"}}));
+    assert_eq!(
+        client.submit(&mut operation, h.chain.as_ref()).unwrap().id,
+        "after-export"
+    );
+}
+
+#[test]
 fn later_exact_refusal_never_releases_unknown_or_failed_rollback_submission() {
     for fail_rollback in [false, true] {
         let h = harness();
@@ -6233,4 +6314,589 @@ fn same_handle_acceptance_after_failed_refusal_rollback_reloads_cleanly() {
         Some("accepted-after-uncertainty")
     );
     assert!(h.session.abandon_operation(&id, None).is_err());
+}
+
+// Uses real SDK preparation, EIP-712 signatures and journal boundaries; only the remote relay is a fixture.
+struct SubmitGateRelay {
+    quote_reads: std::sync::atomic::AtomicUsize,
+    inner: SessionCreditRelay,
+    available: AtomicBool,
+    store: Arc<dyn WalletStore>,
+    scope: String,
+}
+impl sdk::PreparedBroadcaster for SubmitGateRelay {
+    fn lookup_status(&self, id: &str) -> Result<Option<crate::broadcaster::Status>> {
+        self.inner.lookup_status(id)
+    }
+
+    fn provenance_mode(&self) -> Option<()> {
+        None
+    }
+    fn configuration(&self) -> crate::broadcaster::Configuration {
+        self.inner.configuration()
+    }
+    fn submission_requirements(&self, q: &crate::broadcaster::VerifiedQuote) -> Result<bool> {
+        if !self.available.load(Ordering::SeqCst) {
+            return Err("service requirements changed".into());
+        }
+        self.inner.submission_requirements(q)
+    }
+    fn fee(&self, t: Address, d: Option<&[u8]>) -> Result<crate::broadcaster::Fee> {
+        self.inner.fee(t, d)
+    }
+    fn quote(
+        &self,
+        d: &[u8],
+        c: u64,
+        p: Address,
+        n: u64,
+        s: &[crate::provenance::ProofSidecar],
+    ) -> Result<crate::broadcaster::VerifiedQuote> {
+        self.quote_reads.fetch_add(1, Ordering::SeqCst);
+        self.inner.quote(d, c, p, n, s)
+    }
+    fn submit(
+        &self,
+        d: &[u8],
+        q: &crate::broadcaster::VerifiedQuote,
+        s: &[crate::provenance::ProofSidecar],
+    ) -> Result<crate::broadcaster::Status> {
+        let state = self.store.snapshot(&self.scope)?;
+        let record = state
+            .operations
+            .values()
+            .find(|record| record.broadcaster_id.is_some())
+            .unwrap();
+        let snapshot = serde_json::to_value(&record.snapshot).unwrap();
+        assert_eq!(
+            snapshot["broadcaster"]["quote"],
+            serde_json::to_value(q.signed()).unwrap(),
+            "exact quote must be durable before transport"
+        );
+        assert!(
+            state
+                .operations
+                .values()
+                .any(|record| record.externalized && record.broadcaster_id.is_some()),
+            "journal must commit before transport"
+        );
+        self.inner.submit(d, q, s)
+    }
+}
+fn submit_gate_relay(h: &Harness) -> Arc<SubmitGateRelay> {
+    Arc::new(SubmitGateRelay {
+        quote_reads: 0.into(),
+        inner: SessionCreditRelay {
+            requests: Mutex::new(vec![]),
+            lookup_mode: 0.into(),
+            attempts: 1.into(),
+        },
+        available: AtomicBool::new(true),
+        store: h.session.store.clone(),
+        scope: h.session.scope.key(),
+    })
+}
+
+fn ready_public_funding_submit(h: &Harness) -> (Operation, Arc<SubmitGateRelay>) {
+    h.chain.preparation_enabled.store(true, Ordering::SeqCst);
+    let token = sdk::word_address(h.note.token_address).unwrap();
+    let mut op = h
+        .session
+        .prepare_shield_with_signature_funding(
+            sdk::ShieldPreparation {
+                token,
+                outputs: vec![sdk::NoteOutput::identity(
+                    context(),
+                    token,
+                    U256::from(123),
+                    U256::from(20),
+                )
+                .unwrap()],
+                funding: abi::FundingParams {
+                    payer: h.session.wallet.owner_address(),
+                    amount: U256::from(20),
+                    ..sdk::empty_funding()
+                },
+                fee: Default::default(),
+                deadline: 2_000_000_100,
+            },
+            sdk::SignatureFundingNonce::Current,
+        )
+        .unwrap();
+    let relay = submit_gate_relay(h);
+    op.quote_for_broadcaster(
+        relay.clone(),
+        &sdk::BroadcasterOptions {
+            max_fee_amount: Some(U256::from(100)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let funding = op.export_funding_authorization().unwrap();
+    let (sig, recovery) = k256::ecdsa::SigningKey::from_slice(&key(1))
+        .unwrap()
+        .sign_prehash_recoverable(funding.digest.as_slice())
+        .unwrap();
+    let mut signature = sig.to_bytes().to_vec();
+    signature.push(recovery.to_byte());
+    (
+        op.with_funding_signature(signature)
+            .unwrap()
+            .ready()
+            .unwrap(),
+        relay,
+    )
+}
+#[test]
+fn public_funding_submit_preflight_reads_once_after_persistence() {
+    let h = harness();
+    let (mut op, relay) = ready_public_funding_submit(&h);
+    h.chain.snapshot_reads.store(0, Ordering::SeqCst);
+    h.chain.balance_reads.store(0, Ordering::SeqCst);
+    h.chain.nonce_reads.store(0, Ordering::SeqCst);
+    h.chain.funding_blocks.lock().unwrap().clear();
+    let persisted = h.chain.clone();
+    *h.store.before_write.lock().unwrap() = Some(Box::new(move || {
+        assert_eq!(persisted.snapshot_reads.load(Ordering::SeqCst), 0);
+        assert_eq!(persisted.balance_reads.load(Ordering::SeqCst), 0);
+        assert_eq!(persisted.nonce_reads.load(Ordering::SeqCst), 0);
+        persisted.height.store(11, Ordering::SeqCst);
+    }));
+    let advancing = h.chain.clone();
+    *h.chain.nonce_hook.lock().unwrap() = Some(Box::new(move || {
+        // Moving the head during validation must not mix its pinned reads.
+        advancing.height.store(12, Ordering::SeqCst);
+    }));
+    op.submit_for_broadcaster(relay.as_ref()).unwrap();
+    assert_eq!(relay.inner.requests.lock().unwrap().len(), 1);
+    assert_eq!(
+        h.chain.snapshot_reads.load(Ordering::SeqCst),
+        1,
+        "one live snapshot after journal persistence, immediately before send"
+    );
+    assert_eq!(h.chain.balance_reads.load(Ordering::SeqCst), 1);
+    assert_eq!(h.chain.nonce_reads.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        *h.chain.funding_blocks.lock().unwrap(),
+        vec![("balance", 11), ("nonce", 11)]
+    );
+}
+#[test]
+fn failed_post_commit_authority_guard_retains_exact_handoff_for_recovery() {
+    for (change, reason) in [("network", "deployment"), ("wallet", "wallet fence")] {
+        let h = synced();
+        let (mut op, relay) = if change == "wallet" {
+            let mut plan = transfer(&h);
+            plan.withdrawal = None;
+            plan.outputs = vec![sdk::NoteOutput::for_recipient(
+                context(),
+                plan.token,
+                &wallet(2),
+                U256::from(30),
+                vec![],
+            )
+            .unwrap()];
+            plan.automatic_change = true;
+            let mut op = h.session.prepare_transfer(plan).unwrap();
+            let relay = submit_gate_relay(&h);
+            op.quote_for_broadcaster(
+                relay.clone(),
+                &sdk::BroadcasterOptions {
+                    max_fee_amount: Some(U256::from(100)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            (authorize_offline(op), relay)
+        } else {
+            ready_public_funding_submit(&h)
+        };
+        let id = op.id().to_owned();
+        let frozen = serde_json::to_value(op.broadcaster_state().unwrap()).unwrap();
+        let expected_data = op.broadcaster_state().unwrap().submitted_data.clone();
+        if change == "network" {
+            // Hold the first-send write while another thread switches network.
+            let (entered, waiting) = std::sync::mpsc::sync_channel(0);
+            let (release, done) = std::sync::mpsc::sync_channel(0);
+            let done = Mutex::new(done);
+            *h.store.before_write.lock().unwrap() = Some(Box::new(move || {
+                entered.send(()).unwrap();
+                done.lock()
+                    .unwrap()
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+            }));
+            std::thread::scope(|scope| {
+                let chain = h.chain.clone();
+                scope.spawn(move || {
+                    waiting
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .unwrap();
+                    chain.changed_context.store(true, Ordering::SeqCst);
+                    release.send(()).unwrap();
+                });
+                assert!(op
+                    .submit_for_broadcaster(relay.as_ref())
+                    .unwrap_err()
+                    .contains(reason));
+            });
+        } else {
+            // The wallet read in the final guard fails once. Its durable journal remains readable.
+            let store = h.store.clone();
+            *h.store.before_write.lock().unwrap() = Some(Box::new(move || {
+                store.fail_next_snapshot.store(true, Ordering::SeqCst)
+            }));
+            assert!(op
+                .submit_for_broadcaster(relay.as_ref())
+                .unwrap_err()
+                .contains(reason));
+        }
+        assert!(relay.inner.requests.lock().unwrap().is_empty());
+        let state = h.store.snapshot(&h.session.scope.key()).unwrap();
+        let record = &state.operations[&id];
+        assert_eq!(
+            record.broadcaster_id.as_ref(),
+            Some(&id),
+            "lost durable handoff after {change}"
+        );
+        assert!(record.externalized);
+        if change == "wallet" {
+            assert_eq!(
+                state.notes[&h.commitment].reserved_by.as_deref(),
+                Some(id.as_str())
+            );
+        }
+        assert_eq!(record.call.as_ref().unwrap().data, expected_data);
+        assert_eq!(
+            serde_json::to_value(&record.snapshot).unwrap()["broadcaster"],
+            frozen
+        );
+        assert!(h.session.abandon_operation(&id, None).is_err());
+        h.chain.offline.store(true, Ordering::SeqCst);
+        let mut restored = h.session.resume(&id, None).unwrap();
+        let reads = h.chain.snapshot_reads.load(Ordering::SeqCst);
+        let status = restored.submit_for_broadcaster(relay.as_ref()).unwrap();
+        assert_eq!(status.id, "server-owned");
+        assert_eq!(
+            relay.inner.requests.lock().unwrap()[0]["data"],
+            hex::encode(&expected_data)
+        );
+        assert_eq!(
+            relay.inner.requests.lock().unwrap()[0]["signed"],
+            frozen["quote"]
+        );
+        assert_eq!(
+            relay.inner.requests.lock().unwrap()[0]["sidecars"],
+            frozen["sidecars"]
+        );
+        relay.inner.lookup_mode.store(1, Ordering::SeqCst);
+        assert!(restored
+            .submit_for_broadcaster(relay.as_ref())
+            .unwrap_err()
+            .contains("provider offline"));
+        relay.inner.lookup_mode.store(0, Ordering::SeqCst);
+        assert_eq!(
+            restored.submit_for_broadcaster(relay.as_ref()).unwrap().id,
+            status.id
+        );
+        assert_eq!(relay.inner.requests.lock().unwrap().len(), 1);
+        assert_eq!(h.chain.snapshot_reads.load(Ordering::SeqCst), reads);
+    }
+}
+#[test]
+fn wallet_write_epochs_cover_direct_adapters_and_inflight_writes() {
+    let records = Arc::new(MemoryAtomicRecords::default());
+    let first = EncryptedWalletStore::new(records.clone(), [9; 32]).unwrap();
+    let second = EncryptedWalletStore::new(records, [9; 32]).unwrap();
+    let writes = WalletWrites::shared(first.mutation_identity(), "scope");
+    let before = writes.idle_epoch().unwrap();
+    let in_flight = second.begin_mutation("scope").unwrap();
+    assert!(writes.idle_epoch().is_err());
+    drop(in_flight);
+    assert!(writes.idle_epoch().unwrap() > before);
+    let before = writes.idle_epoch().unwrap();
+    second
+        .compare_and_swap("other", 0, WalletState::default())
+        .unwrap();
+    assert_eq!(writes.idle_epoch().unwrap(), before);
+    second
+        .compare_and_swap("scope", 0, WalletState::default())
+        .unwrap();
+    assert!(writes.idle_epoch().unwrap() > before);
+}
+#[cfg(feature = "sqlite")]
+#[test]
+fn wallet_write_epochs_cover_separate_sqlite_connections() {
+    let path =
+        std::env::temp_dir().join(format!("invisi-wallet-write-{}.db", uuid::Uuid::new_v4()));
+    {
+        let first = EncryptedWalletStore::new(
+            Arc::new(sqlite::SQLiteRecords::open(&path).unwrap()),
+            [9; 32],
+        )
+        .unwrap();
+        let second = EncryptedWalletStore::new(
+            Arc::new(sqlite::SQLiteRecords::open(&path).unwrap()),
+            [9; 32],
+        )
+        .unwrap();
+        let writes = WalletWrites::shared(first.mutation_identity(), "scope");
+        let before = writes.idle_epoch().unwrap();
+        second
+            .compare_and_swap("scope", 0, WalletState::default())
+            .unwrap();
+        assert!(writes.idle_epoch().unwrap() > before);
+    }
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn wallet_write_during_last_network_read_fences_first_send() {
+    let h = harness();
+    let other = WalletSession::connect(
+        h.session.invisi.clone(),
+        h.session.wallet.clone(),
+        h.store.clone(),
+        h.source.clone(),
+        "test",
+    )
+    .unwrap();
+    assert_write_fences_first_send(&h, move || {
+        let mut state = other.snapshot().unwrap();
+        state.credit_replay_revision += 1;
+        other.commit(state).unwrap();
+    });
+}
+
+#[test]
+fn direct_record_reorg_during_last_network_read_fences_first_send() {
+    let mut h = synced();
+    let scope = h.session.scope.key();
+    let store = Arc::new(
+        RecordWalletStore::with_recent_records(
+            Arc::new(MemoryAtomicRecords::default()),
+            [8; 32],
+            0,
+        )
+        .unwrap(),
+    );
+    let mut seed = h.session.snapshot().unwrap();
+    seed.revision = 0;
+    let note = seed.notes.get_mut(&h.commitment).unwrap();
+    note.spent = true;
+    let from = note.block.number;
+    store.compare_and_swap(&scope, 0, seed).unwrap();
+    h.session = WalletSession::connect(
+        h.session.invisi.clone(),
+        h.session.wallet.clone(),
+        store.clone(),
+        h.source.clone(),
+        "test",
+    )
+    .unwrap();
+    let observed = AtomicBool::new(false);
+    assert_write_fences_first_send(&h, || {
+        let clock = WalletWrites::shared(store.mutation_identity(), &scope);
+        let before = clock.idle_epoch().unwrap();
+        let revision = store.snapshot(&scope).unwrap().revision;
+        let page = store.history_page(&scope, None, 10).unwrap();
+        assert_eq!(page.entries.len(), 1);
+        assert!(matches!(page.entries[0].record, WalletRecord::Note(_)));
+        store.recover_reorg(&scope, from).unwrap();
+        assert_eq!(store.snapshot(&scope).unwrap().revision, revision + 1);
+        assert!(store
+            .history_page(&scope, None, 10)
+            .unwrap()
+            .entries
+            .is_empty());
+        observed.store(clock.idle_epoch().unwrap() > before, Ordering::SeqCst);
+    });
+    assert!(
+        observed.load(Ordering::SeqCst),
+        "direct reorg did not advance the write epoch"
+    );
+}
+
+fn assert_write_fences_first_send(h: &Harness, write: impl FnOnce() + Send) {
+    let (mut op, relay) = ready_public_funding_submit(h);
+    let id = op.id().to_string();
+    let data = op.broadcaster_state().unwrap().submitted_data.clone();
+    let (entered, wait_for_network) = std::sync::mpsc::sync_channel(0);
+    let (release, proceed) = std::sync::mpsc::sync_channel(0);
+    let proceed = Mutex::new(proceed);
+    *h.chain.network_read_hook.lock().unwrap() = Some(Box::new(move || {
+        entered.send(()).unwrap();
+        proceed
+            .lock()
+            .unwrap()
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+    }));
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            wait_for_network
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            write();
+            release.send(()).unwrap();
+        });
+        let result = op.submit_for_broadcaster(relay.as_ref());
+        assert!(
+            relay.inner.requests.lock().unwrap().is_empty(),
+            "sent after wallet changed during final network read"
+        );
+        assert!(result.unwrap_err().contains("wallet"));
+    });
+    let state = h.session.snapshot().unwrap();
+    assert_eq!(state.operations[&id].broadcaster_id.as_ref(), Some(&id));
+    assert!(state.operations[&id].externalized);
+    h.chain.offline.store(true, Ordering::SeqCst);
+    let mut restored = h.session.resume(&id, None).unwrap();
+    assert_eq!(
+        restored.submit_for_broadcaster(relay.as_ref()).unwrap().id,
+        "server-owned"
+    );
+    assert_eq!(
+        relay.inner.requests.lock().unwrap()[0]["data"],
+        hex::encode(&data)
+    );
+    assert_eq!(
+        restored.submit_for_broadcaster(relay.as_ref()).unwrap().id,
+        "server-owned"
+    );
+    assert_eq!(relay.inner.requests.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn public_funding_submit_preflight_rechecks_changes_after_journal_commit() {
+    for change in ["nonce", "funds", "reorg", "expiry", "service"] {
+        let h = harness();
+        let (mut op, relay) = ready_public_funding_submit(&h);
+        let chain = h.chain.clone();
+        let changed_relay = relay.clone();
+        *h.store.before_write.lock().unwrap() = Some(Box::new(move || match change {
+            "nonce" => chain.nonce.store(1, Ordering::SeqCst),
+            "funds" => chain.insufficient_funds.store(true, Ordering::SeqCst),
+            "reorg" => chain.reorg.store(true, Ordering::SeqCst),
+            "expiry" => chain.height.store(200, Ordering::SeqCst),
+            "service" => changed_relay.available.store(false, Ordering::SeqCst),
+            _ => unreachable!(),
+        }));
+        assert!(
+            op.submit_for_broadcaster(relay.as_ref()).is_err(),
+            "must reject {change}"
+        );
+        assert!(
+            relay.inner.requests.lock().unwrap().is_empty(),
+            "must not send after {change}"
+        );
+        let state = h.store.snapshot(&h.session.scope.key()).unwrap();
+        let record = &state.operations[op.id()];
+        assert!(
+            record.broadcaster_id.is_none(),
+            "pre-send refusal must not leave a retry shortcut for {change}"
+        );
+        // The unchanged rejection must still fail after restart, before any relay send.
+        let retry = h
+            .session
+            .resume(op.id(), None)
+            .and_then(|mut resumed| resumed.submit_for_broadcaster(relay.as_ref()));
+        assert!(retry.is_err(), "resume must reject {change}");
+        assert!(relay.inner.requests.lock().unwrap().is_empty());
+    }
+}
+
+fn expired_unfrozen_public_funding_submit(h: &Harness) -> (Operation, Arc<SubmitGateRelay>) {
+    let (op, relay) = ready_public_funding_submit(h);
+    let id = op.id().to_owned();
+    let mut signed = op.broadcaster_state().unwrap().quote.clone();
+    signed.quote.deadline = block(10).timestamp.to_string();
+    let trust = crate::broadcaster::Trust {
+        chain_id: context().chain_id,
+        protocol: sdk::word_address(context().protocol_address).unwrap(),
+        signer: sdk::PreparedBroadcaster::configuration(relay.as_ref()).quote_signer,
+    };
+    let (sig, recovery) = k256::ecdsa::SigningKey::from_slice(&key(1))
+        .unwrap()
+        .sign_prehash_recoverable(
+            crate::broadcaster::quote_digest(&signed.quote, &trust)
+                .unwrap()
+                .as_slice(),
+        )
+        .unwrap();
+    let mut bytes = sig.to_bytes().to_vec();
+    bytes.push(recovery.to_byte());
+    signed.signature = format!("0x{}", hex::encode(bytes));
+    let mut state = h.session.snapshot().unwrap();
+    let record = state.operations.get_mut(&id).unwrap();
+    let mut snapshot = serde_json::to_value(&record.snapshot).unwrap();
+    // Preserve an old pre-finalization journal whose quote can still be explicitly renewed.
+    snapshot
+        .as_object_mut()
+        .unwrap()
+        .remove("broadcasterEnvelopeHash");
+    snapshot["broadcaster"]["submittedData"] = serde_json::json!([]);
+    snapshot["broadcaster"]["quote"] = serde_json::to_value(signed).unwrap();
+    record.snapshot = serde_json::from_value(snapshot).unwrap();
+    h.session.commit(state).unwrap();
+    h.chain.height.store(11, Ordering::SeqCst);
+    relay.quote_reads.store(0, Ordering::SeqCst);
+    (h.session.resume(&id, None).unwrap(), relay)
+}
+#[test]
+fn explicit_finalization_renews_durably_and_replays_exact_quote_on_uncertainty() {
+    let h = harness();
+    let (mut op, relay) = expired_unfrozen_public_funding_submit(&h);
+    assert!(op
+        .submit_for_broadcaster(relay.as_ref())
+        .unwrap_err()
+        .contains("FINALIZATION_REQUIRED"));
+    assert!(relay.inner.requests.lock().unwrap().is_empty());
+    let mut op = op.finalize_broadcaster(relay.as_ref()).unwrap();
+    relay.inner.attempts.store(0, Ordering::SeqCst);
+    h.chain.snapshot_reads.store(0, Ordering::SeqCst);
+    let error = op.submit_for_broadcaster(relay.as_ref()).unwrap_err();
+    assert!(error.contains("uncertain relay response"), "{error}");
+    assert_eq!(h.chain.snapshot_reads.load(Ordering::SeqCst), 1);
+    let sent = relay.inner.requests.lock().unwrap()[0].clone();
+    assert_eq!(sent["signed"]["quote"]["deadline"], "2000000100");
+    let persisted = h.session.snapshot().unwrap();
+    let record = &persisted.operations[op.id()];
+    let snapshot = serde_json::to_value(&record.snapshot).unwrap();
+    assert_eq!(snapshot["broadcaster"]["quote"], sent["signed"]);
+    h.chain.height.store(200, Ordering::SeqCst);
+    h.chain.nonce.store(1, Ordering::SeqCst);
+    let mut resumed = h.session.resume(op.id(), None).unwrap();
+    resumed.submit_for_broadcaster(relay.as_ref()).unwrap();
+    assert_eq!(relay.inner.requests.lock().unwrap().len(), 2);
+    assert_eq!(h.chain.snapshot_reads.load(Ordering::SeqCst), 1);
+}
+#[test]
+fn expired_quote_renewal_save_failure_never_reaches_transport() {
+    let h = harness();
+    let (op, relay) = expired_unfrozen_public_funding_submit(&h);
+    h.store.fail_writes.store(true, Ordering::SeqCst);
+    let error = op.finalize_broadcaster(relay.as_ref()).unwrap_err();
+    assert!(error.contains("journal save failure"), "{error}");
+    assert_eq!(relay.quote_reads.load(Ordering::SeqCst), 1);
+    assert!(relay.inner.requests.lock().unwrap().is_empty());
+}
+
+#[test]
+fn renewed_quote_still_rechecks_expiry_after_journal_write() {
+    let h = harness();
+    let (op, relay) = expired_unfrozen_public_funding_submit(&h);
+    let mut op = op.finalize_broadcaster(relay.as_ref()).unwrap();
+    h.chain.snapshot_reads.store(0, Ordering::SeqCst);
+    let chain = h.chain.clone();
+    *h.store.before_write.lock().unwrap() = Some(Box::new(move || {
+        chain.height.store(200, Ordering::SeqCst);
+    }));
+    assert!(op.submit_for_broadcaster(relay.as_ref()).is_err());
+    assert_eq!(relay.quote_reads.load(Ordering::SeqCst), 1);
+    assert_eq!(h.chain.snapshot_reads.load(Ordering::SeqCst), 1);
+    assert!(relay.inner.requests.lock().unwrap().is_empty());
+    assert!(h.session.snapshot().unwrap().operations[op.id()]
+        .broadcaster_id
+        .is_none());
 }

@@ -126,6 +126,14 @@ can withdraw disclosed Notes only to their original owner, without outputs, fund
 fee, as required by the current circuit. Preparation and final export recheck membership,
 consumption, revocation, balances, allowance and public funding/revocation authorization.
 
+### Prepared Broadcaster operations
+
+For a Shield or Transfer paid by signature, call `prepare_shield_with_signature_funding` or `prepare_transfer_with_signature_funding` with `SignatureFundingNonce::Current`. Preparation reads the current payer nonce. `Exact(nonce)` checks a specified nonce, including zero. `Verified(receipt)` consumes a payer- and deployment-bound nonce already read by the application. Direct caller funding keeps the protocol's zero nonce and zero funding deadline through the existing raw preparation APIs.
+
+Quote uses the prepared funding terms, Note inputs, Credit grants and fee budget. An operation that needs more inputs or an owner-funded Credit operation with insufficient prepared spending capacity returns `NEEDS_REPREPARATION`. Use `with_broadcaster_fee_budget(chain, gross_budget)` on an unsigned Credit preparation to bind a gross spending limit against its pinned ERC20 balance and allowance.
+
+When a signed quote requires Source evidence for private inputs, prove the native transaction, attach any final funding signature, then call `prepared.finalize_broadcaster(chain)?`. Finalization binds the Source sidecar to the final proof and calldata. A failure retains the completed main proof on the original preparation. Submission checks the completed packet and current execution state. A restored unattempted operation with missing evidence returns `FINALIZATION_REQUIRED`. Reattach trusted capabilities and explicitly finalize it. An attempted packet replays its original bytes or queries its known relay ID.
+
 ## Synchronization and storage
 
 Session refresh returns an opaque staged handle. Call `pending.decrypt(&app_decryptor)` to authenticate candidates and atomically commit the checked inventory through a revision CAS. Reconciliation uses the same callback. Decryption and canonical-chain failures leave the checkpoint unchanged; `None` skips only an unrelated recipient. Inventory and Credit role state remain separate.

@@ -6,6 +6,11 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 
 pub trait CanonicalChain: Send + Sync {
+    /// Optional unpinned latest-state read; custom readers preserve legacy snapshots.
+    fn latest_call(&self, _address: Address, _data: &[u8]) -> Option<Result<Vec<u8>>> {
+        None
+    }
+
     /// Optional bounded bulk header capability. None preserves the existing single-header path.
     fn blocks(&self, _numbers: &[u64]) -> Option<Result<Vec<CanonicalBlock>>> {
         None
@@ -45,6 +50,19 @@ pub(super) fn quantity(v: &Value) -> Result<u64> {
     u64::from_str_radix(s, 16).map_err(|_| Error::Invalid("Ethereum quantity overflow"))
 }
 impl<T: RpcTransport> CanonicalChain for EthereumChain<T> {
+    fn latest_call(&self, address: Address, data: &[u8]) -> Option<Result<Vec<u8>>> {
+        Some((|| {
+            Ok(bytes(
+                &self.rpc.call(
+                    "eth_call",
+                    json!([{"to":address,"data":format!("0x{}",hex::encode(data))},"latest"]),
+                )?,
+                0,
+                32 << 20,
+            )?)
+        })())
+    }
+
     fn confirmation_receipt(&self, hash: B256) -> Result<Option<CanonicalReceipt>> {
         ChainReceipts::receipt(self, hash)
     }

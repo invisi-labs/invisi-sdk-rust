@@ -53,6 +53,34 @@ enum ReadValue {
     Amounts(U256, U256),
     Status(u8),
 }
+/// Continue the prepared chain clock locally across bounded fee rounds and journal restoration.
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub(crate) struct QuoteClock {
+    chain_seconds: u64,
+    observed_seconds: u64,
+}
+impl QuoteClock {
+    pub(super) fn capture(chain_seconds: u64) -> Result<Self> {
+        Ok(Self {
+            chain_seconds,
+            observed_seconds: Self::wall_seconds()?,
+        })
+    }
+    pub(super) fn wall_seconds() -> Result<u64> {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .map_err(|_| "system clock before epoch".into())
+    }
+    pub(super) fn now(self) -> Result<u64> {
+        let elapsed = Self::wall_seconds()?
+            .checked_sub(self.observed_seconds)
+            .ok_or("NEEDS_REPREPARATION: clock moved backwards")?;
+        self.chain_seconds
+            .checked_add(elapsed)
+            .ok_or("quote time overflow".into())
+    }
+}
 pub(crate) struct PreparationChain {
     upstream: Arc<dyn ChainState>,
     born: Instant,
@@ -66,13 +94,7 @@ impl PreparationChain {
             entries: Mutex::new(BTreeMap::new()),
         }
     }
-    pub(super) fn for_quote(self: &Arc<Self>, chain: Arc<dyn ChainState>) -> Arc<dyn ChainState> {
-        if self.matches(&chain) {
-            self.clone()
-        } else {
-            chain
-        }
-    }
+    #[cfg(test)]
     pub(super) fn matches(&self, chain: &Arc<dyn ChainState>) -> bool {
         Arc::ptr_eq(&self.upstream, chain) && self.born.elapsed() < Duration::from_secs(30)
     }
@@ -132,6 +154,26 @@ impl PreparationChain {
     }
 }
 impl ChainState for PreparationChain {
+    fn invalidate_initialization(&self) {
+        self.upstream.invalidate_initialization();
+    }
+
+    fn self_contained_preparation_anchor(&self) -> Option<CanonicalBlock> {
+        self.upstream.self_contained_preparation_anchor()
+    }
+    fn fresh_funding_nonce(&self, owner: Address) -> Option<Result<FreshFundingNonce>> {
+        self.upstream.fresh_funding_nonce(owner)
+    }
+    fn self_contained_shield_capability(&self) -> Option<SelfContainedShieldCapability> {
+        self.upstream.self_contained_shield_capability()
+    }
+    fn validate_submission_network(&self) -> Result<()> {
+        self.upstream.validate_submission_network()
+    }
+    fn delegated_network_fence(&self) -> Option<Result<()>> {
+        self.upstream.delegated_network_fence()
+    }
+
     fn preparation_deployment(&self) -> Option<ProtocolDeployment> {
         self.upstream.preparation_deployment()
     }
@@ -148,6 +190,9 @@ impl ChainState for PreparationChain {
     }
     fn snapshot(&self) -> Result<CanonicalBlock> {
         self.upstream.snapshot()
+    }
+    fn submission_timestamp(&self) -> Result<u64> {
+        self.upstream.submission_timestamp()
     }
     fn canonical(&self, b: &CanonicalBlock) -> Result<()> {
         self.upstream.canonical(b)
@@ -458,7 +503,7 @@ mod tests {
         let reads = Arc::new(PreparationChain::new(chain));
         let (foreign, _, _, _) = note_fixture();
         let foreign: Arc<dyn ChainState> = foreign;
-        assert!(Arc::ptr_eq(&reads.for_quote(foreign.clone()), &foreign));
+        assert!(!reads.matches(&foreign));
     }
     #[test]
     fn concurrent_identical_public_reads_are_deduplicated() {

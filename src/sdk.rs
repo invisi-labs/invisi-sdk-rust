@@ -645,7 +645,94 @@ fn validate_spending_key(owner: Address, public: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Fresh, network-bound authorization metadata. Never retained across operations.
+#[derive(Clone, Debug)]
+pub struct FreshFundingNonce {
+    context: ProtocolContext,
+    owner: Address,
+    nonce: U256,
+}
+impl FreshFundingNonce {
+    pub fn context(&self) -> ProtocolContext {
+        self.context
+    }
+    pub fn owner(&self) -> Address {
+        self.owner
+    }
+    pub fn nonce(&self) -> U256 {
+        self.nonce
+    }
+}
+/// Select funding authorization while preparing a new operation. Exact zero is a valid nonce.
+#[derive(Clone, Debug, Default)]
+pub enum SignatureFundingNonce {
+    #[default]
+    Current,
+    Exact(U256),
+    Verified(FreshFundingNonce),
+}
+/// Explicit stock-policy capability; only initialized native readers mint this value.
+#[derive(Clone, Debug)]
+pub struct SelfContainedShieldCapability {
+    context: ProtocolContext,
+}
+/// Runs the supplied live network check inside the caller's final wallet fence.
+#[doc(hidden)]
+pub type SubmissionFence<'a> = dyn Fn(&dyn Fn() -> Result<()>) -> Result<()> + 'a;
+
+/// Deployment authority captured before a managed first-send journal write.
+#[doc(hidden)]
+pub struct SubmissionNetworkBinding {
+    context: ProtocolContext,
+    initialized: bool,
+}
+impl SubmissionNetworkBinding {
+    pub fn capture(chain: &dyn ChainState, context: ProtocolContext) -> Result<Self> {
+        let binding = Self {
+            context,
+            initialized: chain.self_contained_shield_capability().is_some(),
+        };
+        binding.check(chain)?;
+        Ok(binding)
+    }
+    pub fn check(&self, chain: &dyn ChainState) -> Result<()> {
+        if chain.context() != self.context {
+            return Err("submission deployment changed".into());
+        }
+        if self.initialized && chain.self_contained_shield_capability().is_none() {
+            return Err("deployment receipt invalidated before submission".into());
+        }
+        Ok(())
+    }
+}
 pub trait ChainState: Send + Sync {
+    /// Retire an optional initialized lifetime; custom readers have no receipt.
+    fn invalidate_initialization(&self) {}
+
+    /// Immutable initialization anchor for ancestry-free embedded Shield construction.
+    fn self_contained_preparation_anchor(&self) -> Option<CanonicalBlock> {
+        None
+    }
+
+    /// Custom readers may use a narrower live identity check before transport.
+    fn validate_submission_network(&self) -> Result<()> {
+        self.snapshot().map(|_| ())
+    }
+
+    /// Network-only final fence, available only with an explicit stock-policy receipt.
+    fn delegated_network_fence(&self) -> Option<Result<()>> {
+        None
+    }
+
+    /// Optional live authorization reader. None preserves custom snapshot policy.
+    fn fresh_funding_nonce(&self, _owner: Address) -> Option<Result<FreshFundingNonce>> {
+        None
+    }
+    /// Explicit permission to rely on stock relay exact simulation for execution state.
+    fn self_contained_shield_capability(&self) -> Option<SelfContainedShieldCapability> {
+        None
+    }
+
     /// Returns configured deployment pins without performing chain IO.
     fn preparation_deployment(&self) -> Option<ProtocolDeployment> {
         None
@@ -671,6 +758,12 @@ pub trait ChainState: Send + Sync {
 
     fn context(&self) -> ProtocolContext;
     fn snapshot(&self) -> Result<CanonicalBlock>;
+    /// Chain time for renewing a first-send quote before freezing its journal.
+    /// This metadata never authorizes submission; the final live gate must still
+    /// capture and validate its own snapshot after persistence.
+    fn submission_timestamp(&self) -> Result<u64> {
+        self.snapshot().map(|block| block.timestamp)
+    }
     fn canonical(&self, block: &CanonicalBlock) -> Result<()>;
     fn canonical_anchor(&self, number: u64, hash: B256) -> Result<()> {
         let block = self.snapshot()?;
@@ -725,6 +818,8 @@ impl<C: CanonicalHead> RpcChainState<C> {
         s.snapshot()?;
         Ok(s)
     }
+    // Raw pinned reads: public fact APIs fence canonicality once after their
+    // complete read group, before returning any accepted facts to the caller.
     fn read(
         &self,
         address: Address,
@@ -736,13 +831,9 @@ impl<C: CanonicalHead> RpcChainState<C> {
         for arg in args {
             bytes.extend_from_slice(&arg.to_be_bytes::<32>());
         }
-        self.canonical(block)?;
-        let result = self
-            .chain
+        self.chain
             .call(address, &bytes, block.number)
-            .map_err(|e| e.to_string())?;
-        self.canonical(block)?;
-        Ok(result)
+            .map_err(|e| e.to_string())
     }
     fn uint_read(
         &self,
@@ -759,6 +850,13 @@ impl<C: CanonicalHead> RpcChainState<C> {
     }
 }
 impl<C: CanonicalHead> ChainState for RpcChainState<C> {
+    fn validate_submission_network(&self) -> Result<()> {
+        if self.chain.chain_id().map_err(|e| e.to_string())? != self.context().chain_id {
+            return Err("chain identity changed".into());
+        }
+        Ok(())
+    }
+
     fn preparation_deployment(&self) -> Option<ProtocolDeployment> {
         Some(self.deployment.clone())
     }
@@ -782,9 +880,7 @@ impl<C: CanonicalHead> ChainState for RpcChainState<C> {
         if block.number < self.deployment.protocol.from_block {
             return Err("chain head predates deployment".into());
         }
-        if self.chain.chain_id().map_err(|e| e.to_string())? != self.context().chain_id {
-            return Err("chain identity changed".into());
-        }
+        self.validate_submission_network()?;
         let code = self
             .chain
             .code_at(self.deployment.protocol.address, Some(block.number))
@@ -794,6 +890,17 @@ impl<C: CanonicalHead> ChainState for RpcChainState<C> {
         }
         self.canonical(&block)?;
         Ok(block)
+    }
+    fn submission_timestamp(&self) -> Result<u64> {
+        let block = match self.chain.block_by_tag(crate::rpc::FinalityTag::Latest) {
+            Ok(Some(block)) => block,
+            Err(crate::rpc::Error::FinalityUnsupported) => {
+                self.chain.head().map_err(|e| e.to_string())?
+            }
+            Ok(None) => return Err("latest chain time unavailable".into()),
+            Err(error) => return Err(error.to_string()),
+        };
+        Ok(block.timestamp)
     }
     fn canonical(&self, block: &CanonicalBlock) -> Result<()> {
         if self.chain.block(block.number).map_err(|e| e.to_string())? != *block {
@@ -818,6 +925,7 @@ impl<C: CanonicalHead> ChainState for RpcChainState<C> {
         if n > U256::from(1) {
             return Err("noncanonical contract boolean".into());
         }
+        self.canonical(b)?;
         Ok(n == U256::from(1))
     }
     fn nullifier_spent(&self, n: B256, b: &CanonicalBlock) -> Result<bool> {
@@ -830,6 +938,7 @@ impl<C: CanonicalHead> ChainState for RpcChainState<C> {
         if n > U256::from(1) {
             return Err("noncanonical contract boolean".into());
         }
+        self.canonical(b)?;
         Ok(n == U256::from(1))
     }
     fn credit_status(
@@ -855,6 +964,7 @@ impl<C: CanonicalHead> ChainState for RpcChainState<C> {
         if status > U256::from(2) {
             return Err("invalid Credit status".into());
         }
+        self.canonical(b)?;
         Ok(status.to::<u8>())
     }
     fn token_balance_allowance(
@@ -863,7 +973,7 @@ impl<C: CanonicalHead> ChainState for RpcChainState<C> {
         token: Address,
         b: &CanonicalBlock,
     ) -> Result<(U256, U256)> {
-        Ok((
+        let amounts = (
             self.uint_read(token, "balanceOf(address)", &[address_word(owner)], b)?,
             self.uint_read(
                 token,
@@ -874,15 +984,19 @@ impl<C: CanonicalHead> ChainState for RpcChainState<C> {
                 ],
                 b,
             )?,
-        ))
+        );
+        self.canonical(b)?;
+        Ok(amounts)
     }
     fn funding_nonce(&self, owner: Address, b: &CanonicalBlock) -> Result<U256> {
-        self.uint_read(
+        let nonce = self.uint_read(
             self.deployment.protocol.address,
             "nonces(address)",
             &[address_word(owner)],
             b,
-        )
+        )?;
+        self.canonical(b)?;
+        Ok(nonce)
     }
     fn public_signature_valid(
         &self,
@@ -892,7 +1006,7 @@ impl<C: CanonicalHead> ChainState for RpcChainState<C> {
         b: &CanonicalBlock,
     ) -> Result<bool> {
         if verify_eoa_signature(owner, digest, signature) {
-            self.canonical(b)?;
+            // EOA recovery is purely cryptographic; the caller fences its live facts.
             return Ok(true);
         }
         if self
@@ -954,6 +1068,7 @@ impl NoteInput {
 #[derive(Clone)]
 pub struct NoteOutput {
     change: bool,
+    self_contained: bool,
     context: ProtocolContext,
     token: Address,
     identity: U256,
@@ -1021,6 +1136,7 @@ impl NoteOutput {
             context,
             token,
             change: false,
+            self_contained: keys.is_some(),
             identity,
             amount: note.amount,
             commitment,
@@ -1049,6 +1165,7 @@ impl NoteOutput {
             context,
             token,
             change: false,
+            self_contained: false,
             identity,
             amount,
             commitment,
@@ -1139,7 +1256,10 @@ pub(crate) enum Plan {
 }
 #[derive(Clone)]
 pub struct PreparedTransaction {
+    pub(crate) selected_funding_terms: bool,
+    pub(crate) stock_broadcaster: Option<StockBroadcasterCapability>,
     pub(crate) preparation_reads: Option<Arc<PreparationChain>>,
+    pub(crate) quote_clock: Option<preparation::QuoteClock>,
     pub(crate) wallet: Option<Wallet>,
     pub(crate) owner_address: Address,
     pub(crate) context: ProtocolContext,
@@ -1259,15 +1379,46 @@ impl Invisi {
         self.prepare_shield_internal(wallet, p)
             .map_err(|cause| InvisiError::preparation("prepare_shield", cause))
     }
+    /// Prepare signature funding and bind its payer, nonce and deadline before quoting.
+    pub fn prepare_shield_with_signature_funding(
+        &self,
+        wallet: &Wallet,
+        options: ShieldPreparation,
+        nonce: SignatureFundingNonce,
+    ) -> PreparationResult<PreparedTransaction> {
+        self.prepare_shield(wallet, options)?
+            .select_signature_funding(self.chain.as_ref(), nonce)
+            .map_err(|cause| InvisiError::preparation("prepare_shield", cause))
+    }
+    pub fn prepare_transfer_with_signature_funding(
+        &self,
+        wallet: &Wallet,
+        options: TransferPreparation,
+        nonce: SignatureFundingNonce,
+    ) -> PreparationResult<PreparedTransaction> {
+        self.prepare_transfer(wallet, options)?
+            .select_signature_funding(self.chain.as_ref(), nonce)
+            .map_err(|cause| InvisiError::preparation("prepare_transfer", cause))
+    }
     fn prepare_shield_internal(
         &self,
         wallet: &Wallet,
         p: ShieldPreparation,
     ) -> Result<PreparedTransaction> {
         let template = RepriceTemplate::Shield(p.clone());
+        let initialized_anchor = if p.outputs.iter().all(|o| o.self_contained)
+            && p.funding.permit.deadline == U256::ZERO
+        {
+            self.chain.self_contained_preparation_anchor()
+        } else {
+            None
+        };
         let reads = Arc::new(PreparationChain::new(self.chain.clone()));
         let chain = &*reads;
-        let anchor = chain.snapshot()?;
+        let anchor = match &initialized_anchor {
+            Some(anchor) => anchor.clone(),
+            None => chain.snapshot()?,
+        };
         let context = chain.context();
         p.fee.validate()?;
         validate_funding(&p.funding)?;
@@ -1287,8 +1438,19 @@ impl Invisi {
             feeRecipient: p.fee.recipient,
             feeAmount: p.fee.amount,
         };
-        chain.canonical(&anchor)?;
+        if initialized_anchor.is_none() {
+            chain.canonical(&anchor)?;
+        }
         Ok(PreparedTransaction {
+            selected_funding_terms: false,
+            stock_broadcaster: None,
+            quote_clock: Some(preparation::QuoteClock::capture(
+                if initialized_anchor.is_some() {
+                    preparation::QuoteClock::wall_seconds()?
+                } else {
+                    chain.construction_timestamp(&anchor)
+                },
+            )?),
             preparation_reads: Some(reads),
             wallet: Some(wallet.clone()),
             owner_address: wallet.owner_address,
@@ -1418,6 +1580,11 @@ impl Invisi {
                 && p.fee.amount == U256::ZERO);
         chain.canonical(&anchor)?;
         Ok(PreparedTransaction {
+            selected_funding_terms: false,
+            stock_broadcaster: None,
+            quote_clock: Some(preparation::QuoteClock::capture(
+                chain.construction_timestamp(&anchor),
+            )?),
             preparation_reads: Some(reads),
             wallet: wallet.cloned(),
             owner_address,
@@ -1780,13 +1947,22 @@ impl PreparedTransaction {
         self.proof = Some(bundle);
         self.authorization = None;
         self.phase = Phase::Proved;
+        if self.funding().amount == U256::ZERO || !self.funding().signature.is_empty() {
+            self.finalize_local_broadcaster()?;
+        }
         Ok(self)
     }
     pub fn ready(mut self) -> Result<Self> {
-        if !matches!(self.plan, Plan::Shield { .. }) || self.phase != Phase::Prepared {
+        if !matches!(self.plan, Plan::Shield { .. })
+            || !matches!(self.phase, Phase::Prepared | Phase::Ready)
+        {
             return Err("ready requires a prepared shield".into());
         }
         self.phase = Phase::Ready;
+        if self.funding().deadline != U256::ZERO && self.funding().signature.is_empty() {
+            return Err("final funding signature required before ready".into());
+        }
+        self.finalize_local_broadcaster()?;
         Ok(self)
     }
     pub fn proof(&self) -> Option<&ProofBundle> {
@@ -1801,10 +1977,11 @@ impl PreparedTransaction {
     pub fn calldata(&self, chain: &dyn ChainState, caller: Address) -> Result<TransactionCall> {
         self.operation_call(chain, caller, false)
     }
-    pub(crate) fn broadcaster_submission_call(
-        &self,
-        chain: &dyn ChainState,
-    ) -> Result<TransactionCall> {
+    pub(crate) fn broadcaster_submission_call(&self, now: u64) -> Result<TransactionCall> {
+        self.validate_broadcaster_execution()?;
+        self.encode_operation_call(Address::ZERO, true, now)
+    }
+    fn validate_broadcaster_execution(&self) -> Result<()> {
         let state = self
             .broadcaster
             .as_ref()
@@ -1814,7 +1991,15 @@ impl PreparedTransaction {
         {
             return Err("broadcaster execution does not match proof target".into());
         }
-        self.operation_call(chain, Address::ZERO, true)
+        Ok(())
+    }
+    pub(crate) fn broadcaster_submission_call_at(
+        &self,
+        chain: &dyn ChainState,
+        anchor: &CanonicalBlock,
+    ) -> Result<TransactionCall> {
+        self.validate_broadcaster_execution()?;
+        self.operation_call_at(chain, Address::ZERO, true, anchor)
     }
     fn operation_call(
         &self,
@@ -1823,10 +2008,24 @@ impl PreparedTransaction {
         allow_recursive: bool,
     ) -> Result<TransactionCall> {
         let anchor = chain.snapshot()?;
+        self.operation_call_at(chain, caller, allow_recursive, &anchor)
+    }
+    // One validation gate observes one pinned block; no nested live snapshots.
+    fn operation_call_at(
+        &self,
+        chain: &dyn ChainState,
+        caller: Address,
+        allow_recursive: bool,
+        anchor: &CanonicalBlock,
+    ) -> Result<TransactionCall> {
         if chain.context() != self.context {
             return Err("submission deployment mismatch".into());
         }
-        chain.canonical(&self.anchor)?;
+        // snapshot already fenced the current block; only a distinct preparation
+        // anchor needs a separate historical check.
+        if self.anchor != *anchor {
+            chain.canonical(&self.anchor)?;
+        }
         let inputs = self.inputs();
         let roots = inputs
             .iter()
@@ -1837,11 +2036,11 @@ impl PreparedTransaction {
         map_preparation(roots.len() + inputs.len(), |i| {
             let valid = if i < roots.len() {
                 let (tree, root) = roots[i];
-                chain.known_root(tree, root, &anchor)?
+                chain.known_root(tree, root, anchor)?
             } else {
                 !chain.nullifier_spent(
                     field_word(model(inputs[i - roots.len()].note.nullifier())?),
-                    &anchor,
+                    anchor,
                 )?
             };
             if valid {
@@ -1850,8 +2049,10 @@ impl PreparedTransaction {
                 Err("Note input no longer spendable".into())
             }
         })?;
-        self.validate_public_funding(chain, &anchor)?;
-        self.encode_operation_call(caller, allow_recursive, anchor.timestamp)
+        self.validate_public_funding(chain, anchor)?;
+        let call = self.encode_operation_call(caller, allow_recursive, anchor.timestamp)?;
+        chain.canonical(anchor)?;
+        Ok(call)
     }
     /// Export the ready unsigned call without live balance, allowance, nonce or chain reads.
     /// The host must simulate the complete execution path or use `calldata` for live validation.
@@ -2253,6 +2454,7 @@ impl NoteOutput {
             context,
             token,
             change: false,
+            self_contained: false,
             identity,
             amount,
             commitment,
@@ -2453,23 +2655,127 @@ impl PreparedTransaction {
             }
         }
     }
-    pub fn with_funding_terms(mut self, chain: &dyn ChainState, deadline: u64) -> Result<Self> {
-        if self.phase == Phase::Exported || self.funding().amount == U256::ZERO {
-            return Err("operation has no pending public funding".into());
+    fn self_contained_shield(&self) -> bool {
+        matches!(&self.plan, Plan::Shield {outputs,funding,..} if !outputs.is_empty()
+            && outputs.iter().all(|o|o.self_contained)
+            && funding.amount > U256::ZERO && funding.permit.deadline == U256::ZERO)
+            && self
+                .broadcaster
+                .as_ref()
+                .is_none_or(|s| s.quote.quote.schedule.is_none())
+    }
+    /// Explicit unsigned preparation step. The chain supplied for Current/Exact must be live.
+    pub fn select_signature_funding(
+        mut self,
+        chain: &dyn ChainState,
+        choice: SignatureFundingNonce,
+    ) -> Result<Self> {
+        let f = self.funding();
+        if self.phase != Phase::Prepared
+            || self.broadcaster.is_some()
+            || f.amount == U256::ZERO
+            || !f.signature.is_empty()
+            || chain.context() != self.context
+        {
+            return Err(
+                "signature funding requires unsigned, unquoted public funding on its deployment"
+                    .into(),
+            );
         }
-        if self.broadcaster.is_some() {
-            return Err("funding terms frozen by broadcaster quote".into());
+        let deadline = if f.deadline != U256::ZERO {
+            f.deadline
+        } else {
+            match &self.plan {
+                Plan::Transfer { params, .. } => params.deadline,
+                Plan::Shield { params, .. } => params.deadline,
+            }
+        };
+        let deadline = u64::try_from(deadline).map_err(|_| "funding deadline overflow")?;
+        let expected = match &choice {
+            SignatureFundingNonce::Exact(n) => Some(*n),
+            _ => None,
+        };
+        let fresh = match choice {
+            SignatureFundingNonce::Verified(value) => value,
+            _ => {
+                if chain.historical_preparation() {
+                    return Err("live funding nonce required during preparation".into());
+                }
+                match chain.fresh_funding_nonce(f.payer) {
+                    Some(value) => value?,
+                    None => {
+                        let block = chain.snapshot()?;
+                        if deadline < block.timestamp {
+                            return Err("funding deadline stale".into());
+                        }
+                        let nonce = chain.funding_nonce(f.payer, &block)?;
+                        chain.canonical(&block)?;
+                        FreshFundingNonce {
+                            context: self.context,
+                            owner: f.payer,
+                            nonce,
+                        }
+                    }
+                }
+            }
+        };
+        if expected.is_some_and(|n| n != fresh.nonce)
+            || (f.sigNonce != U256::ZERO && f.sigNonce != fresh.nonce)
+        {
+            return Err("supplied funding nonce differs from current funding nonce".into());
+        }
+        self.install_funding_nonce(fresh, deadline)?;
+        Ok(self)
+    }
+    fn install_funding_nonce(&mut self, fresh: FreshFundingNonce, deadline: u64) -> Result<()> {
+        if self.phase != Phase::Prepared
+            || self.broadcaster.is_some()
+            || self.funding().amount == U256::ZERO
+            || !self.funding().signature.is_empty()
+            || fresh.context != self.context
+            || fresh.owner != self.funding().payer
+            || deadline == 0
+            || deadline < self.anchor.timestamp
+        {
+            return Err("fresh funding nonce scope or deadline mismatch".into());
+        }
+        self.funding_mut().sigNonce = fresh.nonce;
+        self.funding_mut().deadline = U256::from(deadline);
+        self.selected_funding_terms = true;
+        Ok(())
+    }
+    pub fn with_fresh_funding_nonce(
+        mut self,
+        fresh: FreshFundingNonce,
+        deadline: u64,
+    ) -> Result<Self> {
+        self.install_funding_nonce(fresh, deadline)?;
+        Ok(self)
+    }
+    pub fn with_funding_terms(mut self, chain: &dyn ChainState, deadline: u64) -> Result<Self> {
+        if self.phase != Phase::Prepared
+            || self.broadcaster.is_some()
+            || self.funding().amount == U256::ZERO
+            || !self.funding().signature.is_empty()
+            || chain.context() != self.context
+        {
+            return Err("funding terms require unsigned unquoted public funding".into());
         }
         let block = chain.snapshot()?;
-        if chain.context() != self.context || deadline < block.timestamp {
-            return Err("funding context or deadline mismatch".into());
+        if deadline < block.timestamp {
+            return Err("funding deadline stale".into());
         }
-        let nonce = chain.funding_nonce(self.funding().payer, &block)?;
-        let f = self.funding_mut();
-        f.sigNonce = nonce;
-        f.deadline = U256::from(deadline);
-        f.signature = Bytes::new();
+        let owner = self.funding().payer;
+        let nonce = chain.funding_nonce(owner, &block)?;
         chain.canonical(&block)?;
+        self.install_funding_nonce(
+            FreshFundingNonce {
+                context: self.context,
+                owner,
+                nonce,
+            },
+            deadline,
+        )?;
         Ok(self)
     }
     pub fn export_funding_authorization(
@@ -2479,25 +2785,65 @@ impl PreparedTransaction {
         if !matches!(self.plan, Plan::Shield { .. }) && self.phase != Phase::Proved {
             return Err("proof must precede funding authorization".into());
         }
+        if self.stock_broadcaster.is_some()
+            && self.self_contained_shield()
+            && chain
+                .self_contained_shield_capability()
+                .is_some_and(|cap| cap.context == self.context)
+        {
+            let f = self.funding();
+            if f.deadline < U256::from(self.anchor.timestamp) {
+                return Err("funding deadline stale".into());
+            }
+            let (primary, hash) = self.funding_request_hash()?;
+            return funding_signing_request(self.context, primary, hash, f);
+        }
         let block = chain.snapshot()?;
+        let request = self.funding_authorization_at(chain, &block)?;
+        chain.canonical(&block)?;
+        Ok(request)
+    }
+    fn funding_authorization_at(
+        &self,
+        chain: &dyn ChainState,
+        block: &CanonicalBlock,
+    ) -> Result<EvmSigningRequest> {
+        if !matches!(self.plan, Plan::Shield { .. }) && self.phase != Phase::Proved {
+            return Err("proof must precede funding authorization".into());
+        }
         let f = self.funding();
         if chain.context() != self.context
             || f.deadline < U256::from(block.timestamp)
-            || chain.funding_nonce(f.payer, &block)? != f.sigNonce
+            || chain.funding_nonce(f.payer, block)? != f.sigNonce
         {
             return Err("funding context, deadline or nonce stale".into());
         }
         let (primary, hash) = self.funding_request_hash()?;
-        let request = funding_signing_request(self.context, primary, hash, f)?;
-        chain.canonical(&block)?;
-        Ok(request)
+        funding_signing_request(self.context, primary, hash, f)
     }
     pub fn with_funding_signature(
         mut self,
         chain: &dyn ChainState,
         signature: Vec<u8>,
     ) -> Result<Self> {
+        if self
+            .broadcaster
+            .as_ref()
+            .is_some_and(|s| s.attempted || !s.submitted_data.is_empty())
+        {
+            return Err("funding signature frozen by finalized broadcaster packet".into());
+        }
         let request = self.export_funding_authorization(chain)?;
+        if self.stock_broadcaster.is_some()
+            && self.self_contained_shield()
+            && chain
+                .self_contained_shield_capability()
+                .is_some_and(|cap| cap.context == self.context)
+            && verify_eoa_signature(self.funding().payer, request.digest, &signature)
+        {
+            self.funding_mut().signature = signature.into();
+            return Ok(self);
+        }
         let block = chain.snapshot()?;
         if signature.is_empty()
             || !chain.public_signature_valid(
@@ -2511,6 +2857,10 @@ impl PreparedTransaction {
         }
         self.funding_mut().signature = signature.into();
         chain.canonical(&block)?;
+        if self.phase == Phase::Proved {
+            self.finalize_local_broadcaster()?;
+        }
+
         Ok(self)
     }
     fn validate_public_funding(
@@ -2533,7 +2883,7 @@ impl PreparedTransaction {
             }
         }
         if !f.signature.is_empty() {
-            let request = self.export_funding_authorization(chain)?;
+            let request = self.funding_authorization_at(chain, block)?;
             if !chain.public_signature_valid(f.payer, request.digest, &f.signature, block)? {
                 return Err("public funding signature invalid".into());
             }
@@ -3152,7 +3502,9 @@ impl PaymentRequestOutputExt for crate::payment_request::PaymentRequest {
                     nonce: fixed.unwrap_or_else(nonce),
                     payload: q.payload.clone().unwrap_or_default(),
                 };
-                NoteOutput::from_note(note, keys.as_ref())
+                let mut output = NoteOutput::from_note(note, keys.as_ref())?;
+                output.self_contained = false;
+                Ok(output)
             }
         }
     }
@@ -3325,6 +3677,65 @@ impl PreparedTransaction {
 #[cfg(test)]
 mod request_factory_tests {
     use super::*;
+    #[test]
+    fn registry_resolution_and_restored_outputs_do_not_claim_embedded_recipient_policy() {
+        use crate::payment_request::{
+            AddressLookup, ExecutionOptions, NoteOutputRecipient, PaymentRequest,
+        };
+        struct Resolver;
+        impl ReceivingKeyResolver for Resolver {
+            fn resolve(
+                &self,
+                _: Address,
+                _: ProtocolContext,
+                _: AddressLookup,
+            ) -> PreparationResult<ReceivingKeys> {
+                Ok(test_receiving_keys())
+            }
+        }
+        let fixture: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/current-address.json")).unwrap();
+        let mut request = PaymentRequest {
+            chain_id: 31337,
+            protocol_address: U256::from(17),
+            token_address: U256::from(34),
+            amount: U256::from(7),
+            recipient: NoteOutputRecipient::Invisi {
+                address: fixture["longAddress"].as_str().unwrap().into(),
+                nonce: Some(U256::from(123)),
+            },
+            payload: None,
+        };
+        let embedded = request
+            .prepare_output(&ExecutionOptions::default(), None)
+            .unwrap();
+        assert!(embedded.self_contained);
+        request.recipient = NoteOutputRecipient::Evm {
+            address: fixture["ownerAddress"].as_str().unwrap().into(),
+            envelope: true,
+            nonce: Some(U256::from(123)),
+            address_lookup: None,
+        };
+        let registered = request
+            .prepare_output(&ExecutionOptions::default(), Some(&Resolver))
+            .unwrap();
+        assert!(!registered.delivery.ciphertext.is_empty());
+        assert!(!registered.self_contained);
+        let restored = NoteOutput::restore(
+            embedded.context,
+            embedded.token,
+            embedded.identity,
+            embedded.amount,
+            embedded.commitment,
+            embedded.note.clone(),
+            embedded.delivery.clone(),
+        )
+        .unwrap();
+        assert!(
+            !restored.self_contained,
+            "old journals must preserve conservative validation"
+        );
+    }
     #[test]
     fn ipr_output_preserves_fixed_nonce_payload_and_rejects_changes() {
         use crate::payment_request::{ExecutionOptions, NoteOutputRecipient, PaymentRequest};
@@ -3739,3 +4150,9 @@ pub use disclosure_verifier::*;
 #[cfg(test)]
 #[path = "sdk/canonical_anchor_tests.rs"]
 mod canonical_anchor_tests;
+
+mod initialized;
+pub use initialized::InitializedRpcChainState;
+
+mod initialized_broadcasters;
+pub use initialized_broadcasters::InitializedBroadcasters;

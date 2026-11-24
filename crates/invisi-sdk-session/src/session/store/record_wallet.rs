@@ -268,6 +268,9 @@ impl RecordWalletStore {
     }
 }
 impl WalletStore for RecordWalletStore {
+    fn mutation_identity(&self) -> usize {
+        self.records.mutation_identity()
+    }
     fn supports_history_paging(&self) -> bool {
         true
     }
@@ -374,6 +377,7 @@ impl WalletStore for RecordWalletStore {
         })
     }
     fn compare_and_swap(&self, scope: &str, expected: u64, mut next: WalletState) -> Result<()> {
+        let _write = self.begin_mutation(scope)?;
         if next.revision != expected || next.format_version != 2 {
             return Err("invalid next wallet state".into());
         }
@@ -506,6 +510,7 @@ impl WalletStore for RecordWalletStore {
         Ok(())
     }
     fn recover_reorg(&self, scope: &str, from_block: u64) -> Result<()> {
+        let _write = self.begin_mutation(scope)?;
         let mut state = self.snapshot(scope)?;
         let previous = state.unresolved_deliveries.len();
         state

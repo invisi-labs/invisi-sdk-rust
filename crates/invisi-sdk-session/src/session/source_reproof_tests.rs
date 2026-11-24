@@ -9,12 +9,16 @@ struct LocalSource {
     endpoint: String,
     generation: Arc<AtomicUsize>,
     hits: Arc<AtomicUsize>,
+    requests: Arc<Mutex<Vec<Value>>>,
     offline: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 impl LocalSource {
     fn start() -> Self {
+        Self::start_with_fixture(include_str!("../../testdata/source-reproof.json"))
+    }
+    fn start_with_fixture(data: &'static str) -> Self {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -27,6 +31,14 @@ impl LocalSource {
             hits.clone(),
             offline.clone(),
             stop.clone(),
+        );
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = requests.clone();
+        let delay = std::time::Duration::from_millis(
+            std::env::var("INVISI_ALIGNMENT_DELAY_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
         );
         let thread = std::thread::spawn(move || {
             while !done.load(Ordering::SeqCst) {
@@ -65,11 +77,10 @@ impl LocalSource {
                 }
                 let request: Value =
                     serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
+                recorded.lock().unwrap().push(request.clone());
                 h.fetch_add(1, Ordering::SeqCst);
                 let gen = g.load(Ordering::SeqCst);
-                let fixture: Value =
-                    serde_json::from_str(include_str!("../../testdata/source-reproof.json"))
-                        .unwrap();
+                let fixture: Value = serde_json::from_str(data).unwrap();
                 let cert = fixture["generations"][gen - 1]["certificate"].clone();
                 let scope = json!({"chainId":"31337","protocolAddress":"4660"});
                 let mut result =
@@ -110,12 +121,16 @@ impl LocalSource {
                 } else {
                     json!({"jsonrpc":"2.0","id":request["id"],"result":result})
                 };
+                if !delay.is_zero() {
+                    std::thread::sleep(delay);
+                }
                 let body = response.to_string();
                 write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
             }
         });
         Self {
             endpoint,
+            requests,
             generation,
             hits,
             offline,
@@ -469,3 +484,6 @@ fn host_factory_supports_initial_provenance_recovery_and_reproof() {
         before
     );
 }
+
+#[path = "stage_source_boundary.rs"]
+mod stage_source_boundary;

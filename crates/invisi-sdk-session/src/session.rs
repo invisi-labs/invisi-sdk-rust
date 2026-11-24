@@ -366,11 +366,17 @@ impl WalletSession {
             .map_err(|_| "wallet validation cache poisoned")? = Some(digest);
         Ok(state)
     }
+    fn recover_store_reorg(&self, from: u64) -> Result<()> {
+        let scope = self.scope.key();
+        let _write = self.store.begin_mutation(&scope)?;
+        self.store.recover_reorg(&scope, from)
+    }
     pub(crate) fn commit(&self, mut next: WalletState) -> Result<()> {
         next.scope = Some(self.scope.clone());
         let revision = next.revision;
-        self.store
-            .compare_and_swap(&self.scope.key(), revision, next)
+        let scope = self.scope.key();
+        let _write = self.store.begin_mutation(&scope)?;
+        self.store.compare_and_swap(&scope, revision, next)
     }
     pub fn balance(&self, token: Address) -> Result<Balance> {
         self.fence_public_history()?;
@@ -496,7 +502,7 @@ impl WalletSession {
         self.invalidate_reorg_from(self.source.deployment_start())
     }
     fn invalidate_reorg_from(&self, from: u64) -> Result<()> {
-        self.store.recover_reorg(&self.scope.key(), from)?;
+        self.recover_store_reorg(from)?;
         let mut state = self.store.snapshot(&self.scope.key())?;
         state
             .unresolved_deliveries

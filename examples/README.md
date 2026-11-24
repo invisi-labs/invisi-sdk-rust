@@ -28,6 +28,17 @@ cargo run -p invisi-sdk-examples --features sqlite --bin restore-session -- --ex
 
 ## Public Wallet initialization
 
+For local host initialization, put the original 32 raw account-key bytes in an access-restricted `OWNER_KEY_FILE`, choose new `VIEWING_KEY_FILE` and `DETECTION_KEY_FILE` paths, and run:
+
+```sh
+cargo run -p invisi-sdk-examples --bin receiving-address -- --execute
+```
+
+This offline example prints only the public owner and v1 `0i` receiving address. It creates the two capability files exclusively (mode 0600 on Unix), refusing to overwrite existing keys. Keep those files outside Git. Payments use the printed public address; receiving initialization is a separate host step.
+
+The executable `AppDecryptor` is an example host adapter. Set `VIEWING_KEY_FILE` and `DETECTION_KEY_FILE` to the matching raw 32-byte capabilities. It performs FMD detection before local AEAD decryption, reports authentication failures separately from nonrecipients, and rejects malformed or financially inconsistent deliveries. Production applications should replace this adapter with their own capability storage and unlocking policy.
+
+
 Use `Wallet::from_address(receiving_address)` with a complete public receiving address. The SDK retains only public owner and receiving material. The application owns account selection, delivery decryption and EVM signing.
 
 Private Note/Credit authorization uses ordinary EIP-712 signing:
@@ -165,7 +176,7 @@ Run the other binaries without `--execute` to inspect their guard behavior witho
 
 ## Broadcaster and independent Source proofs
 
-See `07-broadcaster` for fee-frozen quotation and submission. Example 02 is a normal managed payment: synchronize/decrypt inventory, prepare, authorize, prove, submit Source precheck, then call `session.send_transaction` with a host signer and an explicit `GAS_LIMIT`. It prints the saved operation ID, Source digest/tracking, and sent hash, waits for independent native finality, reconciles inventory, and waits for Source recognition. Example 03 reopens the encrypted session by `OPERATION_ID`, records `HOST_TRANSACTION_HASH` only when a crash prevented the original hash from being journaled, reconciles canonical state, generates Source evidence from retained openings, submits it and waits for recognition. Already completed payments use their retained journal directly. Both examples require `--features sqlite` and run directly without scenario flags. The native `AppDecryptor` remains a host integration placeholder.
+See `07-broadcaster` for fee-frozen quotation and submission. Example 01 discovers token-supporting Broadcasters through the authenticated registry rather than manually supplied operator identities. Set `PROVE_PROVENANCE=1` to explicitly prove and submit Source evidence before broadcasting even when the signed Broadcaster quote does not require it, then wait for recognition after native finality. Example 02 is a normal managed payment: synchronize/decrypt inventory, prepare, authorize, prove, submit Source precheck, then call `session.send_transaction` with a host signer and an explicit `GAS_LIMIT`. It prints the saved operation ID, Source digest/tracking, and sent hash, waits for independent native finality, reconciles inventory, and waits for Source recognition. Example 03 reopens the encrypted session by `OPERATION_ID`, records `HOST_TRANSACTION_HASH` only when a crash prevented the original hash from being journaled, reconciles canonical state, generates Source evidence from retained openings, submits it and waits for recognition. Already completed payments use their retained journal directly. Both examples require `--features sqlite` and run directly without scenario flags. The native `AppDecryptor` reads the explicit host capability files described above.
 
 These flows use `DEPLOYMENT_JSON`, `ETH_RPC_URL`, `PROTOCOL_RPC_URL`, `WALLET_ADDRESS`, `WALLET_DB`, `WALLET_STORE_KEY_FILE`, `BB_BINARY`, `NOIR_EXECUTOR` (optional `PROVER_ASSETS` selects existing local circuits). Example 02 also uses `TOKEN_ADDRESS`, `RECIPIENT_ADDRESS`, `AMOUNT`, `DEADLINE`, `CALLER_ADDRESS`, positive `GAS_LIMIT`, and `OWNER_PRIVATE_KEY` for the example application signer. The same host signer signs EIP-712 authorizations and standard EIP-155 Ethereum transactions; the SDK never receives the EVM private key. Production hosts can inject a hardware wallet or external signer. SQLite stores the encrypted operation journal; the examples do not export extra JSON records. Optional `CONFIRMATION_TIMEOUT_SECONDS` defaults to 180.
 
@@ -189,6 +200,8 @@ let receiving_address = wallet.address()?;
 assert_eq!(Wallet::from_address(&receiving_address)?, wallet);
 let revocation = invisi.prepare_revoke_credit_explicit(owner_address, token, grant_id, deadline, Fee::default())?;
 ```
+
+`source-tracking` (`07-broadcaster/source-tracking.rs`) accepts a saved public tracking ID and the normal deployment/trust configuration to resume an authenticated lookup after a transient polling failure. It never proves or submits a payment.
 
 `transaction-confirmation` (`07-broadcaster/confirmation.rs`) reads `CHAIN_RPC_URL` and a transaction hash argument to report independently authenticated native inclusion/finality. It performs no submission, resend, or wallet mutation.
 

@@ -34,16 +34,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             sdk::PreparedProvenance::from_local_configuration(support::source_configuration()?)?,
         ))?;
     }
-    let relay = Arc::new(invisi_sdk::broadcaster::BroadcasterClient::connect(
-        invisi_sdk::broadcaster::Configuration {
-            endpoint: env::var("BROADCASTER_ENDPOINT")?,
-            quote_signer: env::var("BROADCASTER_QUOTE_SIGNER")?.parse()?,
-            fee_recipient: env::var("BROADCASTER_FEE_RECIPIENT")?.parse()?,
-        },
-    )?);
     let wallet = Wallet::from_address(&env::var("WALLET_ADDRESS")?)?;
     let token: Address = env::var("TOKEN_ADDRESS")?.parse()?;
     let deadline: u64 = env::var("DEADLINE")?.parse()?;
+    // Registry discovery authenticates every operator against the pinned native deployment.
+    let protocol = invisi_sdk::rpc::ProtocolRpcClient::new(
+        HttpTransport::protocol(&env::var("PROTOCOL_RPC_URL")?, deployment.chain_id()?)?,
+        EthereumChain::new(HttpTransport::new(&env::var("ETH_RPC_URL")?)?),
+        deployment.clone(),
+    )?;
+    let relay = Arc::new(invisi_sdk::broadcaster::BroadcasterClient::from_rpc(
+        protocol
+            .discover_broadcasters(token)?
+            .into_iter()
+            .next()
+            .ok_or("no authenticated broadcaster supports this token")?,
+    ));
     if !relay.supports_token(
         token,
         chain.context().chain_id,
@@ -124,6 +130,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Proof generation uses pinned circuit assets and independently verifies the resulting proof.
 
     let mut prepared = prepared.prove(prover.as_ref(), None)?;
+    let explicit_source = env::var("PROVE_PROVENANCE").as_deref() == Ok("1");
+    let source_submission = if explicit_source {
+        let capability = if env::var("SOURCE_PROVIDER_ID").is_ok() {
+            Arc::new(sdk::PreparedProvenance::from_local_configuration(
+                support::source_configuration()?,
+            )?)
+        } else {
+            sdk::PreparedProvenance::from_prover(chain.context(), prover.as_ref())?
+        };
+        let source = capability.client.clone();
+        prepared = prepared.reattach_provenance(capability)?;
+        let packet = prepared.prove_provenance(chain.as_ref())?;
+        let accepted = sdk::submit_provenance_proof(source.as_ref(), &packet)?;
+        invisi_sdk::provenance_tracking::preflight_tracking(
+            &accepted,
+            "0",
+            &packet.operation_digest,
+        )?;
+        println!("Explicit Source precheck: {accepted}");
+        Some((source, accepted))
+    } else {
+        None
+    };
     prepared.freeze_broadcaster_evidence(chain.as_ref(), relay.as_ref())?;
     let status = relay.submit(&mut prepared, chain.as_ref())?;
     println!("{}", serde_json::to_string_pretty(&status)?);
@@ -173,13 +202,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !receipt.success {
         return Err("canonical transaction reverted".into());
     }
-    if prepared
-        .broadcaster_state()
-        .is_some_and(|state| state.provenance_mode().is_some())
+    if explicit_source
+        || prepared
+            .broadcaster_state()
+            .is_some_and(|state| state.provenance_mode().is_some())
     {
-        let source = support::source_client()?;
-        let packet = prepared.prove_provenance(chain.as_ref())?;
-        let accepted = sdk::submit_provenance_proof(source.as_ref(), &packet)?;
+        let (source, accepted) = match source_submission {
+            Some(pair) => pair,
+            None => {
+                let source = support::source_client()?;
+                let packet = prepared.prove_provenance(chain.as_ref())?;
+                let accepted = sdk::submit_provenance_proof(source.as_ref(), &packet)?;
+                (source, accepted)
+            }
+        };
         let tracking = invisi_sdk::provenance_tracking::tracking_from_result(&accepted, None)?;
         let result =
             source.wait_tracking(&tracking.id, std::time::Duration::from_millis(500), limit)?;

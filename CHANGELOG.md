@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.5
+
+- Derive receiving capabilities from the fixed EIP-191 v1 message, normalize equivalent Ethereum/EIP-2098 signatures, verify the account identity, and share deterministic cross-language address, viewing and detection vectors. Public payment wallets retain only receiving material.
+- Preserve initialized native preparation performance: two reads to prepare, two to quote and three to submit, with live submission fences, signed fee locks, immutable frozen evidence and recovery semantics.
+- Make executable account examples usable with explicit host-owned viewing and detection files. Preserve nonrecipient, authentication failure and operational error outcomes; add standalone local v1 receiving initialization and authenticated Broadcaster registry discovery.
+- Keep Session performance/recovery tests compilable from registry archives with a packaged address fixture; workspace source hashes remain optional diagnostic metadata instead of compile-time references outside the crate.
+- Align all nine public crates, exact sibling dependencies, lockfile, release checks and workflow at 1.3.5. The private examples remain 0.1.0; the C ABI and proving asset pins are unchanged.
+
 ## 1.3.4
 
 - Recover confirmed tracked Source proofs after a native deadline through historical proof delivery, while retaining strict initial evaluation and authenticated mined-locator checks. Persist accepted replacement tracking before polling so interruptions resume without reproof or resubmission.

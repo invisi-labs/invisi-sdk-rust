@@ -24,7 +24,7 @@ def run(args, **kwargs):
 def check_archive_artifacts(contents, name):
     license_text = (ROOT / 'LICENSE').read_bytes()
     assert b'END OF TERMS AND CONDITIONS' in license_text and len(license_text) > 10000
-    prefix = f'{name}-1.3.4/'
+    prefix = f'{name}-1.3.5/'
     assert contents.extractfile(prefix + 'LICENSE').read() == license_text, f'{name}: incomplete packaged LICENSE'
     assert contents.extractfile(prefix + 'NOTICE').read() == (ROOT / 'NOTICE').read_bytes(), f'{name}: missing attribution'
     for member in contents.getmembers():
@@ -47,6 +47,7 @@ def main():
     options = parser.parse_args()
     run(['python3', ROOT / 'scripts/check-boundaries.py'], cwd=ROOT)
     fixture_pairs = [
+        ('tests/fixtures/current-address.json', 'crates/invisi-sdk-session/testdata/current-address.json'),
         ('crates/invisi-sdk-protocol/assets/gas/measured-model.json', 'tests/fixtures/measured-model.json'),
         ('crates/invisi-sdk-protocol/assets/gas/model-validation.json', 'tests/fixtures/model-validation.json'),
         ('crates/invisi-sdk-rpc/testdata/golden-vectors.json', 'testdata/provenance-golden-vectors.json'),
@@ -98,10 +99,10 @@ def main():
     for name in ORDER:
         source = ROOT if name == 'invisi-sdk' else ROOT / 'crates' / name
         run(['cargo', '--config', config, 'package', '--locked', '--offline', '--allow-dirty', '--manifest-path', source / 'Cargo.toml'], cwd=ROOT, env=environment)
-        archive = work / 'target' / 'package' / f'{name}-1.3.4.crate'
+        archive = work / 'target' / 'package' / f'{name}-1.3.5.crate'
         destination = vendor / name
         shutil.rmtree(destination)
-        unpacked = work / 'unpacked' / f'{name}-1.3.4'
+        unpacked = work / 'unpacked' / f'{name}-1.3.5'
         if unpacked.exists():
             shutil.rmtree(unpacked)
         with tarfile.open(archive) as contents:
@@ -113,15 +114,15 @@ def main():
             if path.is_file():
                 os.utime(path, None)
         metadata = tomllib.loads((unpacked / 'Cargo.toml').read_text())
-        assert metadata['package']['version'] == '1.3.4'
+        assert metadata['package']['version'] == '1.3.5'
         for dependency_name, dependency in metadata.get('dependencies', {}).items():
             if isinstance(dependency, dict) and dependency.get('package', dependency_name).startswith('invisi-sdk'):
-                assert dependency['version'] == '=1.3.4' and 'path' not in dependency
+                assert dependency['version'] == '=1.3.5' and 'path' not in dependency
         shutil.copytree(unpacked, destination)
         files = {str(p.relative_to(destination)): hashlib.sha256(p.read_bytes()).hexdigest() for p in destination.rglob('*') if p.is_file()}
         (destination / '.cargo-checksum.json').write_text(json.dumps({'files': files, 'package': None}))
         run(['cargo', '--config', config, 'check', '--locked', '--offline', '--all-features', '--all-targets', '--manifest-path', unpacked / 'Cargo.toml'], cwd=work, env=environment)
-    print(f'All nine 1.3.4 package archives verified and tested: {work}')
+    print(f'All nine 1.3.5 package archives verified and tested: {work}')
 
 
 if __name__ == '__main__':

@@ -313,32 +313,168 @@ mod tests {
     }
 }
 
-/// Application integration point: return decrypted delivery bytes, or None for an unrelated recipient.
-/// Replace these callbacks with your application's decryptor; no account key enters the SDK.
-pub struct AppDecryptor;
-impl invisi_sdk::delivery::DeliveryDecryptor for AppDecryptor {
+/// Host-owned viewing capability. No spending account key enters the payment SDK.
+pub struct ViewingKeyDecryptor(zeroize::Zeroizing<[u8; 32]>);
+impl ViewingKeyDecryptor {
+    pub fn new(key: &[u8]) -> Result<Self> {
+        let key: [u8; 32] = key
+            .try_into()
+            .map_err(|_| "viewing key must contain 32 raw bytes")?;
+        k256::SecretKey::from_slice(&key).map_err(|_| "invalid viewing key")?;
+        Ok(Self(zeroize::Zeroizing::new(key)))
+    }
+    fn open(
+        &self,
+        envelope: &[u8],
+        context: &invisi_sdk::delivery::DeliveryContext,
+        role: u8,
+        owner: U256,
+    ) -> Result<Option<Vec<u8>>> {
+        use invisi_sdk::delivery::{decode_credit, decode_note, open_payload, payload_key};
+        let key = payload_key(&self.0[..], envelope, role != 0).map_err(|e| e.to_string())?;
+        let plain = match open_payload(&key[..], envelope, context, role) {
+            Ok(plain) => plain,
+            Err(invisi_sdk::note::ModelError::Invalid("delivery authentication")) => {
+                return Err("delivery authentication".into())
+            }
+            Err(error) => return Err(error.to_string()),
+        };
+        if role == 0 {
+            if decode_note(&plain, context)
+                .map_err(|e| e.to_string())?
+                .owner_address
+                != owner
+            {
+                return Err("note recipient mismatch".into());
+            }
+        } else {
+            let state = decode_credit(&plain, context).map_err(|e| e.to_string())?;
+            let expected = if role == 1 {
+                state.note.owner_wallet_identity
+            } else {
+                state.note.spender_wallet_identity
+            };
+            if expected != owner {
+                return Err("credit recipient mismatch".into());
+            }
+        }
+        Ok(Some(plain.to_vec()))
+    }
+}
+impl invisi_sdk::delivery::DeliveryDecryptor for ViewingKeyDecryptor {
     fn decrypt_note(
         &self,
-        _envelope: &[u8],
-        _context: &invisi_sdk::delivery::DeliveryContext,
-        _owner: U256,
+        envelope: &[u8],
+        context: &invisi_sdk::delivery::DeliveryContext,
+        owner: U256,
     ) -> Result<Option<Vec<u8>>> {
-        Err(
-            "Implement AppDecryptor::decrypt_note with your application's delivery decryption"
-                .into(),
-        )
+        self.open(envelope, context, 0, owner)
     }
     fn decrypt_credit(
         &self,
-        _envelope: &[u8],
-        _context: &invisi_sdk::delivery::DeliveryContext,
-        _role: CreditRole,
-        _owner: U256,
+        envelope: &[u8],
+        context: &invisi_sdk::delivery::DeliveryContext,
+        role: CreditRole,
+        owner: U256,
     ) -> Result<Option<Vec<u8>>> {
-        Err(
-            "Implement AppDecryptor::decrypt_credit with your application's delivery decryption"
-                .into(),
+        self.open(
+            envelope,
+            context,
+            if role == CreditRole::Owner { 1 } else { 2 },
+            owner,
         )
+    }
+    fn decrypt_note_outcome(
+        &self,
+        envelope: &[u8],
+        context: &invisi_sdk::delivery::DeliveryContext,
+        owner: U256,
+    ) -> Result<invisi_sdk::delivery::DecryptionOutcome> {
+        use invisi_sdk::delivery::DecryptionOutcome;
+        match self.decrypt_note(envelope, context, owner) {
+            Ok(Some(plain)) => Ok(DecryptionOutcome::Plaintext(plain)),
+            Ok(None) => Ok(DecryptionOutcome::NonRecipient),
+            Err(error) if error == "delivery authentication" => {
+                Ok(DecryptionOutcome::AuthenticationFailed)
+            }
+            Err(error) => Err(error),
+        }
+    }
+    fn decrypt_credit_outcome(
+        &self,
+        envelope: &[u8],
+        context: &invisi_sdk::delivery::DeliveryContext,
+        role: CreditRole,
+        owner: U256,
+    ) -> Result<invisi_sdk::delivery::DecryptionOutcome> {
+        use invisi_sdk::delivery::DecryptionOutcome;
+        match self.decrypt_credit(envelope, context, role, owner) {
+            Ok(Some(plain)) => Ok(DecryptionOutcome::Plaintext(plain)),
+            Ok(None) => Ok(DecryptionOutcome::NonRecipient),
+            Err(error) if error == "delivery authentication" => {
+                Ok(DecryptionOutcome::AuthenticationFailed)
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+/// File-backed application adapter used by the executable recipes.
+/// Set VIEWING_KEY_FILE to a file containing 32 raw v1 viewing-key bytes.
+pub struct AppDecryptor;
+impl AppDecryptor {
+    fn capability() -> Result<ViewingKeyDecryptor> {
+        let file = std::env::var("VIEWING_KEY_FILE")
+            .map_err(|_| "VIEWING_KEY_FILE required for local delivery decryption")?;
+        let key = zeroize::Zeroizing::new(std::fs::read(file).map_err(|e| e.to_string())?);
+        ViewingKeyDecryptor::new(&key)
+    }
+}
+impl invisi_sdk::delivery::DeliveryDecryptor for AppDecryptor {
+    fn detect(&self, candidates: &[invisi_sdk::delivery::DetectionCandidate]) -> Result<Vec<bool>> {
+        let file = std::env::var("DETECTION_KEY_FILE")
+            .map_err(|_| "DETECTION_KEY_FILE required for local clue detection")?;
+        let key = zeroize::Zeroizing::new(std::fs::read(file).map_err(|e| e.to_string())?);
+        candidates
+            .iter()
+            .map(|candidate| {
+                invisi_sdk::fmd::detect_clue(&key, &candidate.clue).map_err(|e| e.to_string())
+            })
+            .collect()
+    }
+    fn decrypt_note_outcome(
+        &self,
+        envelope: &[u8],
+        context: &invisi_sdk::delivery::DeliveryContext,
+        owner: U256,
+    ) -> Result<invisi_sdk::delivery::DecryptionOutcome> {
+        Self::capability()?.decrypt_note_outcome(envelope, context, owner)
+    }
+    fn decrypt_credit_outcome(
+        &self,
+        envelope: &[u8],
+        context: &invisi_sdk::delivery::DeliveryContext,
+        role: CreditRole,
+        owner: U256,
+    ) -> Result<invisi_sdk::delivery::DecryptionOutcome> {
+        Self::capability()?.decrypt_credit_outcome(envelope, context, role, owner)
+    }
+    fn decrypt_note(
+        &self,
+        envelope: &[u8],
+        context: &invisi_sdk::delivery::DeliveryContext,
+        owner: U256,
+    ) -> Result<Option<Vec<u8>>> {
+        Self::capability()?.decrypt_note(envelope, context, owner)
+    }
+    fn decrypt_credit(
+        &self,
+        envelope: &[u8],
+        context: &invisi_sdk::delivery::DeliveryContext,
+        role: CreditRole,
+        owner: U256,
+    ) -> Result<Option<Vec<u8>>> {
+        Self::capability()?.decrypt_credit(envelope, context, role, owner)
     }
 }
 
@@ -486,5 +622,83 @@ pub fn prover_assets() -> std::sync::Arc<dyn invisi_sdk::prover::Assets> {
         })
     } else {
         std::sync::Arc::new(invisi_sdk::prover::ResourceProvider::default())
+    }
+}
+
+#[cfg(test)]
+mod viewing_decryptor_tests {
+    use super::*;
+    use invisi_sdk::delivery::{DeliveryContext, DeliveryDecryptor};
+    #[test]
+    fn local_viewing_capability_opens_note_without_account_key() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/wallet-note-vectors.json"
+        ))
+        .unwrap();
+        let key = hex::decode(
+            fixture["owner"]["viewingPrivateKey"]
+                .as_str()
+                .unwrap()
+                .trim_start_matches("0x"),
+        )
+        .unwrap();
+        let decryptor = ViewingKeyDecryptor::new(&key).unwrap();
+        let context = DeliveryContext {
+            context: invisi_sdk::note::ProtocolContext {
+                chain_id: 31337,
+                protocol_address: U256::from(4660),
+            },
+            token_address: U256::from(22136),
+            output_commitment: U256::from_str_radix(
+                fixture["note"]["commitment"]
+                    .as_str()
+                    .unwrap()
+                    .trim_start_matches("0x"),
+                16,
+            )
+            .unwrap(),
+        };
+        let envelope = hex::decode(
+            fixture["note"]["ciphertext"]
+                .as_str()
+                .unwrap()
+                .trim_start_matches("0x"),
+        )
+        .unwrap();
+        let owner =
+            U256::from_str_radix(fixture["owner"]["ownerAddress"].as_str().unwrap(), 10).unwrap();
+        let plain = decryptor
+            .decrypt_note(&envelope, &context, owner)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            invisi_sdk::delivery::decode_note(&plain, &context)
+                .unwrap()
+                .amount,
+            U256::from(70)
+        );
+        let mut corrupted = envelope.clone();
+        *corrupted.last_mut().unwrap() ^= 1;
+        assert!(matches!(
+            decryptor
+                .decrypt_note_outcome(&corrupted, &context, owner)
+                .unwrap(),
+            invisi_sdk::delivery::DecryptionOutcome::AuthenticationFailed
+        ));
+        assert!(decryptor
+            .decrypt_note(&envelope, &context, owner + U256::from(1))
+            .is_err());
+        assert!(ViewingKeyDecryptor::new(&[1; 31]).is_err());
+        assert!(ViewingKeyDecryptor::new(&[1; 32])
+            .unwrap()
+            .decrypt_note(&envelope, &context, owner)
+            .is_err());
+        assert!(matches!(
+            ViewingKeyDecryptor::new(&[1; 32])
+                .unwrap()
+                .decrypt_note_outcome(&envelope, &context, owner)
+                .unwrap(),
+            invisi_sdk::delivery::DecryptionOutcome::AuthenticationFailed
+        ));
     }
 }

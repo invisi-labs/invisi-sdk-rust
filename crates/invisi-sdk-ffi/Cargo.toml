@@ -1,6 +1,6 @@
 [package]
 name = "invisi-sdk-ffi"
-version = "1.3.4"
+version = "1.3.5"
 edition = "2021"
 license = "Apache-2.0"
 description = "Invisi SDK C ABI exports and host-executed wallet requests"
@@ -15,7 +15,7 @@ name = "invisi_sdk_ffi"
 crate-type = ["rlib", "staticlib", "cdylib"]
 
 [dependencies]
-invisi-sdk-primitives = { path = "../invisi-sdk-primitives", version = "=1.3.4" }
+invisi-sdk-primitives = { path = "../invisi-sdk-primitives", version = "=1.3.5" }
 serde_json = "1"
 zeroize = "1"
 

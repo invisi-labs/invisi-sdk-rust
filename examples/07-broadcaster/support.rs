@@ -1,6 +1,8 @@
+use invisi_sdk::{rpc::ProtocolDeployment, sdk};
+#[cfg(feature = "sqlite")]
 use invisi_sdk::{
-    rpc::{EthereumChain, HttpTransport, ProtocolDeployment},
-    sdk::{self, Wallet},
+    rpc::{EthereumChain, HttpTransport},
+    sdk::Wallet,
 };
 use std::{env, fs, sync::Arc};
 #[allow(dead_code)]

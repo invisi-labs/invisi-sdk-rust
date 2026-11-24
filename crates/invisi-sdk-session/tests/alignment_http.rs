@@ -31,25 +31,30 @@ struct Server {
     join: Option<thread::JoinHandle<()>>,
 }
 fn source_hashes() -> Value {
+    // Workspace source identities are optional diagnostic metadata. Registry archives
+    // retain this test and its local fixtures without bundling sibling crate sources.
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let hash = |path: &str| {
+        std::fs::read(workspace.join(path))
+            .ok()
+            .map(|bytes| hex::encode(Sha256::digest(bytes)))
+    };
     #[allow(unused_mut)]
     let mut hashes = json!({
-        "src/sdk.rs":hex::encode(Sha256::digest(include_bytes!("../../../src/sdk.rs"))),
-        "src/sdk/prepared_broadcaster.rs":hex::encode(Sha256::digest(include_bytes!("../../../src/sdk/prepared_broadcaster.rs"))),
-        "src/sdk/preparation.rs":hex::encode(Sha256::digest(include_bytes!("../../../src/sdk/preparation.rs"))),
-        "src/sdk/journal.rs":hex::encode(Sha256::digest(include_bytes!("../../../src/sdk/journal.rs"))),
-        "rpc/client.rs":hex::encode(Sha256::digest(include_bytes!("../../invisi-sdk-rpc/src/rpc/client.rs"))),
-        "rpc/trusted_provider.rs":hex::encode(Sha256::digest(include_bytes!("../../invisi-sdk-rpc/src/rpc/trusted_provider.rs"))),
+        "src/sdk.rs":hash("src/sdk.rs"),
+        "src/sdk/prepared_broadcaster.rs":hash("src/sdk/prepared_broadcaster.rs"),
+        "src/sdk/preparation.rs":hash("src/sdk/preparation.rs"),
+        "src/sdk/journal.rs":hash("src/sdk/journal.rs"),
+        "rpc/client.rs":hash("crates/invisi-sdk-rpc/src/rpc/client.rs"),
+        "rpc/trusted_provider.rs":hash("crates/invisi-sdk-rpc/src/rpc/trusted_provider.rs"),
         "session/operation.rs":hex::encode(Sha256::digest(include_bytes!("../src/session/operation.rs"))),
         "driver":hex::encode(Sha256::digest(include_bytes!("alignment_http.rs")))
     });
     #[cfg(not(invisi_alignment_before))]
     {
-        hashes["src/sdk/initialized.rs"] = json!(hex::encode(Sha256::digest(include_bytes!(
-            "../../../src/sdk/initialized.rs"
-        ))));
-        hashes["src/sdk/initialized_broadcasters.rs"] = json!(hex::encode(Sha256::digest(
-            include_bytes!("../../../src/sdk/initialized_broadcasters.rs")
-        )));
+        hashes["src/sdk/initialized.rs"] = json!(hash("src/sdk/initialized.rs"));
+        hashes["src/sdk/initialized_broadcasters.rs"] =
+            json!(hash("src/sdk/initialized_broadcasters.rs"));
     }
     hashes
 }
@@ -373,8 +378,7 @@ fn ordinary_shield_http_alignment() {
         let cold = Instant::now();
         let server = Server::start(trace.clone(), fixture, now, delay, variant.into());
         let address: Value =
-            serde_json::from_str(include_str!("../../../tests/fixtures/current-address.json"))
-                .unwrap();
+            serde_json::from_str(include_str!("../testdata/current-address.json")).unwrap();
         let recipient = Wallet::from_address(address["longAddress"].as_str().unwrap()).unwrap();
         let wallet = Wallet::from_keys(owner(1), recipient.receiving_keys().clone()).unwrap();
         let cold_ms = cold.elapsed().as_secs_f64() * 1000.0;
@@ -673,8 +677,7 @@ fn managed_long_shield_journal_failure_loss_replay_and_status_are_frozen() {
         .unwrap();
         let pool = InitializedBroadcasters::configured(rpc, chain.clone(), token).unwrap();
         let address: Value =
-            serde_json::from_str(include_str!("../../../tests/fixtures/current-address.json"))
-                .unwrap();
+            serde_json::from_str(include_str!("../testdata/current-address.json")).unwrap();
         let recipient = Wallet::from_address(address["longAddress"].as_str().unwrap()).unwrap();
         let wallet = Wallet::from_keys(owner(1), recipient.receiving_keys().clone()).unwrap();
         let store = Arc::new(FailNextJournal::default());

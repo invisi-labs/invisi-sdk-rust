@@ -1,4 +1,9 @@
-//! Registered relay quotes bind canonical public calldata, deployment context and exact fees.
+#[path = "fee_lock.rs"]
+mod fee_lock;
+pub use fee_lock::{
+    fee_lock_digest, verify_fee_lock, FeeLock, SignedFeeLock, VerifiedFeeLock, FEE_LOCK_MODEL,
+};
+// Registered relay quotes bind canonical public calldata, deployment context and exact fees.
 use crate::protocol::{InvisiCore, ProtocolContract};
 use crate::rpc::{self, decimal, Error, HttpTransport, JsonRpc, Result, RpcTransport};
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
@@ -743,6 +748,15 @@ impl<T: RpcTransport> BroadcasterClient<T> {
         data: Option<&[u8]>,
         schedule: Option<&Schedule>,
     ) -> Result<Fee> {
+        self.fee_with_schedule_and_lock(token, data, schedule, None)
+    }
+    pub fn fee_with_schedule_and_lock(
+        &self,
+        token: Address,
+        data: Option<&[u8]>,
+        schedule: Option<&Schedule>,
+        lock: Option<&VerifiedFeeLock>,
+    ) -> Result<Fee> {
         if token == Address::ZERO {
             return Err(Error::Invalid("nonzero fee token required"));
         }
@@ -754,6 +768,14 @@ impl<T: RpcTransport> BroadcasterClient<T> {
         if let Some(schedule) = schedule {
             schedule.validate()?;
             params["schedule"] = json!(schedule);
+        }
+        if let Some(lock) = lock {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| Error::Invalid("invalid clock"))?
+                .as_secs();
+            lock.validate(data, self.configuration.fee_recipient, now)?;
+            params["feeLock"] = json!(lock.signed);
         }
         let fee: Fee = serde_json::from_value(
             self.rpc
@@ -802,6 +824,19 @@ impl<T: RpcTransport> BroadcasterClient<T> {
         sidecars: &[ProofSidecar],
         schedule: Option<&Schedule>,
     ) -> Result<VerifiedQuote> {
+        self.quote_with_schedule_and_lock(data, chain_id, protocol, now, sidecars, schedule, None)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn quote_with_schedule_and_lock(
+        &self,
+        data: &[u8],
+        chain_id: u64,
+        protocol: Address,
+        now: u64,
+        sidecars: &[ProofSidecar],
+        schedule: Option<&Schedule>,
+        lock: Option<&VerifiedFeeLock>,
+    ) -> Result<VerifiedQuote> {
         if let Some(schedule) = schedule {
             self.scheduling_capability()?.validate_schedule(
                 schedule,
@@ -822,6 +857,13 @@ impl<T: RpcTransport> BroadcasterClient<T> {
         if let Some(schedule) = schedule {
             params["schedule"] = json!(schedule);
         }
+        if let Some(lock) = lock {
+            if lock.trust.chain_id != chain_id || lock.trust.protocol != protocol {
+                return Err(Error::Invalid("fee lock context mismatch"));
+            }
+            lock.validate(data, self.configuration.fee_recipient, now)?;
+            params["feeLock"] = json!(lock.signed);
+        }
         let signed: SignedQuote =
             serde_json::from_value(self.rpc.call("broadcaster_getQuote", json!([params]))?)
                 .map_err(|_| Error::Invalid("invalid signed broadcaster quote"))?;
@@ -836,6 +878,14 @@ impl<T: RpcTransport> BroadcasterClient<T> {
         verify_quote_for_provenance(&signed, &trust, data, now, self.provenance_mode)?;
         if signed.quote.fee_recipient != self.configuration.fee_recipient {
             return Err(Error::Invalid("unregistered quote fee recipient"));
+        }
+        if let Some(lock) = lock {
+            if decimal(&json!(signed.quote.deadline))? > decimal(&json!(lock.signed.lock.deadline))?
+                || decimal(&json!(signed.quote.max_gas))?
+                    > decimal(&json!(lock.signed.lock.max_gas))?
+            {
+                return Err(Error::Invalid("quote exceeds fee lock bounds"));
+            }
         }
         Ok(VerifiedQuote { signed, trust })
     }

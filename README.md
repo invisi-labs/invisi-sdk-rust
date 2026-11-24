@@ -322,3 +322,10 @@ uint128 grant-ID release has not been remeasured.
 
 
 For Credit submission paths, a first transport attempt is known not to have been sent only when the structured Broadcaster RPC error matches both its numeric code and machine reason: `-32024/CREDIT_PERIOD_CHANGED`, `-32025/INSUFFICIENT_EXECUTION_SLACK`, or `-32026/CREDIT_PERIOD_ENDING`. Managed journals persist that local refusal state; detached callers retain their handle and own durable recovery storage. The refused handle blocks an unchanged SDK submission. Refresh or safely abandon the known-unsent operation, obtain a fresh quote, and authorize/prove a new statement. When rebuilding creation with an initial payment, preserve its originally selected grant ID; choosing a different ID creates a separate authorization. Ordinary transport failures, malformed or mismatched errors, and a refusal received after an earlier uncertain attempt retain the exact original request and reservations. A missing transaction hash alone never permits rebuilding.
+
+
+### Broadcaster preparation fee locks
+
+High-level ordinary Core and Credit quotation discovers the broadcaster fee-lock capability. A supporting service signs a short-lived tariff before fee preparation; every estimate and the final quote use that same tariff. Fee-induced input/change/funding/Permit changes still affect gas, while market price refreshes do not invalidate preparation. The fee stays within the caller's existing maximum. Fees and final quotes are frozen before authorization and proving.
+
+Services without the advertised capability keep the legacy quotation flow. An advertised but invalid, expired or unavailable lock fails explicitly instead of silently switching to live pricing. Locks apply to Core quotation, including supported scheduling/aggregation; Router quotation is unchanged. The final quote and persisted submission/recovery formats are unchanged, and a lock never extends transaction authorization deadlines or Credit usage periods. Preparing a quote is atomic: only the final quote needs to survive a successful preparation; a failed preparation acquires a new ticket on retry.

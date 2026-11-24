@@ -380,6 +380,44 @@ impl std::fmt::Display for BroadcasterSubmitError {
 impl std::error::Error for BroadcasterSubmitError {}
 
 pub trait PreparedBroadcaster: Send + Sync {
+    fn lock_fee(
+        &self,
+        _data: &[u8],
+        _chain_id: u64,
+        _protocol: Address,
+        _now: u64,
+    ) -> Result<Option<invisi_sdk_rpc::broadcaster::VerifiedFeeLock>> {
+        Ok(None)
+    }
+    fn locked_scheduled_fee(
+        &self,
+        token: Address,
+        data: Option<&[u8]>,
+        schedule: Option<&invisi_sdk_rpc::broadcaster::Schedule>,
+        lock: Option<&invisi_sdk_rpc::broadcaster::VerifiedFeeLock>,
+    ) -> Result<RelayFee> {
+        if lock.is_some() {
+            return Err("fee lock capability required".into());
+        }
+        self.scheduled_fee(token, data, schedule)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn locked_scheduled_quote(
+        &self,
+        data: &[u8],
+        chain_id: u64,
+        protocol: Address,
+        now: u64,
+        sidecars: &[ProofSidecar],
+        schedule: Option<&invisi_sdk_rpc::broadcaster::Schedule>,
+        lock: Option<&invisi_sdk_rpc::broadcaster::VerifiedFeeLock>,
+    ) -> Result<VerifiedQuote> {
+        if lock.is_some() {
+            return Err("fee lock capability required".into());
+        }
+        self.scheduled_quote(data, chain_id, protocol, now, sidecars, schedule)
+    }
+
     /// Override only when the transport retains authenticated structured RPC
     /// errors. The default treats every legacy String error as uncertain.
     fn submit_classified(
@@ -456,6 +494,39 @@ pub trait PreparedBroadcaster: Send + Sync {
     ) -> Result<RelayStatus>;
 }
 impl<T: RpcTransport + Send + Sync> PreparedBroadcaster for BroadcasterClient<T> {
+    fn lock_fee(
+        &self,
+        data: &[u8],
+        chain_id: u64,
+        protocol: Address,
+        now: u64,
+    ) -> Result<Option<invisi_sdk_rpc::broadcaster::VerifiedFeeLock>> {
+        BroadcasterClient::lock_fee(self, data, chain_id, protocol, now).map_err(|e| e.to_string())
+    }
+    fn locked_scheduled_fee(
+        &self,
+        token: Address,
+        data: Option<&[u8]>,
+        schedule: Option<&invisi_sdk_rpc::broadcaster::Schedule>,
+        lock: Option<&invisi_sdk_rpc::broadcaster::VerifiedFeeLock>,
+    ) -> Result<RelayFee> {
+        self.fee_with_schedule_and_lock(token, data, schedule, lock)
+            .map_err(|e| e.to_string())
+    }
+    fn locked_scheduled_quote(
+        &self,
+        data: &[u8],
+        chain_id: u64,
+        protocol: Address,
+        now: u64,
+        sidecars: &[ProofSidecar],
+        schedule: Option<&invisi_sdk_rpc::broadcaster::Schedule>,
+        lock: Option<&invisi_sdk_rpc::broadcaster::VerifiedFeeLock>,
+    ) -> Result<VerifiedQuote> {
+        self.quote_with_schedule_and_lock(data, chain_id, protocol, now, sidecars, schedule, lock)
+            .map_err(|e| e.to_string())
+    }
+
     fn submit_classified(
         &self,
         data: &[u8],
@@ -535,6 +606,46 @@ impl<T: RpcTransport + Send + Sync> PreparedBroadcaster for BroadcasterClient<T>
 impl<T: RpcTransport + Send + Sync + 'static> PreparedBroadcaster
     for crate::broadcaster::BroadcasterClient<T>
 {
+    fn lock_fee(
+        &self,
+        data: &[u8],
+        chain_id: u64,
+        protocol: Address,
+        now: u64,
+    ) -> Result<Option<invisi_sdk_rpc::broadcaster::VerifiedFeeLock>> {
+        PreparedBroadcaster::lock_fee(self.rpc(), data, chain_id, protocol, now)
+    }
+    fn locked_scheduled_fee(
+        &self,
+        token: Address,
+        data: Option<&[u8]>,
+        schedule: Option<&invisi_sdk_rpc::broadcaster::Schedule>,
+        lock: Option<&invisi_sdk_rpc::broadcaster::VerifiedFeeLock>,
+    ) -> Result<RelayFee> {
+        PreparedBroadcaster::locked_scheduled_fee(self.rpc(), token, data, schedule, lock)
+    }
+    fn locked_scheduled_quote(
+        &self,
+        data: &[u8],
+        chain_id: u64,
+        protocol: Address,
+        now: u64,
+        sidecars: &[ProofSidecar],
+        schedule: Option<&invisi_sdk_rpc::broadcaster::Schedule>,
+        lock: Option<&invisi_sdk_rpc::broadcaster::VerifiedFeeLock>,
+    ) -> Result<VerifiedQuote> {
+        PreparedBroadcaster::locked_scheduled_quote(
+            self.rpc(),
+            data,
+            chain_id,
+            protocol,
+            now,
+            sidecars,
+            schedule,
+            lock,
+        )
+    }
+
     fn submit_classified(
         &self,
         data: &[u8],
@@ -768,10 +879,22 @@ impl PreparedTransaction {
         if let Some(schedule) = &schedule {
             schedule.validate().map_err(|e| e.to_string())?;
         }
-        let mut fee = relay.scheduled_fee(
+        let initial = self.broadcaster_intent()?.data;
+        let clock = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_secs();
+        let fee_lock = relay.lock_fee(
+            &initial,
+            self.context.chain_id,
+            word_address(self.context.protocol_address)?,
+            clock,
+        )?;
+        let mut fee = relay.locked_scheduled_fee(
             self.token,
             Some(&self.broadcaster_intent()?.data),
             schedule.as_ref(),
+            fee_lock.as_ref(),
         )?;
         let mut final_candidate = None;
         for _round in 0..options.max_attempts {
@@ -890,7 +1013,12 @@ impl PreparedTransaction {
                 candidate = candidate.with_funding_terms(chain.as_ref(), deadline.to::<u64>())?;
             }
             let data = candidate.broadcaster_intent()?.data;
-            let next = relay.scheduled_fee(self.token, Some(&data), schedule.as_ref())?;
+            let next = relay.locked_scheduled_fee(
+                self.token,
+                Some(&data),
+                schedule.as_ref(),
+                fee_lock.as_ref(),
+            )?;
             let next_amount = decimal(&json!(next.fee_amount))?;
             if next.fee_recipient != config.fee_recipient
                 || next_amount == U256::ZERO
@@ -920,13 +1048,14 @@ impl PreparedTransaction {
         let data = candidate.broadcaster_intent()?.data;
         let sidecars = Vec::new();
         let block = chain.snapshot()?;
-        let quote = relay.scheduled_quote(
+        let quote = relay.locked_scheduled_quote(
             &data,
             candidate.context.chain_id,
             word_address(candidate.context.protocol_address)?,
             chain.construction_timestamp(&block),
             &sidecars,
             schedule.as_ref(),
+            fee_lock.as_ref(),
         )?;
         if quote.signed().quote.schedule.as_ref() != schedule.as_ref() {
             return Err("broadcaster quote schedule mismatch".into());
@@ -1938,6 +2067,9 @@ mod tests {
                 quotes: 0.into(),
             };
             let result = match request["method"].as_str().unwrap() {
+                "broadcaster_getStatus" => {
+                    json!({"apiVersion":"v1","protocolVersion":"1","chainId":self.context.chain_id.to_string(),"protocol":word_address(self.context.protocol_address).unwrap(),"sender":relay.configuration().quote_signer,"feeRecipient":relay.configuration().fee_recipient,"submissionHalted":false})
+                }
                 "broadcaster_estimateQuote" => json!(RelayFee {
                     fee_recipient: relay.configuration().fee_recipient,
                     fee_amount: self.fee.to_string(),

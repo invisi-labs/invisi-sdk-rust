@@ -12,6 +12,21 @@ use invisi_sdk_session::session::{
 use std::{env, fs, sync::Arc};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let operation_id = env::var_os("OPERATION_ID")
+        .map(|id| {
+            id.into_string()
+                .map_err(|_| "OPERATION_ID must be valid UTF-8")
+        })
+        .transpose()?;
+    let recover_submit_id = std::env::args().any(|arg| arg == "--recover-submit-id");
+    if recover_submit_id && operation_id.is_none() {
+        return Err("--recover-submit-id requires the original OPERATION_ID".into());
+    }
+    if !std::env::args().any(|arg| arg == "--execute") {
+        println!("Pass --execute after configuring the environment described in examples/README.md. No network, files or keys were opened.");
+        return Ok(());
+    }
+
     let deployment: ProtocolDeployment =
         serde_json::from_slice(&fs::read(env::var("DEPLOYMENT_JSON")?)?)?;
     let from_block = deployment.protocol.from_block;
@@ -34,6 +49,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let records = Arc::new(SQLiteRecords::open(env::var("WALLET_DB")?)?);
     let store = Arc::new(EncryptedWalletStore::new(records, storage_key)?);
 
+    if let Some(id) = operation_id {
+        // Recovery needs only the saved cancellation capability, never a signer or prover.
+        let session = WalletSession::connect(
+            Invisi::new(chain.clone()),
+            wallet,
+            store,
+            source,
+            "scheduled-broadcaster",
+        )?;
+        let state = session.snapshot()?;
+        let record = state.operations.get(&id).ok_or("operation not found")?;
+        if record.kind != "transfer" || record.broadcaster_id.is_none() {
+            return Err("OPERATION_ID is not a saved Broadcaster transfer".into());
+        }
+        let relay = BroadcasterClient::connect(
+            invisi_sdk_examples::saved_broadcaster_configuration(&session, &id)?,
+        )?;
+        invisi_sdk_examples::cancel_saved_operation(
+            &session,
+            chain.as_ref(),
+            &relay,
+            &id,
+            recover_submit_id,
+        )?;
+        println!("Cancellation acknowledged and canonical input state reconciled.");
+        return Ok(());
+    }
+
+    let relay = Arc::new(BroadcasterClient::connect(Configuration {
+        endpoint: env::var("BROADCASTER_ENDPOINT")?,
+        quote_signer: env::var("BROADCASTER_QUOTE_SIGNER")?.parse()?,
+        fee_recipient: env::var("BROADCASTER_FEE_RECIPIENT")?.parse()?,
+    })?);
     let prover = Arc::new(invisi_sdk::prover::NativeProver {
         bb_binary: env::var("BB_BINARY")?.into(),
         timeout: std::time::Duration::from_secs(600),
@@ -52,11 +100,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))?;
     }
     let session = WalletSession::connect(invisi, wallet, store, source, "scheduled-broadcaster")?;
-    let relay = Arc::new(BroadcasterClient::connect(Configuration {
-        endpoint: env::var("BROADCASTER_ENDPOINT")?,
-        quote_signer: env::var("BROADCASTER_QUOTE_SIGNER")?.parse()?,
-        fee_recipient: env::var("BROADCASTER_FEE_RECIPIENT")?.parse()?,
-    })?);
     let token: Address = env::var("TOKEN_ADDRESS")?.parse()?;
     if !relay.supports_token(
         token,
@@ -104,6 +147,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         deadline: env::var("DEADLINE")?.parse()?,
         automatic_change: true,
     })?;
+    let operation_id = operation.id().to_owned();
+    println!("Saved operation: {operation_id}");
     // Quotation persists the scoped cancellation capability in the encrypted journal before submission.
     relay.quote(
         &mut operation,
@@ -117,8 +162,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..Default::default()
         },
     )?;
-    let operation_id = operation.id().to_owned();
-    println!("Saved operation: {operation_id}");
     let authorization = operation.export_wallet_authorization()?;
     let signature = invisi_sdk_examples::sign_authorization(&authorization)?;
     operation = operation
@@ -129,11 +172,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Submission state: {:?}", submitted.state);
     // Resume uses the local operation ID; remote status uses the ID returned by the Broadcaster.
     let mut recovered = session.resume(&operation_id, Some(prover.as_ref()))?;
-    let observed = relay.status(&submitted.id)?;
-    println!(
-        "Recovered relay status: id={} state={:?}",
-        observed.id, observed.state
-    );
     let cancelled = relay.cancel(&mut recovered)?;
     if cancelled.state != StatusState::Cancelled || cancelled.transaction_hash.is_some() {
         return Err(

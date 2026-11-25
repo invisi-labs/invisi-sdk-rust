@@ -1,7 +1,6 @@
 //! Recover an encrypted payment journal and retained openings, then publish its Source proof.
 mod support;
-use invisi_sdk::sdk::{self, ChainState};
-use invisi_sdk_session::session::Reconciliation;
+use invisi_sdk::sdk;
 use std::{
     env,
     time::{Duration, Instant},
@@ -10,41 +9,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let support::SessionRuntime {
         chain,
         session,
-        prover,
+        source,
         ..
     } = support::session_runtime()?;
     let id = env::var("OPERATION_ID")?;
     let timeout = support::confirmation_timeout()?;
-    let state = session.snapshot()?;
-    let record = state.operations.get(&id).ok_or("operation not found")?;
-    if record.status.terminal() {
-        chain.canonical(
-            record
-                .resolved_at
-                .as_ref()
-                .ok_or("completed payment lacks canonical resolution")?,
-        )?;
-    } else {
-        let mut operation = session.resume(&id, Some(prover.as_ref()))?;
-        // Supply only the original sent hash when a crash prevented the host from recording it.
-        if let Ok(hash) = env::var("HOST_TRANSACTION_HASH") {
-            operation.track_transaction(hash.parse()?)?;
-        }
-        let until = Instant::now() + timeout;
-        loop {
-            match session.reconcile(&id)? {
-                Reconciliation::Ready(pending) => {
-                    pending.decrypt(&invisi_sdk_examples::AppDecryptor)?;
-                    break;
+    let host_hash = env::var("HOST_TRANSACTION_HASH").ok();
+    let until = Instant::now() + timeout;
+    loop {
+        match invisi_sdk_examples::recover_sent_operation(
+            &session,
+            chain.as_ref(),
+            source.as_ref(),
+            &id,
+            Some("transfer"),
+            host_hash.as_deref(),
+        )? {
+            Some(invisi_sdk_examples::Recovery::Confirmed(_)) => break,
+            Some(invisi_sdk_examples::Recovery::Pending) => {
+                if Instant::now() >= until {
+                    return Err(
+                        "canonical reconciliation timed out; retain the saved operation".into(),
+                    );
                 }
-                Reconciliation::Pending => {
-                    if Instant::now() >= until {
-                        return Err(
-                            "canonical reconciliation timed out; retain the saved operation".into(),
-                        );
-                    }
-                    std::thread::sleep(Duration::from_secs(2));
-                }
+                std::thread::sleep(Duration::from_secs(2));
+            }
+            None => {
+                return Err(
+                    "saved operation has no sent transaction; recovery never submits a replacement"
+                        .into(),
+                )
             }
         }
     }

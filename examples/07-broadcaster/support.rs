@@ -77,6 +77,8 @@ pub fn source_configuration(
 pub struct SessionRuntime {
     pub chain: Arc<sdk::RpcChainState<EthereumChain<HttpTransport>>>,
     pub session: invisi_sdk_session::session::WalletSession,
+    pub source:
+        Arc<invisi_sdk::rpc::ProtocolRpcClient<HttpTransport, EthereumChain<HttpTransport>>>,
     pub prover: Arc<invisi_sdk::prover::NativeProver>,
     pub from_block: u64,
 }
@@ -122,10 +124,11 @@ pub fn session_runtime() -> Result<SessionRuntime, Box<dyn std::error::Error>> {
         storage_key,
     )?);
     let wallet = Wallet::from_address(&env::var("WALLET_ADDRESS")?)?;
-    let session = WalletSession::connect(invisi, wallet, store, source, "source-examples")?;
+    let session = WalletSession::connect(invisi, wallet, store, source.clone(), "source-examples")?;
     Ok(SessionRuntime {
         chain,
         session,
+        source,
         prover,
         from_block,
     })

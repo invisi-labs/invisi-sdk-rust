@@ -786,3 +786,8 @@ mod receipt_range_tests {
         }
     }
 }
+
+mod recovery;
+pub use recovery::{
+    cancel_saved_operation, recover_sent_operation, saved_broadcaster_configuration, Recovery,
+};

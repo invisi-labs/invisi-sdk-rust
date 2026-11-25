@@ -36,7 +36,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|_| "storage key must contain 32 raw bytes")?;
     let records = Arc::new(SQLiteRecords::open(env::var("WALLET_DB")?)?);
     let store = Arc::new(EncryptedWalletStore::new(records, storage_key)?);
-    let session = WalletSession::connect(invisi, wallet, store, source, "examples")?;
+    let session = WalletSession::connect(invisi, wallet, store, source.clone(), "examples")?;
+
+    let host_hash = env::var("HOST_TRANSACTION_HASH").ok();
+    if let Ok(id) = env::var("OPERATION_ID") {
+        if let Some(recovery) = invisi_sdk_examples::recover_sent_operation(
+            &session,
+            chain.as_ref(),
+            source.as_ref(),
+            &id,
+            Some("create-credit"),
+            host_hash.as_deref(),
+        )? {
+            match recovery {
+                invisi_sdk_examples::Recovery::Pending => {
+                    println!("Transaction is not yet canonically available.")
+                }
+                invisi_sdk_examples::Recovery::Confirmed(block) => println!(
+                    "Reconciliation applied at canonical block {}.",
+                    block.number
+                ),
+            }
+            return Ok(());
+        }
+    } else if host_hash.is_some() {
+        return Err("HOST_TRANSACTION_HASH requires the original OPERATION_ID".into());
+    }
 
     let prover = invisi_sdk::prover::NativeProver {
         bb_binary: env::var("BB_BINARY")?.into(),
@@ -109,26 +134,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Operation ID: {}", operation.id());
     let mut operation = operation;
-
-    // A host hash enters recovery before any attempt to export a fresh transaction.
-    if let Ok(hash) = env::var("HOST_TRANSACTION_HASH") {
-        // The host has already signed and submitted this exact unsigned transaction.
-        operation.track_transaction(hash.parse()?)?;
-        match session.reconcile(operation.id())? {
-            invisi_sdk_session::session::Reconciliation::Pending => {
-                println!("Transaction is not yet canonically available.")
-            }
-            invisi_sdk_session::session::Reconciliation::Ready(pending) => {
-                let applied = pending.decrypt(&invisi_sdk_examples::AppDecryptor)?;
-
-                println!(
-                    "Reconciliation applied at canonical block {}.",
-                    applied.block.number
-                );
-            }
-        }
-        return Ok(());
-    }
 
     // Restored verified proofs can skip approval and proving.
     if matches!(

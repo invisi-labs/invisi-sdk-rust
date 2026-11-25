@@ -69,3 +69,30 @@ fn owner_revocation_main_exports_without_a_private_circuit_ready_transition() {
         "an unsent revocation is not confirmed"
     );
 }
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn source_pre_submit_refuses_a_saved_id_before_opening_a_new_payment() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_pre-submit-provenance"))
+        .env_clear()
+        .env("OPERATION_ID", "the-original-saved-intent")
+        .output()
+        .expect("run official Source entry point");
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("recover-and-submit-provenance"), "{error}");
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn scheduled_replay_flag_requires_a_saved_id_before_opening_configuration() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_scheduled-broadcaster"))
+        .arg("--execute")
+        .arg("--recover-submit-id")
+        .env_clear()
+        .output()
+        .expect("run official scheduled entry point");
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("OPERATION_ID"), "{error}");
+}

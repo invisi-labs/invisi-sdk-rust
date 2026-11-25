@@ -9,11 +9,16 @@ use std::{
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if env::var_os("OPERATION_ID").is_some() || env::var_os("HOST_TRANSACTION_HASH").is_some() {
+        return Err("saved payments must use recover-and-submit-provenance with their original OPERATION_ID; do not prepare a replacement".into());
+    }
+
     let support::SessionRuntime {
         chain,
         session,
         prover,
         from_block,
+        ..
     } = support::session_runtime()?;
     let mut refresh = RefreshOptions::from_block(
         env::var("FROM_BLOCK")

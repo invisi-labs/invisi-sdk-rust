@@ -180,7 +180,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "broadcast status timed out; preserve the submitted operation for recovery".into(),
             );
         }
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        std::thread::sleep(std::time::Duration::from_secs(2));
         status = relay.status(&status.id)?;
     };
     let until = std::time::Instant::now() + limit;
@@ -194,7 +194,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if std::time::Instant::now() >= until {
             return Err("native finality wait timed out; do not resend the transaction".into());
         }
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        std::thread::sleep(std::time::Duration::from_secs(2));
     }
     let independent = EthereumChain::new(HttpTransport::new(&env::var("ETH_RPC_URL")?)?);
     let receipt = invisi_sdk::rpc::ChainReceipts::receipt(&independent, transaction)?
@@ -218,7 +218,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let tracking = invisi_sdk::provenance_tracking::tracking_from_result(&accepted, None)?;
         let result =
-            source.wait_tracking(&tracking.id, std::time::Duration::from_millis(500), limit)?;
+            source.wait_tracking(&tracking.id, std::time::Duration::from_secs(2), limit)?;
         println!("Source tracking after native finality: {result}");
     }
     Ok(())

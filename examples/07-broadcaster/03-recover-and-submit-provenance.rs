@@ -43,7 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "canonical reconciliation timed out; retain the saved operation".into(),
                         );
                     }
-                    std::thread::sleep(Duration::from_millis(500));
+                    std::thread::sleep(Duration::from_secs(2));
                 }
             }
         }
@@ -60,7 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tracking = invisi_sdk::provenance_tracking::tracking_from_result(&accepted, None)?;
     println!("Operation digest: {}", packet.operation_digest);
     println!("Source submission: {accepted}; tracking: {}", tracking.id);
-    let recognition = source.wait_tracking(&tracking.id, Duration::from_millis(500), timeout)?;
+    let recognition = source.wait_tracking(&tracking.id, Duration::from_secs(2), timeout)?;
     println!("Source recognition: {recognition}");
     Ok(())
 }

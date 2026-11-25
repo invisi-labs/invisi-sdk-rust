@@ -77,7 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .into(),
             );
         }
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(Duration::from_secs(2));
     }
     match session.reconcile(operation.id())? {
         invisi_sdk_session::session::Reconciliation::Ready(pending) => {
@@ -92,7 +92,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         return Err("canonical payment execution did not succeed".into());
     }
-    let recognition = source.wait_tracking(&tracking.id, Duration::from_millis(500), timeout)?;
+    let recognition = source.wait_tracking(&tracking.id, Duration::from_secs(2), timeout)?;
     println!("Source recognition after native finality: {recognition}");
     Ok(())
 }

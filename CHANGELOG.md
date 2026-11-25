@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.6
+
+- Recover frozen submitted intents before examples resume sends or export state, preserving public Credit revocations and refreshing signed relay quotes after proving. Bounded receipt windows retain durable recovery when chain confirmation is delayed.
+- Poll Broadcaster and Source tracking at two-second intervals, make offline Note and V3 quote deployments configurable, and document the blocking bridge required by live Router hosts. Live recovery regression hosts keep owner signing keys outside persisted state.
+- Align all nine public crates, exact sibling dependencies, lockfile, current README examples and release tooling at 1.3.6. The private examples remain 0.1.0; C ABI, fee-lock model identities and proving-resource pins are unchanged.
+
 ## 1.3.5
 
 - Derive receiving capabilities from the fixed EIP-191 v1 message, normalize equivalent Ethereum/EIP-2098 signatures, verify the account identity, and share deterministic cross-language address, viewing and detection vectors. Public payment wallets retain only receiving material.

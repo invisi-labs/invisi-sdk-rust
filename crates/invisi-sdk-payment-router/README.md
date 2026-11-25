@@ -1,11 +1,11 @@
 # Invisi Payment Router
 
-**Canonical API in 1.3.4.** The
+**Canonical API in 1.3.6.** The
 canonical unversioned `PaymentRouter` and `PaymentRouterAccount` bindings for Periphery `ffd81f4`, with direct native/ERC20, signed ERC20 relay and EIP-7702 sponsored native payments. The optional crate composes detached Core proof preparation with Router intent signing, validated V3/0x routes, complete outer-call simulation and Broadcaster envelope submission. Wallet signatures remain host-provided.
 
 ```toml
 [dependencies]
-invisi-sdk-payment-router = "=1.3.4"
+invisi-sdk-payment-router = "=1.3.6"
 ```
 
 The core SDK does not depend on this crate. Applications explicitly opt in and provide a trusted deployment, an async Ethereum provider and their existing SDK/wallet capabilities. Alloy `Address`, `U256` and `B256` types enforce address and integer representations. Chain IDs and deadlines are `u64`; amounts are checked against their protocol bounds.

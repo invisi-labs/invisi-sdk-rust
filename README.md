@@ -10,10 +10,10 @@ Contract bindings follow the current `invisi-core` compiler artifacts: `InvisiCo
 
 ## Release validation
 
-The public crates share version **1.3.4**. See [local release validation](RELEASE.md)
+The public crates share version **1.3.6**. See [local release validation](RELEASE.md)
 for packaging checks and the required publication order.
 
-Version 1.3.4 exposes six common modules, the independent IPP crate, the separate native FFI adapter and the optional Payment Router crate.
+Version 1.3.6 exposes six common modules, the independent IPP crate, the separate native FFI adapter and the optional Payment Router crate.
 Replace `invisi-sdk-core` dependencies/imports with `invisi-sdk-primitives`.
 Use `invisi_sdk::sdk` for stateless operations and `invisi_sdk_session::session`
 for managed wallets; enable `sqlite` on `invisi-sdk-session` when needed.
@@ -283,7 +283,7 @@ The default Core and Provenance catalogs are published at the authenticated publ
 
 ### Optional Payment Router
 
-**Available in 1.3.4:**
+**Available in 1.3.6:**
 `invisi-sdk-payment-router` supports the canonical unversioned `PaymentRouter` and
 `PaymentRouterAccount`: self-submitted native/ERC20, signed ERC20 relay, and EIP-7702
 sponsored native. Native or arbitrary ERC20 inputs support V3 and built-in 0x

@@ -1,15 +1,15 @@
-# Rust SDK 1.3.5 local release validation
+# Rust SDK 1.3.6 local release validation
 
-All nine public crates use version `1.3.5`. Workspace sibling dependencies carry both
-the development path and exact registry version `=1.3.5`. The examples package remains private at `0.1.0` and consumes SDK
-`1.3.5`. This release does not change the C ABI version.
+All nine public crates use version `1.3.6`. Workspace sibling dependencies carry both
+the development path and exact registry version `=1.3.6`. The examples package remains private at `0.1.0` and consumes SDK
+`1.3.6`. This release does not change the C ABI version.
 
 Run from the repository root with Rust/Cargo and Python 3.12 or newer:
 
 ```sh
 python3 scripts/check-boundaries.py
 cargo test --locked --workspace --all-features
-python3 scripts/check-release.py --work-dir /tmp/invisi-rust-release-1.3.5
+python3 scripts/check-release.py --work-dir /tmp/invisi-rust-release-1.3.6
 ```
 
 The release check vendors locked third-party dependencies into its temporary working
@@ -53,7 +53,7 @@ order and wait for each preceding registry version to become available.
 
 ## Publish from GitHub Actions
 
-The nine packages retain the `invisi-sdk` names and version `1.3.5`.
+The nine packages retain the `invisi-sdk` names and version `1.3.6`.
 Publishing runs in [Release Rust SDK](https://github.com/invisi-labs/invisi-sdk-rust/actions/workflows/release.yml)
 on a pushed `vMAJOR.MINOR.PATCH` tag, or a manual dispatch naming an existing tag.
 If GitHub has not registered a newly added release workflow yet, manually dispatch
@@ -69,7 +69,7 @@ registered crates. Never put the token in source, workflow inputs, logs, or chat
 No local `cargo login` or local `cargo publish` is required. The workflow checks
 for the secret before expensive validation.
 
-Push the approved release commit and its `v1.3.5` tag only after review. A workflow
+Push the approved release commit and its `v1.3.6` tag only after review. A workflow
 dispatch can retry the same existing tag after an interrupted run; it must not
 move the tag or change its source to bypass a registry conflict. Rust intentionally
 skipped 1.2.1; the 1.2.2 changelog records capabilities added since 1.2.0.

@@ -25,7 +25,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         address(6)?,
         vec![V3Route {
             tokens: vec![deployment.weth_address, address(7)?],
-            fees: vec![3000],
+            fees: vec![v3_fee()?],
         }],
     )?;
     let client = PaymentRouterClient::new(deployment, provider)?;
@@ -47,4 +47,32 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         quote.amount_out, quote.estimated_input, quote.max_input, quote.deadline
     );
     Ok(())
+}
+
+fn v3_fee() -> std::result::Result<u32, Box<dyn std::error::Error>> {
+    let fee = std::env::var("V3_FEE")
+        .unwrap_or_else(|_| "3000".into())
+        .parse::<u32>()?;
+    if fee == 0 || fee >= (1 << 24) {
+        return Err("V3_FEE must be a positive uint24 pool fee".into());
+    }
+    Ok(fee)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn explicit_v3_fee_is_used_and_validated() {
+        let old = std::env::var_os("V3_FEE");
+        std::env::set_var("V3_FEE", "500");
+        let configured = super::v3_fee();
+        std::env::set_var("V3_FEE", "16777216");
+        let oversized = super::v3_fee();
+        match old {
+            Some(value) => std::env::set_var("V3_FEE", value),
+            None => std::env::remove_var("V3_FEE"),
+        }
+        assert_eq!(configured.unwrap(), 500);
+        assert!(oversized.is_err(), "pool fee must fit uint24");
+    }
 }

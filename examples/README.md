@@ -10,7 +10,7 @@ cargo run -p invisi-sdk-examples --bin transfer -- --execute
 cargo run -p invisi-sdk-examples --features sqlite --bin restore-session -- --execute
 ```
 
-`note-output` constructs an encrypted Note offline using public receiving material only. Examples 01–06 and the Broadcaster submit/cancel examples require `--execute` before opening their configuration. Source examples `pre-submit-provenance` and `recover-and-submit-provenance` run their configured normal flow directly with `--features sqlite`. Examples 01–06 export unsigned EVM transactions for the application to review, sign and submit. Broadcaster and independent Source proof flows live in `07-broadcaster`.
+`note-output` constructs an encrypted Note offline using public receiving material only. Set `RECIPIENT_ADDRESS`, `TOKEN_ADDRESS`, `CHAIN_ID` and `PROTOCOL_ADDRESS` to construct it for your deployment; unset values retain the offline public fixtures. Explicit malformed values fail validation. Examples 01–06 and the Broadcaster submit/cancel examples require `--execute` before opening their configuration. Source examples `pre-submit-provenance` and `recover-and-submit-provenance` run their configured normal flow directly with `--features sqlite`. Examples 01–06 export unsigned EVM transactions for the application to review, sign and submit. Broadcaster and independent Source proof flows live in `07-broadcaster`.
 
 ## Files
 

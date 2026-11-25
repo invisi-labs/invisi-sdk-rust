@@ -15,6 +15,8 @@ fn confirmed_host_recovery_reconciles_without_exporting_a_new_transaction() {
     let output = std::process::Command::new(executable)
         .arg("--execute")
         .envs(environment)
+        .env_remove("OWNER_PRIVATE_KEY")
+        .env_remove("OWNER_KEY_FILE")
         .output()
         .expect("run official recovery example");
     assert!(

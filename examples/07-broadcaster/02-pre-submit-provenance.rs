@@ -23,8 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or(from_block),
     );
     refresh.to_block = env::var("TO_BLOCK").ok().map(|s| s.parse()).transpose()?;
-    session
-        .refresh(refresh)?
+    invisi_sdk_examples::refresh_receipt_ranges(&session, refresh)?
         .decrypt(&invisi_sdk_examples::AppDecryptor)?;
     let recipient = Wallet::from_address(&env::var("RECIPIENT_ADDRESS")?)?;
     let token: Address = env::var("TOKEN_ADDRESS")?.parse()?;

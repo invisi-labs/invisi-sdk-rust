@@ -44,7 +44,7 @@ pub fn discover(
     )?;
     let mut options = RefreshOptions::from_block(from_block);
     options.to_block = to_block;
-    let pending = session.refresh(options)?;
+    let pending = refresh_receipt_ranges(&session, options)?;
     Ok((session, pending))
 }
 
@@ -700,5 +700,89 @@ mod viewing_decryptor_tests {
                 .unwrap(),
             invisi_sdk::delivery::DecryptionOutcome::AuthenticationFailed
         ));
+    }
+}
+
+/// Optional host receipt windows avoid claiming or scanning unrequested history.
+/// Every window still uses the SDK's ordinary canonical refresh and strict decryption.
+pub fn refresh_receipt_ranges(
+    session: &WalletSession,
+    options: RefreshOptions,
+) -> Result<PendingWalletRefresh> {
+    let path = match std::env::var("RECEIPT_RANGES_JSON") {
+        Ok(path) => path,
+        Err(std::env::VarError::NotPresent) => return session.refresh(options),
+        Err(error) => return Err(error.to_string()),
+    };
+    let ranges = receipt_ranges(&std::fs::read(path).map_err(|error| error.to_string())?)?;
+    let count = ranges.len();
+    for (index, (from_block, to_block)) in ranges.into_iter().enumerate() {
+        let mut bounded = options.clone();
+        bounded.from_block = from_block;
+        bounded.to_block = Some(to_block);
+        bounded.reset = options.reset && index == 0;
+        let pending = session.refresh(bounded)?;
+        if index + 1 == count {
+            return Ok(pending);
+        }
+        pending.decrypt(&AppDecryptor)?;
+    }
+    Err("at least one receipt range is required".into())
+}
+
+fn receipt_ranges(bytes: &[u8]) -> Result<Vec<(u64, u64)>> {
+    let values: Vec<serde_json::Value> =
+        serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+    if values.is_empty() || values.len() > 64 {
+        return Err("receipt ranges must contain between one and 64 windows".into());
+    }
+    let mut ranges = Vec::with_capacity(values.len());
+    let mut previous = None;
+    for value in values {
+        let object = value.as_object().ok_or("receipt range must be an object")?;
+        if object.len() != 2 {
+            return Err("receipt range accepts only fromBlock and toBlock".into());
+        }
+        let from = value["fromBlock"]
+            .as_u64()
+            .ok_or("receipt range fromBlock must be an integer")?;
+        let to = value["toBlock"]
+            .as_u64()
+            .ok_or("receipt range toBlock must be an integer")?;
+        if from == 0
+            || to < from
+            || to > 9_007_199_254_740_991
+            || to - from >= 256
+            || previous.is_some_and(|end| from <= end)
+        {
+            return Err("receipt windows must be ordered, disjoint, and at most 256 blocks".into());
+        }
+        previous = Some(to);
+        ranges.push((from, to));
+    }
+    Ok(ranges)
+}
+
+#[cfg(test)]
+mod receipt_range_tests {
+    #[test]
+    fn sparse_receipt_ranges_are_explicit_bounded_and_ordered() {
+        assert_eq!(
+            super::receipt_ranges(
+                br#"[{"fromBlock":100,"toBlock":100},{"fromBlock":900,"toBlock":901}]"#
+            )
+            .unwrap(),
+            vec![(100, 100), (900, 901)]
+        );
+        for malformed in [
+            r#"[]"#,
+            r#"[{"fromBlock":100,"toBlock":99}]"#,
+            r#"[{"fromBlock":100,"toBlock":356}]"#,
+            r#"[{"fromBlock":100,"toBlock":101},{"fromBlock":101,"toBlock":102}]"#,
+            r#"[{"fromBlock":9007199254740992,"toBlock":9007199254740992}]"#,
+            r#"[{"fromBlock":100,"toBlock":100,"skipCanonical":true}]"#,
+        ] {
+            assert!(super::receipt_ranges(malformed.as_bytes()).is_err());
+        }
     }
 }

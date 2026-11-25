@@ -62,7 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or(from_block),
         );
         options.to_block = env::var("TO_BLOCK").ok().map(|s| s.parse()).transpose()?;
-        let pending = session.refresh(options)?;
+        let pending = invisi_sdk_examples::refresh_receipt_ranges(&session, options)?;
         pending.decrypt(&invisi_sdk_examples::AppDecryptor)?;
     }
 
@@ -123,6 +123,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Operation ID: {}", operation.id());
     let mut operation = operation;
 
+    // A host hash enters recovery before any attempt to export a fresh transaction.
+    if let Ok(hash) = env::var("HOST_TRANSACTION_HASH") {
+        // The host has already signed and submitted this exact unsigned transaction.
+        operation.track_transaction(hash.parse()?)?;
+        match session.reconcile(operation.id())? {
+            invisi_sdk_session::session::Reconciliation::Pending => {
+                println!("Transaction is not yet canonically available.")
+            }
+            invisi_sdk_session::session::Reconciliation::Ready(pending) => {
+                let applied = pending.decrypt(&invisi_sdk_examples::AppDecryptor)?;
+
+                println!(
+                    "Reconciliation applied at canonical block {}.",
+                    applied.block.number
+                );
+            }
+        }
+        return Ok(());
+    }
+
     // Restored verified proofs can skip approval and proving.
     if matches!(
         operation.phase(),
@@ -148,22 +168,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }))?
     );
 
-    if let Ok(hash) = env::var("HOST_TRANSACTION_HASH") {
-        // The host has already signed and submitted this exact unsigned transaction.
-        operation.track_transaction(hash.parse()?)?;
-        match session.reconcile(operation.id())? {
-            invisi_sdk_session::session::Reconciliation::Pending => {
-                println!("Transaction is not yet canonically available.")
-            }
-            invisi_sdk_session::session::Reconciliation::Ready(pending) => {
-                let applied = pending.decrypt(&invisi_sdk_examples::AppDecryptor)?;
-
-                println!(
-                    "Reconciliation applied at canonical block {}.",
-                    applied.block.number
-                );
-            }
-        }
-    }
     Ok(())
 }

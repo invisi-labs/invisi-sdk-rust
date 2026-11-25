@@ -88,8 +88,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .map(|value| value.parse())
         .transpose()?;
-    session
-        .refresh(refresh)?
+    invisi_sdk_examples::refresh_receipt_ranges(&session, refresh)?
         .decrypt(&invisi_sdk_examples::AppDecryptor)?;
     let recipient = Wallet::from_address(&env::var("RECIPIENT_ADDRESS")?)?;
     let amount = U256::from_str_radix(&env::var("AMOUNT")?, 10)?;

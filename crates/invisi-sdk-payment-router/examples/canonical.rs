@@ -222,7 +222,7 @@ pub async fn quote_token_before_proof<T: RpcTransport>(
     prover: &dyn Prover,
     mut preparation: RouterPaymentPreparation,
     intent: Intent,
-    now: u64,
+    now: &dyn Fn() -> u64,
     max_fee_amount: U256,
     sign: impl FnOnce(B256) -> Result<Bytes>,
 ) -> Result<(Payment, RouterEnvelope, SignedQuote)> {
@@ -239,7 +239,7 @@ pub async fn quote_token_before_proof<T: RpcTransport>(
             .await?;
         let draft_envelope = draft.draft_relay_envelope(Permit::default())?;
         let _local_preview = draft.estimate_gas(false, 0, None)?;
-        match signed_relay_quote(relay, &draft, &draft_envelope, now, max_fee_amount)? {
+        match signed_relay_quote(relay, &draft, &draft_envelope, now(), max_fee_amount)? {
             RelayQuote::RebuildWithFee(fee) => {
                 preparation.fee.amount = fee
                     .fee_amount
@@ -247,7 +247,7 @@ pub async fn quote_token_before_proof<T: RpcTransport>(
                     .map_err(|_| Error::Invalid("invalid fee"))?;
                 preparation.fee.recipient = fee.fee_recipient;
             }
-            RelayQuote::Ready(quote) => {
+            RelayQuote::Ready(_reviewed_quote) => {
                 let ready = prepared.prove(prover, false).map_err(Error::Preparation)?;
                 let payment = client
                     .prepare_canonical(
@@ -256,11 +256,14 @@ pub async fn quote_token_before_proof<T: RpcTransport>(
                         draft.route().clone(),
                     )
                     .await?;
+                // Renew only the already approved intent after potentially slow proving.
+                // get_quote authenticates the unchanged fee, route, cap and semantic hash.
+                let quote = relay.get_quote(&draft, &draft_envelope, now())?;
                 let signature = sign(payment.digest(payment.chain_id()))?;
                 let envelope = payment.relay_envelope(Permit::default(), signature)?;
-                relay.verify_quote(&payment, &envelope, &quote, now)?;
+                relay.verify_quote(&payment, &envelope, &quote, now())?;
                 simulate_envelope(client, &payment, &envelope, None).await?;
-                return Ok((payment, envelope, *quote));
+                return Ok((payment, envelope, quote));
             }
         }
     }

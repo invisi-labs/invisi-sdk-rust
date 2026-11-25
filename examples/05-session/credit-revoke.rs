@@ -108,14 +108,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // Public revocation needs EVM owner consent, not a private circuit proof.
+    // Public revocation exports through calldata(), which checks owner consent and live grant state.
     if matches!(operation.phase(), sdk::Phase::Prepared) {
         if caller != session.wallet().owner_address() {
             let request = operation.export_revocation_signing_request()?;
             let signature = invisi_sdk_examples::sign_authorization(&request)?;
             operation = operation.with_revocation_signature(signature)?;
         }
-        operation = operation.ready()?;
     }
 
     // Export fences cancellation before exposing a transaction that the host could submit.

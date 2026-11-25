@@ -4,7 +4,7 @@ These five native Rust binaries are compile-checked host integration recipes for
 canonical API in 1.3.3. Their `main`
 functions only print guidance: running with or without arguments opens no RPC,
 wallet, credential file, prover or Broadcaster. They are not configured live demos.
-A host must invoke the exported functions with its own real capabilities. The SDK
+A host must invoke the exported functions with its own real capabilities. The Core RPC and native prover adapters perform blocking work. An asynchronous host must run the composite recipe in a blocking bridge; for example, use `tokio::task::block_in_place` on a multithread runtime while polling the Router future with a local executor. Creating or invoking the synchronous RPC adapter directly inside an ordinary async worker can panic. A current-thread Tokio runtime does not support that blocking bridge. The SDK
 has no browser wallet or universal EIP-7702 transaction signer to substitute here.
 The legacy crate examples remain available.
 
